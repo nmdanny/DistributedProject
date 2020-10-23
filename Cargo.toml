@@ -1,0 +1,14 @@
+[package]
+name = "practical_ex1"
+version = "0.1.0"
+authors = ["Daniel Kerbel <nmdanny@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0.117", features = ["derive"] }
+bincode = "1.3.1"
+actix = "0.10.0"
+actix-rt = "1.1" # <-- Runtime for actix
+actix_derive = "0.5.0"
