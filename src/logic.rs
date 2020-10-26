@@ -2,12 +2,8 @@ use crate::{
     ClientRequest, Peer, ServerResponse, ServerState, WrappedClientRequest, WrappedServerResponse,
 };
 
-impl Peer {
-    pub async fn push_message(&self, message: &str) {}
-}
 
 impl ServerState {
-    pub async fn broadcast_new_message(&self, message: &str) {}
 
     pub async fn handle_request(
         &mut self,

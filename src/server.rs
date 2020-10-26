@@ -6,24 +6,21 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender, Send
 use futures::select;
 
 use futures::prelude::*;
-use serde_json::Value;
-use std::borrow::BorrowMut;
 use tokio::net::TcpListener;
-use tokio_serde::formats::{Json};
-use tokio_util::codec::LengthDelimitedCodec;
-use tokio_serde::Framed;
+
+
 
 pub async fn accept_loop() -> std::io::Result<()> {
     let mut socket = TcpListener::bind(("0.0.0.0", 8080)).await?;
 
 
     // channel for communicating with core logic
-    let (mut logic_sender, logic_receiver) = unbounded::<RequestWithSender>();
+    let (logic_sender, logic_receiver) = unbounded::<RequestWithSender>();
 
 
     // channel for communication with broadcaster
     let (mut res_sender_sender, res_sender_receiver) = unbounded::<UnboundedSender<WrappedServerResponse>>();
-    let (mut broadcast_msg_sender, broadcast_msg_receiver) = unbounded::<WrappedServerResponse>();
+    let (broadcast_msg_sender, broadcast_msg_receiver) = unbounded::<WrappedServerResponse>();
     spawn_and_log_error(async move {
         broadcaster_loop(res_sender_receiver, broadcast_msg_receiver).await
     });
@@ -36,12 +33,12 @@ pub async fn accept_loop() -> std::io::Result<()> {
     info!("Server started on {}", socket.local_addr().unwrap());
     while let Some(conn) = socket.try_next().await? {
         trace!("Received connection {:?}", conn);
-        let (mut read_h, write_h) = split_peer_stream(conn);
+        let (read_h, write_h) = split_peer_stream(conn);
 
         // set up channels for sending responses/broadcasts to this peer
         let (res_sender, res_receiver) = unbounded::<WrappedServerResponse>();
 
-        res_sender_sender.send(res_sender.clone()).await;
+        res_sender_sender.send(res_sender.clone()).await.unwrap();
 
         // spawn a task to handle reading from the connection
         let logic_sender = logic_sender.clone();
