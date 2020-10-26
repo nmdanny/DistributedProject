@@ -5,30 +5,12 @@ By Daniel Kerbel(CSE user `danielkerbel`)
 
 ## Framework
 
-We'll build a framework for modelling unreliable channels.
+We'll build a framework for modelling unreliable channels. The transport will be TCP, but we will not rely on the built
+in reliability mechanisms of TCP, or the way IP packets are routed - we'll only look at the payload of the packets, which are JSON objects representing
+messages. Therefore, these messages will form the lowest layer of our simulated network stack.
 
-I will use the Rust language, and the [Actix](https://github.com/actix/actix) library which provides an actor framework.
-
-From [wikipedia](https://en.wikipedia.org/wiki/Actor_model):
-
-> The actor model in computer science is a mathematical model of concurrent computation that treats actor as the 
-> universal primitive of concurrent computation. In response to a message it receives, an actor can: make local decisions,
-> create more actors, send more messages, and determine how to respond to the next message received. 
-> Actors may modify their own private state, but can only affect each other indirectly through messaging 
-> (removing the need for lock-based synchronization). 
-
-There's a wide array of possibilities for implementing actors:
-
-- Threads or async coroutines that live within a single process.
- 
-- Processes communicating via IPC within a single machine
-
-- Processes communicating via a network protocol(TCP, HTTP, etc) over multiple machines
-
-In this exercise, the entire simulation will run in a single process - I did not want to use a "real" networking stack
-(e.g, HTTP or TCP) because implementing real adversaries over a real network(e.g, by implementing a HTTP proxy to perform MITM) seems out of scope
-for this course, and since we wish to build safe systems from "first principles", using established protocols that already
-provide many security/liveliness guarantees(e.g TLS for authentication, TCP retransmission, etc..) would contrast with this goal.
+This framework is coded in Rust, using the Tokio library which allows for asynchronous IO using futures(async-await),
+and some helper libraries that deal with message framing(turning byte streams into objects)
 
 
 ## Solution
@@ -36,20 +18,43 @@ provide many security/liveliness guarantees(e.g TLS for authentication, TCP retr
 We wish to attain safety & liveness within the setting specified in the PDF.
 We'll deal with the adversary as follows:
 
-1. Message drop - whenever a client transmits a message, he will wait for the server to respond/broadcast said message within a certain amount of time
-(due to the synchrony assumption, said bound is known), if no response is given, the message will be retransmitted and
-this process will repeat. As long as probability(message-drop) < 1, the message will eventually arrive, thus liveness
-    is guaranteed.
+First, every message(request/response) will be identified by the client who initiated it
+Secondly, every client will maintain a counter that is incremented upon each successful request, and the request(and response) will
+contain said counter at time of request.
 
-2. Message reordering - each message will be numbered, starting from 1.
-   For each client, the server will maintain a counter and a dictionary mapping message number to message.
+The overall flow will be clients sending requests, and then waiting for an appropriate broadcast before proceeding
 
-    Whenever the server encounters a message whose number is higher than the client's counter, it will be placed into the dictionary,
-    and the server will periodically inspect the dictionary until it finds a message which the expected number(such message
-    is guaranteed to arrive eventually), then it will process it.
-    
-3. Message duplication - whenever the server encounters a message whose number is smaller than its client's counter, it will ignore the message.
-    
+### Message drop
+
+
+Due to synchrony assumption, clients can assume that the server will receive their request and broadcast their message in a certain amount of time.
+If not, they'll simply retransmit the message(with the original counter)
+
+This handles both request drops or response drops involving the initiating client
+
+A more complicated issue is that not all clients may receive a broadcast chat message, resulting in an inconsistent
+chat view. To deal with this, clients will periodically ask for the entire log.
+
+### Message re-ordering
+
+On the server's side, the server will maintain a counter with each client, and process requests in the order of their numbers.
+Requests whose number is higher than the counter will enter a queue and only be processed when it is their turn. This ensures
+each client's messages will appear in the log in the order they came. 
+
+
+### Message duplication
+
+Since each message is identified by the initiating client and numbered, and the server maintains a counter of processed
+messages for each client, the server will be able to determine duplicate messages(their number is smaller than the counter)
+
+Note that some duplicates might be legitimate in the sense that they were initiated by a client due to a dropped/re-ordered
+response. Therefore, the server will respond to them as if they are legitimate, but without changing his state.
+
+To do this, the server will remember the last response for each client, and re-transmit said response upon receiving
+a duplicate request - note that only the last response is sufficient, because duplicate messages that are older were 
+definitely made by the adversary, as a client does not proceed before receiving a response to his last message.
+
+
 
 
 
