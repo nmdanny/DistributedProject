@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 
+use rand::prelude::*;
 use dist_lib::{ClientRequest, WrappedClientRequest, WrappedServerResponse, create_server_stream};
 use futures::prelude::*;
 use tokio::net::TcpStream;
@@ -12,7 +13,7 @@ async fn main() -> std::io::Result<()> {
     let mut conn = create_server_stream(socket);
 
     let req = WrappedClientRequest {
-        client_id: 1337,
+        client_id: random(),
         sequence_num: 1,
         request: ClientRequest::Write {
             contents: "Hello world".to_string(),

@@ -3,6 +3,8 @@ extern crate log;
 
 use dist_lib::*;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender, SendError};
+use futures::select;
+
 use futures::prelude::*;
 use serde_json::Value;
 use std::borrow::BorrowMut;
@@ -14,14 +16,21 @@ use tokio_serde::Framed;
 pub async fn accept_loop() -> std::io::Result<()> {
     let mut socket = TcpListener::bind(("0.0.0.0", 8080)).await?;
 
-    let (broadcast_sender, broadcast_receiver) = unbounded::<WrappedServerResponse>();
 
     // channel for communicating with core logic
     let (mut logic_sender, logic_receiver) = unbounded::<RequestWithSender>();
 
+
+    // channel for communication with broadcaster
+    let (mut res_sender_sender, res_sender_receiver) = unbounded::<UnboundedSender<WrappedServerResponse>>();
+    let (mut broadcast_msg_sender, broadcast_msg_receiver) = unbounded::<WrappedServerResponse>();
+    spawn_and_log_error(async move {
+        broadcaster_loop(res_sender_receiver, broadcast_msg_receiver).await
+    });
+
     // spawn a task to deal with the core logic(request-response/broadcast flow)
     spawn_and_log_error(async move {
-        request_handler(logic_receiver, broadcast_sender.clone()).await
+        request_handler(logic_receiver, broadcast_msg_sender.clone()).await
     });
 
     info!("Server started on {}", socket.local_addr().unwrap());
@@ -31,7 +40,8 @@ pub async fn accept_loop() -> std::io::Result<()> {
 
         // set up channels for sending responses/broadcasts to this peer
         let (res_sender, res_receiver) = unbounded::<WrappedServerResponse>();
-        let broadcast_sender = res_sender.clone();
+
+        res_sender_sender.send(res_sender.clone()).await;
 
         // spawn a task to handle reading from the connection
         let logic_sender = logic_sender.clone();
@@ -68,6 +78,22 @@ pub async fn request_handler(mut receiver: UnboundedReceiver<RequestWithSender>,
         };
     }
     Ok(())
+}
+
+async fn broadcaster_loop(mut sender_receiver: UnboundedReceiver<UnboundedSender<WrappedServerResponse>>,
+                          mut message_receiver: UnboundedReceiver<WrappedServerResponse>) -> Result<(), SendError> {
+    let mut senders = Vec::<UnboundedSender<WrappedServerResponse>>::new();
+    loop {
+        select! {
+           sender = sender_receiver.next() => senders.push(sender.unwrap()),
+           msg = message_receiver.next() => {
+
+            for sender in &mut senders {
+                sender.send(msg.clone().unwrap()).await?;
+            }
+           }
+        };
+    }
 }
 
 async fn connection_reader_loop(mut logic_sender: UnboundedSender<RequestWithSender>, mut read_h: ReqReadStream,
