@@ -1,9 +1,10 @@
 pub mod logic;
 pub mod types;
+pub mod util;
 
 pub use logic::*;
 pub use types::*;
+pub use util::*;
 
 #[macro_use]
-extern crate log;
-
+pub extern crate log;
