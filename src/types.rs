@@ -4,7 +4,7 @@ use std::collections::HashMap;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientRequest {
     Write { contents: String },
-    Read { index: usize },
+    Read
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -17,7 +17,7 @@ pub struct WrappedClientRequest {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ServerResponse {
     WriteOk { index: usize, contents: String },
-    ReadOk { contents: String },
+    ReadOk { contents: Vec<String> },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

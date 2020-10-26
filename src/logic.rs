@@ -13,7 +13,7 @@ impl ServerState {
             .peers
             .entry(request.client_id)
             .or_insert(Peer::new(request.client_id));
-        if request.sequence_num - 1 == peer.next_sequence_num {
+        if request.sequence_num == peer.next_sequence_num - 1{
             let prev_response = peer.last_response.as_ref().unwrap().clone();
             warn!(
                 "request {:?} is duplicate, older by 1 seq num, re-transmitting response",
@@ -29,10 +29,11 @@ impl ServerState {
         }
         info!("handling request {:?}", request);
         let response = match request.request {
-            ClientRequest::Read { index } => peer.wrap_response(ServerResponse::ReadOk {
-                contents: self.log[index].clone(),
+            ClientRequest::Read => peer.wrap_response(ServerResponse::ReadOk {
+                contents: self.log.clone(),
             }),
             ClientRequest::Write { contents } => {
+                println!("{}: {}", peer.client_id, contents);
                 self.log.push(contents.clone());
                 peer.wrap_response(ServerResponse::WriteOk {
                     contents,

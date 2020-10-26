@@ -5,8 +5,8 @@ use tokio_serde::{Framed, SymmetricallyFramed};
 use tokio::net::TcpStream;
 use crate::{WrappedClientRequest, WrappedServerResponse};
 use serde::{Serialize, Deserialize};
-use tokio::net::tcp::{WriteHalf, ReadHalf, OwnedWriteHalf, OwnedReadHalf};
-use futures::{StreamExt, Future};
+use tokio::net::tcp::{OwnedWriteHalf, OwnedReadHalf};
+use futures::prelude::*;
 
 pub type PeerStream = tokio_serde::Framed<tokio_util::codec::Framed<TcpStream, LengthDelimitedCodec>, WrappedClientRequest, WrappedServerResponse, Json::<WrappedClientRequest, WrappedServerResponse>>;
 
