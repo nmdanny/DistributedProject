@@ -9,6 +9,9 @@ use futures::prelude::*;
 use tokio::net::TcpListener;
 
 
+type Sender<T> = UnboundedSender<T>;
+type Receiver<T> = UnboundedReceiver<T>;
+
 
 pub async fn accept_loop() -> std::io::Result<()> {
     let mut socket = TcpListener::bind(("0.0.0.0", 8080)).await?;
@@ -19,7 +22,7 @@ pub async fn accept_loop() -> std::io::Result<()> {
 
 
     // channel for communication with broadcaster
-    let (mut res_sender_sender, res_sender_receiver) = unbounded::<UnboundedSender<WrappedServerResponse>>();
+    let (mut res_sender_sender, res_sender_receiver) = unbounded::<Sender<WrappedServerResponse>>();
     let (broadcast_msg_sender, broadcast_msg_receiver) = unbounded::<WrappedServerResponse>();
     spawn_and_log_error(async move {
         broadcaster_loop(res_sender_receiver, broadcast_msg_receiver).await
@@ -55,11 +58,11 @@ pub async fn accept_loop() -> std::io::Result<()> {
     Ok(())
 }
 
-pub type RequestWithSender = (WrappedClientRequest, UnboundedSender<WrappedServerResponse>);
+pub type RequestWithSender = (WrappedClientRequest, Sender<WrappedServerResponse>);
 
 
 // wires up the core logic with messaging
-pub async fn request_handler(mut receiver: UnboundedReceiver<RequestWithSender>, mut broadcast: UnboundedSender<WrappedServerResponse>)
+pub async fn request_handler(mut receiver: Receiver<RequestWithSender>, mut broadcast: Sender<WrappedServerResponse>)
     -> Result<(), SendError> {
     let mut state = ServerState::new();
     while let Some((request, mut res_sender)) = receiver.next().await {
@@ -77,9 +80,9 @@ pub async fn request_handler(mut receiver: UnboundedReceiver<RequestWithSender>,
     Ok(())
 }
 
-async fn broadcaster_loop(mut sender_receiver: UnboundedReceiver<UnboundedSender<WrappedServerResponse>>,
-                          mut message_receiver: UnboundedReceiver<WrappedServerResponse>) -> Result<(), SendError> {
-    let mut senders = Vec::<UnboundedSender<WrappedServerResponse>>::new();
+async fn broadcaster_loop(mut sender_receiver: Receiver<Sender<WrappedServerResponse>>,
+                          mut message_receiver: Receiver<WrappedServerResponse>) -> Result<(), SendError> {
+    let mut senders = Vec::<Sender<WrappedServerResponse>>::new();
     loop {
         select! {
            sender = sender_receiver.next() => senders.push(sender.unwrap()),
@@ -93,8 +96,8 @@ async fn broadcaster_loop(mut sender_receiver: UnboundedReceiver<UnboundedSender
     }
 }
 
-async fn connection_reader_loop(mut logic_sender: UnboundedSender<RequestWithSender>, mut read_h: ReqReadStream,
-                                res_sender: UnboundedSender<WrappedServerResponse>) -> Result<(), SendError> {
+async fn connection_reader_loop(mut logic_sender: Sender<RequestWithSender>, mut read_h: ReqReadStream,
+                                res_sender: Sender<WrappedServerResponse>) -> Result<(), SendError> {
     loop {
         match read_h.try_next().await {
             Err(err) => {
@@ -113,7 +116,7 @@ async fn connection_reader_loop(mut logic_sender: UnboundedSender<RequestWithSen
     Ok(())
 }
 
-async fn connection_writer_loop(mut recv: UnboundedReceiver<WrappedServerResponse>, mut stream: ResWriteStream) -> std::io::Result<()>{
+async fn connection_writer_loop(mut recv: Receiver<WrappedServerResponse>, mut stream: ResWriteStream) -> std::io::Result<()>{
     while let Some(response) = recv.next().await {
         stream.send(response).await?;
     }
