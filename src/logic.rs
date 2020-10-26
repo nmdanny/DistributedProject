@@ -12,7 +12,7 @@ impl ServerState {
     pub async fn handle_request(
         &mut self,
         request: WrappedClientRequest,
-    ) -> Result<WrappedServerResponse, ()> {
+    ) -> Option<WrappedServerResponse> {
         let peer = self
             .peers
             .entry(request.client_id)
@@ -23,13 +23,13 @@ impl ServerState {
                 "request {:?} is duplicate, older by 1 seq num, re-transmitting response",
                 request
             );
-            return Ok(prev_response);
+            return Some(prev_response);
         } else if request.sequence_num < peer.next_sequence_num {
             warn!(
                 "request {:?} is duplicate, older by more than 1 seq num, ignoring",
                 request
             );
-            return Err(());
+            return None;
         }
         info!("handling request {:?}", request);
         let response = match request.request {
@@ -46,6 +46,6 @@ impl ServerState {
         };
         peer.last_response = Some(response.clone());
         peer.next_sequence_num += 1;
-        Ok(response)
+        Some(response)
     }
 }

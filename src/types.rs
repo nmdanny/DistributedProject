@@ -77,7 +77,7 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    fn new() -> ServerState {
+    pub fn new() -> ServerState {
         ServerState {
             peers: HashMap::new(),
             log: Vec::new(),
