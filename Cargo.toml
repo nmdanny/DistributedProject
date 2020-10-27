@@ -35,5 +35,9 @@ path = "src/server.rs"
 name = "client"
 path = "src/client.rs"
 
+[[bin]]
+name = "adversary"
+path = "src/adversary.rs"
+
 [build-dependencies]
 tonic-build = "0.3"

@@ -2,24 +2,17 @@
 #[macro_use]
 extern crate log;
 
-use futures::channel::mpsc;
-use futures::select;
-
 use futures::prelude::*;
 use tokio::net::TcpListener;
 
 use tonic::{transport::Server, Request, Response, Status};
 use std::collections::HashMap;
 use std::sync::{Arc};
-use std::borrow::BorrowMut;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
-use std::net::SocketAddr;
 
 tonic::include_proto!("chat");
 
-type Sender<T> = mpsc::UnboundedSender<T>;
-type Receiver<T> = mpsc::UnboundedReceiver<T>;
 
 const BROADCAST_CHANNEL_SIZE : usize = 32;
 
@@ -27,7 +20,7 @@ const BROADCAST_CHANNEL_SIZE : usize = 32;
 pub struct ServerState {
     clients: RwLock<HashMap<u64, Peer>>,
     log: RwLock<Vec<String>>,
-    chat_broadcast: RwLock<broadcast::Sender<Result<ChatUpdated, Status>>>
+    chat_broadcast: broadcast::Sender<Result<ChatUpdated, Status>>
 }
 
 impl ServerState {
@@ -44,7 +37,7 @@ impl ServerState {
         ServerState {
             clients: Default::default(),
             log: Default::default(),
-            chat_broadcast: RwLock::new(tx)
+            chat_broadcast: tx
         }
     }
 }
@@ -69,8 +62,6 @@ impl Peer {
 }
 
 struct ChatServerImp(Arc<ServerState>);
-
-static PEER_BROADCAST_CHANNEL_SIZE : u64 = 32;
 
 enum RequestValidity {
     Ok,
@@ -110,7 +101,7 @@ impl chat_server::Chat for ChatServerImp {
     async fn subscribe(&self, request: Request<ConnectRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         let mut peers = self.0.clients.write();
         let client_id = request.into_inner().client_id;
-        let rx = self.0.chat_broadcast.write().subscribe().into_stream()
+        let rx = self.0.chat_broadcast.subscribe().into_stream()
             .filter_map(|f| future::ready(f.ok()));
         peers.entry(client_id).or_insert(Peer::new(client_id));
         Ok(Response::new(rx))
@@ -125,7 +116,7 @@ impl chat_server::Chat for ChatServerImp {
             contents: req.contents.clone(),
             index: (self.0.log.read().len() - 1) as u64
         };
-        self.0.chat_broadcast.read().send(Ok(res.clone()));
+        let _res = self.0.chat_broadcast.send(Ok(res.clone()));
         Ok(Response::new(res))
     }
 
@@ -135,18 +126,19 @@ impl chat_server::Chat for ChatServerImp {
     }
 }
 use tokio_compat_02::FutureExt;
+use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
 
-    let addr : SocketAddr = ([0, 0, 0, 0], 8080).into();
     let server_state = ChatServerImp(Arc::new(ServerState::new()));
     let chat_service = chat_server::ChatServer::new(server_state);
 
+
     Server::builder()
         .add_service(chat_service)
-        .serve(addr)
+        .serve("[::]:8950".parse().unwrap())
         .compat()
         .await?;
 
