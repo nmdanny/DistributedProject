@@ -1,137 +1,155 @@
+#![feature(type_alias_impl_trait)]
 #[macro_use]
 extern crate log;
 
-use dist_lib::*;
-use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender, SendError};
+use futures::channel::mpsc;
 use futures::select;
 
 use futures::prelude::*;
 use tokio::net::TcpListener;
 
+use tonic::{transport::Server, Request, Response, Status};
+use std::collections::HashMap;
+use std::sync::{Arc};
+use std::borrow::BorrowMut;
+use parking_lot::RwLock;
+use tokio::sync::broadcast;
+use std::net::SocketAddr;
 
-type Sender<T> = UnboundedSender<T>;
-type Receiver<T> = UnboundedReceiver<T>;
+tonic::include_proto!("chat");
 
+type Sender<T> = mpsc::UnboundedSender<T>;
+type Receiver<T> = mpsc::UnboundedReceiver<T>;
 
-pub async fn accept_loop() -> std::io::Result<()> {
-    let mut socket = TcpListener::bind(("0.0.0.0", 8080)).await?;
+const BROADCAST_CHANNEL_SIZE : usize = 32;
 
+#[derive(Debug)]
+pub struct ServerState {
+    clients: RwLock<HashMap<u64, Peer>>,
+    log: RwLock<Vec<String>>,
+    chat_broadcast: RwLock<broadcast::Sender<Result<ChatUpdated, Status>>>
+}
 
-    // channel for communicating with core logic
-    let (logic_sender, logic_receiver) = unbounded::<RequestWithSender>();
+impl ServerState {
+    pub fn new() -> ServerState {
+        let (tx,mut rx) = broadcast::channel::<Result<ChatUpdated, Status>>(BROADCAST_CHANNEL_SIZE);
+        tokio::spawn(async move {
 
-
-    // channel for communication with broadcaster
-    let (mut res_sender_sender, res_sender_receiver) = unbounded::<Sender<WrappedServerResponse>>();
-    let (broadcast_msg_sender, broadcast_msg_receiver) = unbounded::<WrappedServerResponse>();
-    spawn_and_log_error(async move {
-        broadcaster_loop(res_sender_receiver, broadcast_msg_receiver).await
-    });
-
-    // spawn a task to deal with the core logic(request-response/broadcast flow)
-    spawn_and_log_error(async move {
-        request_handler(logic_receiver, broadcast_msg_sender.clone()).await
-    });
-
-    info!("Server started on {}", socket.local_addr().unwrap());
-    while let Some(conn) = socket.try_next().await? {
-        trace!("Received connection {:?}", conn);
-        let (read_h, write_h) = split_peer_stream(conn);
-
-        // set up channels for sending responses/broadcasts to this peer
-        let (res_sender, res_receiver) = unbounded::<WrappedServerResponse>();
-
-        res_sender_sender.send(res_sender.clone()).await.unwrap();
-
-        // spawn a task to handle reading from the connection
-        let logic_sender = logic_sender.clone();
-        spawn_and_log_error(async move {
-            connection_reader_loop(logic_sender, read_h, res_sender.clone()).await
+            while let Ok(res) = rx.recv().await {
+                let chat_updated = res.unwrap();
+                let metadata = chat_updated.meta.unwrap();
+                println!("({}) {} : {}", chat_updated.index, metadata.client_id, chat_updated.contents);
+            }
         });
-
-        // spawn a task to handle writing to the connection
-        spawn_and_log_error(async move {
-            connection_writer_loop(res_receiver, write_h).await
-        });
-
-    }
-    Ok(())
-}
-
-pub type RequestWithSender = (WrappedClientRequest, Sender<WrappedServerResponse>);
-
-
-// wires up the core logic with messaging
-pub async fn request_handler(mut receiver: Receiver<RequestWithSender>, mut broadcast: Sender<WrappedServerResponse>)
-    -> Result<(), SendError> {
-    let mut state = ServerState::new();
-    while let Some((request, mut res_sender)) = receiver.next().await {
-        let wrapped_response = state.handle_request(request).await;
-
-        if wrapped_response.is_none() {
-            continue;
-        }
-        let wrapped_response = wrapped_response.unwrap();
-        match wrapped_response.response {
-            ServerResponse::ReadOk { .. } => res_sender.send(wrapped_response).await?,
-            ServerResponse::WriteOk { .. } => broadcast.send(wrapped_response).await?
-        };
-    }
-    Ok(())
-}
-
-async fn broadcaster_loop(mut sender_receiver: Receiver<Sender<WrappedServerResponse>>,
-                          mut message_receiver: Receiver<WrappedServerResponse>) -> Result<(), SendError> {
-    let mut senders = Vec::<Sender<WrappedServerResponse>>::new();
-    loop {
-        select! {
-           sender = sender_receiver.next() => senders.push(sender.unwrap()),
-           msg = message_receiver.next() => {
-
-            for sender in &mut senders {
-                sender.send(msg.clone().unwrap()).await?;
-            }
-           }
-        };
-    }
-}
-
-async fn connection_reader_loop(mut logic_sender: Sender<RequestWithSender>, mut read_h: ReqReadStream,
-                                res_sender: Sender<WrappedServerResponse>) -> Result<(), SendError> {
-    loop {
-        match read_h.try_next().await {
-            Err(err) => {
-                error!("Error trying to get request: {:?}, aborting", err);
-                break;
-            }
-            Ok(Some(msg)) => {
-                trace!("Got client request: {:?}", msg);
-                logic_sender.send((msg, res_sender.clone())).await?;
-            }
-            Ok(None) => {
-                break;
-            }
+        ServerState {
+            clients: Default::default(),
+            log: Default::default(),
+            chat_broadcast: RwLock::new(tx)
         }
     }
-    Ok(())
 }
 
-async fn connection_writer_loop(mut recv: Receiver<WrappedServerResponse>, mut stream: ResWriteStream) -> std::io::Result<()>{
-    while let Some(response) = recv.next().await {
-        stream.send(response).await?;
+#[derive(Debug, Clone)]
+pub struct Peer {
+    pub client_id: u64,
+    pub next_sequence_num: u64,
+    pub last_write_index: Option<u64>,
+    pub to_be_scheduled: HashMap<u64, WriteRequest>
+}
+
+impl Peer {
+    pub fn new(client_id: u64) -> Peer {
+        Peer {
+            client_id,
+            next_sequence_num: 1,
+            last_write_index: None,
+            to_be_scheduled: HashMap::new()
+        }
     }
-    Ok(())
 }
 
+struct ChatServerImp(Arc<ServerState>);
 
+static PEER_BROADCAST_CHANNEL_SIZE : u64 = 32;
 
+enum RequestValidity {
+    Ok,
+    NonRegisteredClient,
+    DuplicateRequestOldByOne,
+    DuplicateRequestVeryOld,
+    InTheFuture,
+}
 
+impl ServerState {
+    fn is_request_valid(&self, metadata: PacketMetadata) -> RequestValidity {
+        let clients = self.clients.read();
+        if !clients.contains_key(&metadata.client_id) {
+            return RequestValidity::NonRegisteredClient;
+        }
+        let peer = clients.get(&metadata.client_id).unwrap();
+        if metadata.sequence_num == peer.next_sequence_num {
+            return RequestValidity::Ok;
+        }
+        if metadata.sequence_num == peer.next_sequence_num - 1 {
+            return RequestValidity::DuplicateRequestOldByOne;
+        }
+        if metadata.sequence_num < peer.next_sequence_num - 1 {
+            return RequestValidity::DuplicateRequestVeryOld;
+        }
+        if metadata.sequence_num > peer.next_sequence_num {
+            return RequestValidity::InTheFuture;
+        }
+        unreachable!()
+    }
+}
+
+#[tonic::async_trait]
+impl chat_server::Chat for ChatServerImp {
+    type SubscribeStream = impl Stream<Item = Result<ChatUpdated, Status>>;
+
+    async fn subscribe(&self, request: Request<ConnectRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
+        let mut peers = self.0.clients.write();
+        let client_id = request.into_inner().client_id;
+        let rx = self.0.chat_broadcast.write().subscribe().into_stream()
+            .filter_map(|f| future::ready(f.ok()));
+        peers.entry(client_id).or_insert(Peer::new(client_id));
+        Ok(Response::new(rx))
+
+    }
+
+    async fn write(&self, request: Request<WriteRequest>) -> Result<Response<ChatUpdated>, Status> {
+        let req = request.into_inner();
+        self.0.log.write().push(req.contents.clone());
+        let res = ChatUpdated {
+            meta: req.meta.clone(),
+            contents: req.contents.clone(),
+            index: (self.0.log.read().len() - 1) as u64
+        };
+        self.0.chat_broadcast.read().send(Ok(res.clone()));
+        Ok(Response::new(res))
+    }
+
+    async fn read(&self, request: Request<LogRequest>) -> Result<Response<LogResponse>, Status> {
+        let metadata = request.into_inner().meta.unwrap();
+        Ok(Response::new(LogResponse { meta: Some(metadata), contents: self.0.log.read().clone() }))
+    }
+}
+use tokio_compat_02::FutureExt;
 
 #[tokio::main]
-async fn main() -> std::io::Result<()>{
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
-    let server_loop = tokio::spawn(accept_loop());
-    server_loop.await??;
+
+    let addr : SocketAddr = ([0, 0, 0, 0], 8080).into();
+    let server_state = ChatServerImp(Arc::new(ServerState::new()));
+    let chat_service = chat_server::ChatServer::new(server_state);
+
+    Server::builder()
+        .add_service(chat_service)
+        .serve(addr)
+        .compat()
+        .await?;
+
     tokio::signal::ctrl_c()
         .await
         .expect("couldn't listen to ctrl-c");

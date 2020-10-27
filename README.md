@@ -33,7 +33,8 @@ If not, they'll simply retransmit the message(with the original counter)
 This handles both request drops or response drops involving the initiating client
 
 A more complicated issue is that not all clients may receive a broadcast chat message, resulting in an inconsistent
-chat view. To deal with this, clients will periodically ask for the entire log.
+chat view. To deal with this, clients will ask for the entire log if they detect an inconsistency(they recognize
+that a message was skipped)
 
 ### Message re-ordering
 
