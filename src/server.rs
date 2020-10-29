@@ -66,7 +66,7 @@ impl Peer {
 
 struct ChatServerImp(Arc<ServerState>);
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 enum RequestValidity {
     Ok,
     DuplicateRequestOldByOne,
@@ -148,6 +148,9 @@ impl chat_server::Chat for ChatServerImp {
         let mut validity = self.0.is_request_valid(md);
         let mut clients = self.0.clients.write();
         let mut peer = clients.get_mut(&md.client_id).ok_or(Status::unauthenticated("You must subscribe before sending messages"))?;
+        if validity != RequestValidity::Ok {
+            warn!("Detected invalid request {:?}, reason: {:?}", req, validity);
+        }
         match validity {
         RequestValidity::Ok => {
                 self.0.log.write().push(req.contents.clone());
