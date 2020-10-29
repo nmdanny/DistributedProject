@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 
 use tokio_compat_02::FutureExt;
 use std::net::SocketAddr;
+use futures::channel::oneshot;
 use tonic::{transport::Server, Request, Response, Status, Code};
 use std::collections::HashMap;
 use std::sync::{Arc};
@@ -44,12 +45,12 @@ impl ServerState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Peer {
     pub client_id: u64,
     pub next_sequence_num: u64,
     pub last_write_index: Option<u64>,
-    pub to_be_scheduled: HashMap<u64, WriteRequest>
+    pub to_be_scheduled: HashMap<u64, oneshot::Sender<()>>
 }
 
 impl Peer {
@@ -80,6 +81,12 @@ impl From<WriteRequest> for PacketMetadata {
     }
 }
 
+impl AsRef<PacketMetadata> for WriteRequest {
+    fn as_ref(&self) -> &PacketMetadata {
+        self.meta.as_ref().unwrap()
+    }
+}
+
 impl From<LogRequest> for PacketMetadata {
     fn from(req: LogRequest) -> Self {
         req.meta.unwrap()
@@ -104,6 +111,20 @@ impl ServerState {
         }
         unreachable!()
     }
+
+    async fn wait_for_request_turn<R: AsRef<PacketMetadata>>(&self, request: &R) {
+        let metadata: &PacketMetadata = request.as_ref();
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut clients = self.clients.write();
+            let peer = clients.get_mut(&metadata.client_id).unwrap();
+            if metadata.sequence_num <= peer.next_sequence_num {
+                return
+            }
+            peer.to_be_scheduled.insert(metadata.sequence_num, tx);
+        }
+        rx.await.unwrap();
+    }
 }
 
 #[tonic::async_trait]
@@ -122,25 +143,28 @@ impl chat_server::Chat for ChatServerImp {
 
     async fn write(&self, request: Request<WriteRequest>) -> Result<Response<ChatUpdated>, Status> {
         let req = request.into_inner();
+        self.0.wait_for_request_turn(&req).await;
         let md = &req.meta.as_ref().unwrap();
-        let validity = self.0.is_request_valid(md);
+        let mut validity = self.0.is_request_valid(md);
         let mut clients = self.0.clients.write();
         let mut peer = clients.get_mut(&md.client_id).ok_or(Status::unauthenticated("You must subscribe before sending messages"))?;
         match validity {
-            RequestValidity::Ok => {
-                info!("is valid");
+        RequestValidity::Ok => {
                 self.0.log.write().push(req.contents.clone());
-                info!("log updated");
                 let res = ChatUpdated {
                     meta: req.meta.clone(),
                     contents: req.contents.clone(),
                     index: (self.0.log.read().len() - 1) as u64
                 };
                 let _ = self.0.chat_broadcast.send(Ok(res.clone()));
-                info!("msg broadcast");
                 peer.last_write_index = Some(res.index);
                 peer.next_sequence_num += 1;
-                info!("return");
+
+                // if there's a message scheduled with the next sequence number, wake up
+                // the task responsible for handling it
+                if let Some(tx) = peer.to_be_scheduled.remove(&peer.next_sequence_num) {
+                    tx.send(());
+                }
                 Ok(Response::new(res))
             }
             RequestValidity::DuplicateRequestOldByOne => {
@@ -153,7 +177,7 @@ impl chat_server::Chat for ChatServerImp {
                 Ok(Response::new(res))
             },
             RequestValidity::DuplicateRequestVeryOld => Err(Status::already_exists("duplicate request whose response was received")),
-            RequestValidity::InTheFuture => Err(Status::unimplemented("todo handle requests from the future"))
+            RequestValidity::InTheFuture => unreachable!()
         }
     }
 
