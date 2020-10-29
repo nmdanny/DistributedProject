@@ -5,7 +5,6 @@ extern crate log;
 use futures::prelude::*;
 use tokio::net::TcpListener;
 
-use tokio_compat_02::FutureExt;
 use std::net::SocketAddr;
 use futures::channel::oneshot;
 use tonic::{transport::Server, Request, Response, Status, Code};
@@ -117,7 +116,9 @@ impl ServerState {
         let (tx, rx) = oneshot::channel();
         {
             let mut clients = self.clients.write();
-            let peer = clients.get_mut(&metadata.client_id).unwrap();
+            let peer = clients.get_mut(&metadata.client_id).unwrap_or_else(|| {
+                panic!("Expected peer with client_id {}, no such peer registered", metadata.client_id);
+            });
             if metadata.sequence_num <= peer.next_sequence_num {
                 return
             }
@@ -137,6 +138,7 @@ impl chat_server::Chat for ChatServerImp {
         peers.entry(client_id).or_insert(Peer::new(client_id));
         let rx = self.0.chat_broadcast.subscribe().into_stream()
             .filter_map(|f| future::ready(f.ok()));
+        info!("Registered client of id {}", client_id);
         Ok(Response::new(rx))
 
     }
@@ -145,7 +147,7 @@ impl chat_server::Chat for ChatServerImp {
         let req = request.into_inner();
         self.0.wait_for_request_turn(&req).await;
         let md = &req.meta.as_ref().unwrap();
-        let mut validity = self.0.is_request_valid(md);
+        let validity = self.0.is_request_valid(md);
         let mut clients = self.0.clients.write();
         let mut peer = clients.get_mut(&md.client_id).ok_or(Status::unauthenticated("You must subscribe before sending messages"))?;
         if validity != RequestValidity::Ok {
@@ -201,7 +203,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Server::builder()
         .add_service(chat_service)
         .serve("[::1]:8950".parse().unwrap())
-        .compat()
         .await?;
 
     tokio::signal::ctrl_c()

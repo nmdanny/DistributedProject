@@ -2,7 +2,6 @@
 #[macro_use]
 extern crate log;
 
-use tokio_compat_02::FutureExt;
 
 use clap::{Clap, Arg};
 
@@ -20,6 +19,7 @@ use futures::lock::Mutex;
 use tokio::time::Duration;
 use rand::distributions::Distribution;
 use std::fmt::Debug;
+use futures::{TryFutureExt, AsyncReadExt};
 
 tonic::include_proto!("chat");
 
@@ -67,7 +67,7 @@ pub struct AdversaryState {
 impl AdversaryState {
     pub async fn new(settings: AdversarySettings) -> Result<Self, Box<dyn std::error::Error>> {
         // let client = ChatClient::connect(format!("http://[::]:{}", settings.server_port)).compat().await?;
-        let client = ChatClient::connect("http://[::1]:8950").compat().await?;
+        let client = ChatClient::connect("http://[::1]:8950").await?;
         Ok(AdversaryState {
             settings, client: Mutex::new(client)
         })
@@ -75,12 +75,7 @@ impl AdversaryState {
 }
 
 async fn sleep(time_ms: u64) {
-    // tokio::spawn(tokio::time::sleep(Duration::from_millis(time_ms))).compat().await;
-    // tokio::time::sleep(Duration::from_millis(time_ms)).compat().await;
-
-    tokio::task::spawn_blocking(move || {
-        std::thread::sleep(Duration::from_millis(time_ms));
-    }).compat().await;
+    tokio::time::delay_for(Duration::from_millis(time_ms)).await;
 }
 
 impl  AdversaryState {
@@ -170,7 +165,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Server::builder()
         .add_service(chat_service)
         .serve(addr.parse().unwrap())
-        .compat()
         .await?;
 
     tokio::signal::ctrl_c()
