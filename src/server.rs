@@ -9,6 +9,7 @@ use std::sync::{Arc};
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use crate::types::*;
+use std::fmt::Debug;
 
 
 const BROADCAST_CHANNEL_SIZE : usize = 32;
@@ -106,20 +107,28 @@ impl ServerState {
         unreachable!()
     }
 
-    async fn wait_for_request_turn<R: AsRef<PacketMetadata>>(&self, request: &R) {
+    fn ensure_valid_peer<R: AsRef<PacketMetadata>>(&self, request: &R) -> Result<(), Status> {
+        if self.clients.read().contains_key(&request.as_ref().client_id) {
+            return Ok(())
+        }
+        Err(Status::unauthenticated("Client must subscribe before doing any commands"))
+    }
+
+    async fn wait_for_request_turn<R: AsRef<PacketMetadata> + Debug>(&self, request: &R) {
         let metadata: &PacketMetadata = request.as_ref();
         let (tx, rx) = oneshot::channel();
         {
             let mut clients = self.clients.write();
-            let peer = clients.get_mut(&metadata.client_id).unwrap_or_else(|| {
-                panic!("Expected peer with client_id {}, no such peer registered", metadata.client_id);
-            });
+            let peer = clients.get_mut(&metadata.client_id).unwrap();
             if metadata.sequence_num <= peer.next_sequence_num {
                 return
             }
+            warn!("Determined request from the future: {:?}", request);
             peer.to_be_scheduled.insert(metadata.sequence_num, tx);
         }
-        rx.await.unwrap();
+        rx.await.unwrap_or_else(|e| {
+          warn!("Delayed request was dropped by client: {}", e);
+        });
     }
 }
 
@@ -140,6 +149,7 @@ impl chat_server::Chat for ChatServerImp {
 
     async fn write(&self, request: Request<WriteRequest>) -> Result<Response<ChatUpdated>, Status> {
         let req = request.into_inner();
+        self.0.ensure_valid_peer(&req)?;
         self.0.wait_for_request_turn(&req).await;
         let md = &req.meta.as_ref().unwrap();
         let validity = self.0.is_request_valid(md);
@@ -147,6 +157,8 @@ impl chat_server::Chat for ChatServerImp {
         let mut peer = clients.get_mut(&md.client_id).ok_or(Status::unauthenticated("You must subscribe before sending messages"))?;
         if validity != RequestValidity::Ok {
             warn!("Detected invalid request {:?}, reason: {:?}", req, validity);
+        } else {
+            info!("Processing write request {:?}", req);
         }
         match validity {
         RequestValidity::Ok => {
@@ -163,7 +175,10 @@ impl chat_server::Chat for ChatServerImp {
                 // if there's a message scheduled with the next sequence number, wake up
                 // the task responsible for handling it
                 if let Some(tx) = peer.to_be_scheduled.remove(&peer.next_sequence_num) {
-                    tx.send(());
+                    info!("Waking up request from the future at sequence_number {}", peer.next_sequence_num);
+                    tx.send(()).unwrap_or_else(|_| {
+                        warn!("Failed to wake up request(the sender probably dropped it)");
+                    });
                 }
                 Ok(Response::new(res))
             }
