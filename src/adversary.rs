@@ -1,8 +1,3 @@
-#![feature(type_alias_impl_trait)]
-#[macro_use]
-extern crate log;
-
-
 use clap::{Clap, Arg};
 
 use futures::prelude::*;
@@ -14,60 +9,33 @@ use std::sync::{Arc};
 use std::borrow::BorrowMut;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use futures::lock::Mutex;
 use tokio::time::Duration;
 use rand::distributions::Distribution;
 use std::fmt::Debug;
 use futures::{TryFutureExt, AsyncReadExt};
-
-tonic::include_proto!("chat");
+use crate::types::*;
+use tonic::transport::Uri;
+use tonic::codegen::http::uri::Authority;
 
 
 const BROADCAST_CHANNEL_SIZE : usize = 32;
 
 
-#[derive(Clap, Debug)]
-#[clap()]
-pub struct AdversarySettings {
-    #[clap(long, about = "probability of dropping a message", default_value = "0.5")]
-    drop_prob: f64,
 
-    #[clap(long, about = "probability of duplicating a message at some time", default_value = "0.3")]
-    duplicate_prob: f64,
-
-    #[clap(long, about = "probability of re-ordering packets", default_value = "0.3")]
-    reorder_prob: f64,
-
-    #[clap(long, about = "port of adversary", default_value = "6343")]
-    adversary_port: u16,
-
-    #[clap(long, about = "port of original server", default_value = "8950")]
-    server_port: u16,
-
-    #[clap(long, about = "minimum delay(in ms) until re-ordered/duplicated messages are sent", default_value = "100")]
-    min_delay_ms: u64,
-
-    #[clap(long, about = "maximum delay(in ms) until re-ordered/duplicated messages are sent", default_value = "3000")]
-    max_delay_ms: u64,
-
-    #[clap(long, about = "minimum delay(in ms) until re-ordered messages are sent", default_value = "100")]
-    min_retransmit_delay: u64
-}
-
-type ChatClient = chat_client::ChatClient<tonic::transport::Channel>;
 
 #[derive(Debug)]
 pub struct AdversaryState {
-    pub settings: AdversarySettings,
+    pub settings: Settings,
     pub client: Mutex<ChatClient>
 
 }
 
 impl AdversaryState {
-    pub async fn new(settings: AdversarySettings) -> Result<Self, Box<dyn std::error::Error>> {
-        // let client = ChatClient::connect(format!("http://[::]:{}", settings.server_port)).compat().await?;
-        let client = ChatClient::connect("http://[::1]:8950").await?;
+    pub async fn new(settings: Settings) -> anyhow::Result<Self> {
+        info!("Adversary connecting to server at {:?}", settings.server_addr);
+        let client = ChatClient::connect(format!("http://{}", settings.server_addr)).await?;
         Ok(AdversaryState {
             settings, client: Mutex::new(client)
         })
@@ -149,27 +117,19 @@ impl  chat_server::Chat for AdversaryServerImpl {
 }
 
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    pretty_env_logger::init();
-    let settings : AdversarySettings = AdversarySettings::parse();
-    let addr = format!("[::]:{}", settings.adversary_port);
+pub async fn start_adversary(settings: impl AsRef<Settings>) -> anyhow::Result<()> {
+    let settings = settings.as_ref();
+    let adversary_state = AdversaryState::new(settings.clone()).await?;
 
-    let adversary_state = AdversaryState::new(settings).await?;
-
-
+    info!("Started adversary on {}", settings.adversary_addr);
     let adversary_imp= AdversaryServerImpl(Arc::new(adversary_state));
     let chat_service = chat_server::ChatServer::new(adversary_imp);
 
-    println!("Starting adversary on {}", addr);
     Server::builder()
         .add_service(chat_service)
-        .serve(addr.parse().unwrap())
+        .serve(settings.adversary_addr)
         .await?;
 
-    tokio::signal::ctrl_c()
-        .await
-        .expect("couldn't listen to ctrl-c");
-    info!("Shutting down server");
+    info!("Adversary shut down");
     Ok(())
 }

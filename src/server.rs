@@ -1,19 +1,14 @@
-#![feature(type_alias_impl_trait)]
-#[macro_use]
-extern crate log;
-
 use futures::prelude::*;
 use tokio::net::TcpListener;
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use futures::channel::oneshot;
 use tonic::{transport::Server, Request, Response, Status, Code};
 use std::collections::HashMap;
 use std::sync::{Arc};
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
-
-tonic::include_proto!("chat");
+use crate::types::*;
 
 
 const BROADCAST_CHANNEL_SIZE : usize = 32;
@@ -192,22 +187,17 @@ impl chat_server::Chat for ChatServerImp {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    pretty_env_logger::init();
-
+pub async fn start_server(settings: impl AsRef<Settings>) ->  anyhow::Result<()> {
+    let settings = settings.as_ref();
     let server_state = ChatServerImp(Arc::new(ServerState::new()));
     let chat_service = chat_server::ChatServer::new(server_state);
 
-
+    info!("Started server on address {}", settings.server_addr);
     Server::builder()
         .add_service(chat_service)
-        .serve("[::1]:8950".parse().unwrap())
+        .serve(settings.server_addr)
         .await?;
 
-    tokio::signal::ctrl_c()
-        .await
-        .expect("couldn't listen to ctrl-c");
-    info!("Shutting down server");
+    info!("Server shut down");
     Ok(())
 }

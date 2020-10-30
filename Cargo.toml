@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 clap = "3.0.0-beta.2"
 log = "0.4"
+anyhow = "1.0"
 pretty_env_logger = "0.4"
 futures = "0.3"
 tokio = { version = "0.2", features = ["full"] }
@@ -23,16 +24,8 @@ name = "dist_lib"
 path = "src/lib.rs"
 
 [[bin]]
-name = "server"
-path = "src/server.rs"
-
-[[bin]]
-name = "client"
-path = "src/client.rs"
-
-[[bin]]
-name = "adversary"
-path = "src/adversary.rs"
+name = "runner"
+path = "src/runner.rs"
 
 [build-dependencies]
 tonic-build = "0.3"
