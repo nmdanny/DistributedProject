@@ -5,8 +5,10 @@ pub extern crate log;
 mod types;
 mod server;
 mod adversary;
+mod client;
 
 pub use server::start_server;
 pub use adversary::start_adversary;
 pub use types::{Settings, WriteRequest, LogRequest, ChatUpdated, LogResponse,
-                PacketMetadata, ChatClient};
+                PacketMetadata, ChatClient, ConnectRequest};
+

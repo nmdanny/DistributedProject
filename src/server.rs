@@ -127,7 +127,7 @@ impl ServerState {
             peer.to_be_scheduled.insert(metadata.sequence_num, tx);
         }
         rx.await.unwrap_or_else(|e| {
-          warn!("Delayed request was dropped by client: {}", e);
+          error!("Delayed request was dropped by client: {}", e);
         });
     }
 }
@@ -154,7 +154,7 @@ impl chat_server::Chat for ChatServerImp {
         let md = &req.meta.as_ref().unwrap();
         let validity = self.0.is_request_valid(md);
         let mut clients = self.0.clients.write();
-        let mut peer = clients.get_mut(&md.client_id).ok_or(Status::unauthenticated("You must subscribe before sending messages"))?;
+        let mut peer = clients.get_mut(&md.client_id).unwrap();
         if validity != RequestValidity::Ok {
             warn!("Detected invalid request {:?}, reason: {:?}", req, validity);
         } else {
@@ -177,7 +177,7 @@ impl chat_server::Chat for ChatServerImp {
                 if let Some(tx) = peer.to_be_scheduled.remove(&peer.next_sequence_num) {
                     info!("Waking up request from the future at sequence_number {}", peer.next_sequence_num);
                     tx.send(()).unwrap_or_else(|_| {
-                        warn!("Failed to wake up request(the sender probably dropped it)");
+                        error!("Failed to wake up request(the sender probably dropped it)");
                     });
                 }
                 Ok(Response::new(res))
