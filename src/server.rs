@@ -2,21 +2,22 @@ use futures::prelude::*;
 use tokio::net::TcpListener;
 
 use std::net::{SocketAddr, ToSocketAddrs};
-use futures::channel::oneshot;
-use tonic::{transport::Server, Request, Response, Status, Code};
+use futures::channel::{oneshot, mpsc};
+use tonic::{transport::Server, Request, Response, Status, Code, IntoRequest};
 use std::collections::HashMap;
 use std::sync::{Arc};
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use crate::types::*;
 use std::fmt::Debug;
+use tokio::time::Duration;
 
 
 const BROADCAST_CHANNEL_SIZE : usize = 32;
 
 #[derive(Debug)]
 pub struct ServerState {
-    clients: RwLock<HashMap<u64, Peer>>,
+    clients: tokio::sync::RwLock<HashMap<u64, Peer>>,
     log: RwLock<Vec<String>>,
     chat_broadcast: broadcast::Sender<Result<ChatUpdated, Status>>
 }
@@ -70,11 +71,6 @@ enum RequestValidity {
 }
 
 
-impl From<WriteRequest> for PacketMetadata {
-    fn from(req: WriteRequest) -> Self {
-        req.meta.unwrap()
-    }
-}
 
 impl AsRef<PacketMetadata> for WriteRequest {
     fn as_ref(&self) -> &PacketMetadata {
@@ -82,15 +78,16 @@ impl AsRef<PacketMetadata> for WriteRequest {
     }
 }
 
-impl From<LogRequest> for PacketMetadata {
-    fn from(req: LogRequest) -> Self {
-        req.meta.unwrap()
+impl AsRef<PacketMetadata> for LogRequest {
+    fn as_ref(&self) -> &PacketMetadata {
+        self.meta.as_ref().unwrap()
     }
 }
 
 impl ServerState {
-    fn is_request_valid(&self, metadata: &PacketMetadata) -> RequestValidity {
-        let clients = self.clients.read();
+    async fn is_request_valid<R: AsRef<PacketMetadata>>(&self, request: &R) -> RequestValidity {
+        let clients = self.clients.read().await;
+        let metadata = request.as_ref();
         let peer = clients.get(&metadata.client_id).unwrap();
         if metadata.sequence_num == peer.next_sequence_num {
             return RequestValidity::Ok;
@@ -107,8 +104,8 @@ impl ServerState {
         unreachable!()
     }
 
-    fn ensure_valid_peer<R: AsRef<PacketMetadata>>(&self, request: &R) -> Result<(), Status> {
-        if self.clients.read().contains_key(&request.as_ref().client_id) {
+    async fn ensure_valid_peer<R: AsRef<PacketMetadata>>(&self, request: &R) -> Result<(), Status> {
+        if self.clients.read().await.contains_key(&request.as_ref().client_id) {
             return Ok(())
         }
         Err(Status::unauthenticated("Client must subscribe before doing any commands"))
@@ -118,7 +115,7 @@ impl ServerState {
         let metadata: &PacketMetadata = request.as_ref();
         let (tx, rx) = oneshot::channel();
         {
-            let mut clients = self.clients.write();
+            let mut clients = self.clients.write().await;
             let peer = clients.get_mut(&metadata.client_id).unwrap();
             if metadata.sequence_num <= peer.next_sequence_num {
                 return
@@ -130,6 +127,43 @@ impl ServerState {
           error!("Delayed request was dropped by client: {}", e);
         });
     }
+
+    async fn try_wake_next_handler(&self, peer: &mut Peer) -> Result<(), Status> {
+        if let Some(tx) = peer.to_be_scheduled.remove(&peer.next_sequence_num) {
+            info!("Waking up request from the future at sequence_number {}", peer.next_sequence_num);
+            tx.send(()).unwrap_or_else(|_| {
+                error!("Failed to wake up request(the sender probably dropped it)");
+            });
+        }
+        Ok(())
+    }
+
+    async fn handle_request<Req: AsRef<PacketMetadata> + Debug, Res, ReqHandler, DupHandler>(&self, req: Req, mut handler: ReqHandler,
+        mut dup_handler: DupHandler) -> Result<Response<Res>, Status>
+        where ReqHandler: Fn(Req, &mut Peer) -> Result<Res, Status>,
+              DupHandler: Fn(Req, &mut Peer) -> Result<Res, Status> {
+        self.ensure_valid_peer(&req).await?;
+        self.wait_for_request_turn(&req).await;
+        let validity = self.is_request_valid(&req).await;
+        if let RequestValidity::Ok = validity {
+            info!("Server is handling OK request {:?}", req);
+        } else {
+            warn!("Server is handling non-OK request {:?}, validity: {:?}", req, validity);
+        }
+        let mut clients = self.clients.write().await;
+        let mut peer = clients.get_mut(&req.as_ref().client_id).unwrap();
+        match validity {
+            RequestValidity::Ok => {
+                let res = handler(req, &mut peer)?;
+                peer.next_sequence_num += 1;
+                self.try_wake_next_handler(&mut peer).await?;
+                Ok(Response::new(res))
+            },
+            RequestValidity::DuplicateRequestVeryOld => Err(Status::already_exists("Duplicate request is very old and was made by adversary")),
+            RequestValidity::DuplicateRequestOldByOne => Ok(Response::new(dup_handler(req, &mut peer)?)),
+            RequestValidity::InTheFuture => unreachable!("Impossible, message from future should've been waited for")
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -138,67 +172,57 @@ impl chat_server::Chat for ChatServerImp {
 
     async fn subscribe(&self, request: Request<ConnectRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
         let client_id = request.into_inner().client_id;
-        let mut peers = self.0.clients.write();
+        let mut peers = self.0.clients.write().await;
         peers.entry(client_id).or_insert(Peer::new(client_id));
         let rx = self.0.chat_broadcast.subscribe().into_stream()
             .filter_map(|f| future::ready(f.ok()));
         info!("Registered client of id {}", client_id);
         Ok(Response::new(rx))
-
     }
 
     async fn write(&self, request: Request<WriteRequest>) -> Result<Response<ChatUpdated>, Status> {
-        let req = request.into_inner();
-        self.0.ensure_valid_peer(&req)?;
-        self.0.wait_for_request_turn(&req).await;
-        let md = &req.meta.as_ref().unwrap();
-        let validity = self.0.is_request_valid(md);
-        let mut clients = self.0.clients.write();
-        let mut peer = clients.get_mut(&md.client_id).unwrap();
-        if validity != RequestValidity::Ok {
-            warn!("Detected invalid request {:?}, reason: {:?}", req, validity);
-        } else {
-            info!("Processing write request {:?}", req);
-        }
-        match validity {
-        RequestValidity::Ok => {
-                self.0.log.write().push(req.contents.clone());
+
+        let request = request.into_inner();
+        let state = self.0.clone();
+        let res = tokio::spawn(async move {
+            let write_handler = |req: WriteRequest, peer: &mut Peer| {
+                state.log.write().push(req.contents.clone());
                 let res = ChatUpdated {
                     meta: req.meta.clone(),
                     contents: req.contents.clone(),
-                    index: (self.0.log.read().len() - 1) as u64
+                    index: (state.log.read().len() - 1) as u64
                 };
-                let _ = self.0.chat_broadcast.send(Ok(res.clone()));
+                let _ = state.chat_broadcast.send(Ok(res.clone()));
                 peer.last_write_index = Some(res.index);
-                peer.next_sequence_num += 1;
-
-                // if there's a message scheduled with the next sequence number, wake up
-                // the task responsible for handling it
-                if let Some(tx) = peer.to_be_scheduled.remove(&peer.next_sequence_num) {
-                    info!("Waking up request from the future at sequence_number {}", peer.next_sequence_num);
-                    tx.send(()).unwrap_or_else(|_| {
-                        error!("Failed to wake up request(the sender probably dropped it)");
-                    });
-                }
-                Ok(Response::new(res))
-            }
-            RequestValidity::DuplicateRequestOldByOne => {
+                Ok(res)
+            };
+            let dup_handler = |req: WriteRequest, peer: &mut Peer| {
                 let res = ChatUpdated {
                     meta: req.meta.clone(),
                     contents: req.contents.clone(),
                     index: peer.last_write_index.unwrap()
                 };
+                Ok(res)
+            };
+            state.handle_request(request, &write_handler, &dup_handler).await
+        });
+        Ok(res.await.unwrap()?)
 
-                Ok(Response::new(res))
-            },
-            RequestValidity::DuplicateRequestVeryOld => Err(Status::already_exists("duplicate request whose response was received")),
-            RequestValidity::InTheFuture => unreachable!()
-        }
     }
 
     async fn read(&self, request: Request<LogRequest>) -> Result<Response<LogResponse>, Status> {
-        let metadata = request.into_inner().meta.unwrap();
-        Ok(Response::new(LogResponse { meta: Some(metadata), contents: self.0.log.read().clone() }))
+        let request = request.into_inner();
+        let state = self.0.clone();
+        let res = tokio::spawn(async move {
+            let read_handler = |req: LogRequest, peer: &mut Peer| {
+                Ok(LogResponse {
+                    meta: req.meta.clone(),
+                    contents: state.log.read().clone()
+                })
+            };
+           state.handle_request(request, &read_handler, &read_handler).await
+        });
+        Ok(res.await.unwrap()?)
     }
 }
 

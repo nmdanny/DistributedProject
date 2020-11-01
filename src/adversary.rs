@@ -20,7 +20,6 @@ use tonic::transport::Uri;
 use tonic::codegen::http::uri::Authority;
 
 
-const BROADCAST_CHANNEL_SIZE : usize = 32;
 
 
 

@@ -7,16 +7,6 @@ use tokio::time::Elapsed;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-pub async fn client_talks_with_server(settings: impl AsRef<Settings>) -> anyhow::Result<ChatClient> {
-    let settings = settings.as_ref();
-    Ok(ChatClient::connect(format!("http://{}", settings.server_addr)).await?)
-}
-
-pub async fn client_talks_with_adversary(settings: impl AsRef<Settings>) -> anyhow::Result<ChatClient> {
-    let settings = settings.as_ref();
-    Ok(ChatClient::connect(format!("http://{}", settings.adversary_addr)).await?)
-}
-
 const MAX_RETRIES: usize = 5;
 
 pub async fn write_with_retransmit(client: &mut ChatClient, msg: WriteRequest, time: Duration) -> Result<Response<ChatUpdated>, Status> {
@@ -94,6 +84,7 @@ mod tests {
         let server = tokio::spawn(async move {
             start_server(settings2).await
         });
+        tokio::time::delay_for(Duration::from_secs(5)).await;
         test_base(settings.server_addr, 10).await;
     }
 
