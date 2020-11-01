@@ -1,16 +1,15 @@
 use futures::prelude::*;
-use tokio::net::TcpListener;
 
 use crate::types::*;
-use futures::channel::{mpsc, oneshot};
+use futures::channel::oneshot;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::net::{SocketAddr, ToSocketAddrs};
+
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tokio::time::Duration;
-use tonic::{transport::Server, Code, IntoRequest, Request, Response, Status};
+
+use tonic::{transport::Server, Request, Response, Status};
 
 const BROADCAST_CHANNEL_SIZE: usize = 32;
 
@@ -151,8 +150,8 @@ impl ServerState {
     async fn handle_request<Req: AsRef<PacketMetadata> + Debug, Res, ReqHandler, DupHandler>(
         &self,
         req: Req,
-        mut handler: ReqHandler,
-        mut dup_handler: DupHandler,
+        handler: ReqHandler,
+        dup_handler: DupHandler,
     ) -> Result<Response<Res>, Status>
     where
         ReqHandler: Fn(Req, &mut Peer) -> Result<Res, Status>,
@@ -220,7 +219,7 @@ impl chat_server::Chat for ChatServerImp {
                 state.log.write().push(req.contents.clone());
                 let res = ChatUpdated {
                     meta: req.meta.clone(),
-                    contents: req.contents.clone(),
+                    contents: req.contents,
                     index: (state.log.read().len() - 1) as u64,
                 };
                 let _ = state.chat_broadcast.send(Ok(res.clone()));
@@ -230,7 +229,7 @@ impl chat_server::Chat for ChatServerImp {
             let dup_handler = |req: WriteRequest, peer: &mut Peer| {
                 let res = ChatUpdated {
                     meta: req.meta.clone(),
-                    contents: req.contents.clone(),
+                    contents: req.contents,
                     index: peer.last_write_index.unwrap(),
                 };
                 Ok(res)
@@ -246,9 +245,9 @@ impl chat_server::Chat for ChatServerImp {
         let request = request.into_inner();
         let state = self.0.clone();
         let res = tokio::spawn(async move {
-            let read_handler = |req: LogRequest, peer: &mut Peer| {
+            let read_handler = |req: LogRequest, _peer: &mut Peer| {
                 Ok(LogResponse {
-                    meta: req.meta.clone(),
+                    meta: req.meta,
                     contents: state.log.read().clone(),
                 })
             };

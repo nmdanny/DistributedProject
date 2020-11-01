@@ -4,7 +4,7 @@ extern crate log;
 use dist_lib::{start_adversary, start_server, Settings};
 
 use clap::Clap;
-use std::net::SocketAddr;
+
 use std::sync::Arc;
 
 #[tokio::main]

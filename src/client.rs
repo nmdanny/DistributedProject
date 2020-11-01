@@ -1,10 +1,7 @@
-use crate::{ChatClient, ChatUpdated, Settings, WriteRequest};
-use futures::Future;
-use futures_retry::{FutureFactory, RetryPolicy};
-use std::marker::PhantomData;
-use std::rc::Rc;
+use crate::{ChatClient, ChatUpdated, WriteRequest};
+
 use std::time::Duration;
-use tokio::time::Elapsed;
+
 use tonic::{Request, Response, Status};
 
 pub async fn write_with_retransmit(
@@ -27,17 +24,16 @@ mod tests {
         start_adversary, start_server, ChatClient, ConnectRequest, PacketMetadata, Settings,
         WriteRequest,
     };
-    use clap::Clap;
     use futures::stream::FuturesUnordered;
-    use futures::task::SpawnExt;
-    use futures::{Stream, StreamExt};
+
+    use futures::StreamExt;
     use log::LevelFilter;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
     use tonic::Request;
 
-    const NUM_REQUESTS: usize = 10;
+    const NUM_REQUESTS: usize = 100;
 
     async fn test_base(address: SocketAddr, timeout_ms: u64) {
         let client = ChatClient::connect(format!("http://{}", address))
@@ -67,7 +63,7 @@ mod tests {
             })
             .collect::<FuturesUnordered<_>>();
 
-        let responses = write_requests.collect::<Vec<_>>().await;
+        let _responses = write_requests.collect::<Vec<_>>().await;
 
         let mut last_chat_response = 0;
         while let Some(res) = broadcasts.message().await.unwrap() {
@@ -85,7 +81,7 @@ mod tests {
     async fn test_with_server() {
         let settings = Arc::new(Settings::default());
         let settings2 = settings.clone();
-        let server = tokio::spawn(async move { start_server(settings2).await });
+        let _server = tokio::spawn(async move { start_server(settings2).await });
         tokio::time::delay_for(Duration::from_secs(5)).await;
         test_base(settings.server_addr, 10).await;
     }

@@ -1,5 +1,5 @@
 use clap::Clap;
-use std::convert::TryInto;
+
 use std::net::SocketAddr;
 
 tonic::include_proto!("chat");
