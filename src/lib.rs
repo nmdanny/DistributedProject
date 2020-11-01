@@ -2,13 +2,14 @@
 #[macro_use]
 pub extern crate log;
 
-mod types;
-mod server;
 mod adversary;
 mod client;
+mod server;
+mod types;
 
-pub use server::start_server;
 pub use adversary::start_adversary;
-pub use types::{Settings, WriteRequest, LogRequest, ChatUpdated, LogResponse,
-                PacketMetadata, ChatClient, ConnectRequest};
-
+pub use server::start_server;
+pub use types::{
+    ChatClient, ChatUpdated, ConnectRequest, LogRequest, LogResponse, PacketMetadata, Settings,
+    WriteRequest,
+};

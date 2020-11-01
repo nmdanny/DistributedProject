@@ -1,42 +1,40 @@
-use clap::{Clap, Arg};
+use clap::{Arg, Clap};
 
 use futures::prelude::*;
 use tokio::net::TcpListener;
 
-use tonic::{transport::Server, Request, Response, Status, IntoRequest};
-use std::collections::HashMap;
-use std::sync::{Arc};
-use std::borrow::BorrowMut;
-use parking_lot::RwLock;
-use tokio::sync::broadcast;
-use std::net::{SocketAddr, ToSocketAddrs};
-use futures::lock::Mutex;
-use tokio::time::Duration;
-use rand::distributions::Distribution;
-use std::fmt::Debug;
-use futures::{TryFutureExt, AsyncReadExt};
 use crate::types::*;
-use tonic::transport::Uri;
+use futures::lock::Mutex;
+use futures::{AsyncReadExt, TryFutureExt};
+use parking_lot::RwLock;
+use rand::distributions::Distribution;
+use std::borrow::BorrowMut;
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio::time::Duration;
 use tonic::codegen::http::uri::Authority;
-
-
-
-
-
+use tonic::transport::Uri;
+use tonic::{transport::Server, IntoRequest, Request, Response, Status};
 
 #[derive(Debug)]
 pub struct AdversaryState {
     pub settings: Settings,
-    pub client: Mutex<ChatClient>
-
+    pub client: Mutex<ChatClient>,
 }
 
 impl AdversaryState {
     pub async fn new(settings: Settings) -> anyhow::Result<Self> {
-        info!("Adversary connecting to server at {:?}", settings.server_addr);
+        info!(
+            "Adversary connecting to server at {:?}",
+            settings.server_addr
+        );
         let client = ChatClient::connect(format!("http://{}", settings.server_addr)).await?;
         Ok(AdversaryState {
-            settings, client: Mutex::new(client)
+            settings,
+            client: Mutex::new(client),
         })
     }
 }
@@ -45,9 +43,10 @@ async fn sleep(time_ms: u64) {
     tokio::time::delay_for(Duration::from_millis(time_ms)).await;
 }
 
-impl  AdversaryState {
+impl AdversaryState {
     async fn maybe_drop_request<R: Debug>(&self, r: &R) {
-        let barnaval_ha_naval = rand::distributions::Bernoulli::new(self.settings.drop_prob).unwrap();
+        let barnaval_ha_naval =
+            rand::distributions::Bernoulli::new(self.settings.drop_prob).unwrap();
         if barnaval_ha_naval.sample(&mut rand::thread_rng()) {
             info!("Dropping request {:?}", r);
             // we can't really drop responses in this library, so just set a very high delay
@@ -56,9 +55,13 @@ impl  AdversaryState {
     }
 
     async fn maybe_delay<R: Debug>(&self, r: &R) {
-        let barnaval_ha_naval = rand::distributions::Bernoulli::new(self.settings.reorder_prob).unwrap();
+        let barnaval_ha_naval =
+            rand::distributions::Bernoulli::new(self.settings.reorder_prob).unwrap();
         if barnaval_ha_naval.sample(&mut rand::thread_rng()) {
-            let uni  = rand::distributions::Uniform::new(self.settings.min_delay_ms, self.settings.max_delay_ms);
+            let uni = rand::distributions::Uniform::new(
+                self.settings.min_delay_ms,
+                self.settings.max_delay_ms,
+            );
             let ms = uni.sample(&mut rand::thread_rng());
             info!("Delaying response {:?} by {} ms", r, ms);
             sleep(ms).await;
@@ -69,7 +72,7 @@ impl  AdversaryState {
         let barnaval = rand::distributions::Bernoulli::new(self.settings.duplicate_prob).unwrap();
         if barnaval.sample(&mut rand::thread_rng()) {
             info!("Making duplicate of {:?}", req);
-            return Some(req.clone())
+            return Some(req.clone());
         }
         None
     }
@@ -77,16 +80,20 @@ impl  AdversaryState {
 
 struct AdversaryServerImpl(Arc<AdversaryState>);
 
-
 #[tonic::async_trait]
-impl  chat_server::Chat for AdversaryServerImpl {
+impl chat_server::Chat for AdversaryServerImpl {
     type SubscribeStream = impl Stream<Item = Result<ChatUpdated, Status>>;
-    async fn subscribe(&self, request: Request<ConnectRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
+    async fn subscribe(
+        &self,
+        request: Request<ConnectRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
         let mut client = self.0.client.lock().await;
-        info!("Adversary detected connection, peer id: {}", request.get_ref().client_id);
+        info!(
+            "Adversary detected connection, peer id: {}",
+            request.get_ref().client_id
+        );
         client.subscribe(request).await
     }
-
 
     async fn write(&self, request: Request<WriteRequest>) -> Result<Response<ChatUpdated>, Status> {
         let mut client = self.0.client.lock().await;
@@ -104,24 +111,20 @@ impl  chat_server::Chat for AdversaryServerImpl {
         } else {
             client.write(request).await
         }
-
     }
-
 
     async fn read(&self, request: Request<LogRequest>) -> Result<Response<LogResponse>, Status> {
         let mut client = self.0.client.lock().await;
         client.read(request).await
     }
-
 }
-
 
 pub async fn start_adversary(settings: impl AsRef<Settings>) -> anyhow::Result<()> {
     let settings = settings.as_ref();
     let adversary_state = AdversaryState::new(settings.clone()).await?;
 
     info!("Started adversary on {}", settings.adversary_addr);
-    let adversary_imp= AdversaryServerImpl(Arc::new(adversary_state));
+    let adversary_imp = AdversaryServerImpl(Arc::new(adversary_state));
     let chat_service = chat_server::ChatServer::new(adversary_imp);
 
     Server::builder()

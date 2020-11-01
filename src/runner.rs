@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use dist_lib::{start_server, start_adversary, Settings};
+use dist_lib::{start_adversary, start_server, Settings};
 
 use clap::Clap;
 use std::net::SocketAddr;
@@ -16,8 +16,6 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { start_server(options.clone()).await }),
         tokio::spawn(async move { start_adversary(options2).await }),
     );
-
-
 
     tokio::signal::ctrl_c()
         .await
