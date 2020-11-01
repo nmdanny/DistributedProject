@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 use tonic::{transport::Server, Request, Response, Status};
 use std::collections::hash_map::Entry;
 
-const BROADCAST_CHANNEL_SIZE: usize = 32;
+const BROADCAST_CHANNEL_SIZE: usize = 1024;
 
 #[derive(Debug)]
 pub struct ServerState {
@@ -48,7 +48,7 @@ pub struct Peer {
     pub client_id: u64,
     pub next_sequence_num: u64,
     pub last_write_index: Option<u64>,
-    pub to_be_scheduled: HashMap<u64, oneshot::Sender<()>>
+    pub to_be_scheduled: HashMap<u64, broadcast::Sender<()>>
 }
 
 impl Peer {
@@ -120,8 +120,7 @@ impl ServerState {
 
     async fn wait_for_request_turn<R: AsRef<PacketMetadata> + Debug>(&self, request: &R) -> Result<(), Status> {
         let metadata: &PacketMetadata = request.as_ref();
-        let (tx, rx) = oneshot::channel();
-        {
+        let mut rx = {
             let mut clients = self.clients.write().await;
             let peer = clients.get_mut(&metadata.client_id).unwrap();
             if metadata.sequence_num <= peer.next_sequence_num {
@@ -129,17 +128,20 @@ impl ServerState {
             }
             let entry = peer.to_be_scheduled.entry(metadata.sequence_num);
             match entry {
-                Entry::Occupied(_) => {
-                    warn!("Request {:?} is from the future and is also a duplicate, ignoring.", request);
-                    return Err(Status::aborted("Duplicate message from the future"));
+                Entry::Occupied(entry) => {
+                    warn!("Request {:?} is from the future and is also a duplicate", request);
+                    entry.get().subscribe()
+
                 },
                 Entry::Vacant(e) => {
+                    let (tx, rx) = broadcast::channel(BROADCAST_CHANNEL_SIZE);
                     warn!("Request {:?} is from the future, waiting", request);
                     e.insert(tx);
+                    rx
                 }
             }
-        }
-        rx.await.unwrap();
+        };
+        rx.recv().await.unwrap();
         Ok(())
     }
 
@@ -151,6 +153,7 @@ impl ServerState {
             );
             tx.send(()).unwrap_or_else(|_| {
                 error!("Failed to wake up request(the sender probably dropped it)");
+                0
             });
         }
         Ok(())
@@ -194,8 +197,7 @@ impl ServerState {
                 Ok(Response::new(dup_handler(req, &mut peer)?))
             }
             RequestValidity::InTheFuture => {
-                error!("Impossible, message from the future should've been taken care of.");
-                Err(Status::internal("Impossible, message from future should've been waited for"))
+                panic!("Impossible, message from the future should've been taken care of.");
             }
         }
     }
