@@ -86,10 +86,11 @@ impl AsRef<PacketMetadata> for LogRequest {
 
 impl ServerState {
     async fn is_request_valid<R: AsRef<PacketMetadata>>(&self, request: &R) -> RequestValidity {
-        let clients = self.clients.read().await;
+        let mut clients = self.clients.write().await;
         let metadata = request.as_ref();
-        let peer = clients.get(&metadata.client_id).unwrap();
+        let mut peer = clients.get_mut(&metadata.client_id).unwrap();
         if metadata.sequence_num == peer.next_sequence_num {
+            peer.next_sequence_num += 1;
             return RequestValidity::Ok;
         }
         if metadata.sequence_num == peer.next_sequence_num - 1 {
@@ -186,7 +187,6 @@ impl ServerState {
         match validity {
             RequestValidity::Ok => {
                 let res = handler(req, &mut peer)?;
-                peer.next_sequence_num += 1;
                 self.try_wake_next_handler(&mut peer).await?;
                 Ok(Response::new(res))
             }

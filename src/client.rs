@@ -80,12 +80,14 @@ mod tests {
     use std::time::Duration;
     use tonic::{IntoRequest, Request};
 
-    const NUM_REQUESTS: usize = 100;
+    const NUM_REQUESTS: usize = 10000;
 
     // When this is set to 1, requests are made serially (await a response before proceeding with the next request)
     // This can also be set higher, at the cost of filling the server with requests from the future,
-    // which fills up its queue
-    const MAX_REQS_PER_TIME: usize = 8;
+    // which fills up its queue, or worse, when adversary is active - the client might make
+    const MAX_REQS_PER_TIME: usize = 16;
+
+
 
     async fn test_base(address: SocketAddr, timeout_ms: u64) {
         let (mut client, mut broadcasts) = ClientState::new(address, timeout_ms).await.unwrap();
@@ -95,7 +97,11 @@ mod tests {
             while let Some(res) = broadcasts.message().await.unwrap() {
                 let response = res.contents.parse().unwrap();
                 assert!(response == last_chat_response + 1);
-                if response % (NUM_REQUESTS/100) == 0 {
+                println!("> {}", response);
+                if response != last_chat_response + 1 {
+                    eprintln!("\t^mismatch");
+                }
+                if response % (NUM_REQUESTS/100 + 1) == 0 {
                     println!("Handled {} responses", response);
                 }
                 last_chat_response = response;
@@ -139,8 +145,9 @@ mod tests {
     #[tokio::test(threaded_scheduler)]
     async fn test_with_adversary() {
         let _ = pretty_env_logger::formatted_builder()
-            .filter_module("dist_lib::server", LevelFilter::Warn)
-            .is_test(false)
+            .filter_module("dist_lib::server", LevelFilter::Info)
+            .filter_module("dist_lib::adversary", LevelFilter::Info)
+            .is_test(true)
             .init();
 
         info!("wot");
@@ -152,7 +159,7 @@ mod tests {
         options.duplicate_prob = 0.2;
         options.reorder_prob = 0.3;
         options.drop_prob = 0.2;
-        let timeout_ms = options.min_delay_ms.max(options.max_delay_ms) * 32;
+        let timeout_ms = options.min_delay_ms.max(options.max_delay_ms) * 4;
         let options = Arc::new(options);
         let options2 = options.clone();
         let options3 = options.clone();
