@@ -6,6 +6,7 @@ mod adversary;
 mod client;
 mod server;
 mod types;
+mod consensus;
 
 pub use adversary::start_adversary;
 pub use server::start_server;
