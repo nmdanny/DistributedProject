@@ -14,7 +14,7 @@ pub struct Peer<T> {
 
 }
 
-impl <T> Peer<T> where T: Clone {
+impl <T> Peer<T> where T: Clone + std::fmt::Debug {
     pub fn new(my_id: Id, quorum_size: usize) -> Peer<T> {
         let (sender, receiver) = channel();
         let ctx = NodeContext { my_id, sender};
@@ -27,7 +27,25 @@ impl <T> Peer<T> where T: Clone {
         }
     }
 
-    pub fn handle_message(&mut self, message: MessagePayload<T>) {
+    pub fn propose(&mut self, value: T) {
+        self.proposer.push_value_to_be_proposed(value);
+        let slot = next_slot(&self.acceptor.log);
+        self.proposer.prepare(slot);
+        // TODO what if we accepted something else
 
     }
+
+    pub fn handle_message(&mut self, message: MessagePayload<T>) {
+        match message {
+            MessagePayload::Prepare(num, slot) => self.acceptor.on_prepare(num, slot),
+            MessagePayload::Promise(num, slot, accepted) => self.proposer.on_promise(num, slot, accepted),
+            MessagePayload::Accept(proposal) => self.acceptor.on_accept(proposal),
+            MessagePayload::Accepted(proposal) => self.proposer.on_accepted(proposal),
+            MessagePayload::Heartbeat(_) => {},
+            MessagePayload::Complain(_) => {},
+            MessagePayload::LeaveView(_) => {},
+            MessagePayload::ViewChange(_) => {}
+        }
+    }
+
 }

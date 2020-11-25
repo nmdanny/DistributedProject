@@ -24,6 +24,16 @@
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/proc-macro-error-attr-c71be04bcf9905a5/out" isTestSource="false" />
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/httparse-f32720d17668a2c1/out" isTestSource="false" />
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/tokio-172445ffcb6e251d/out" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/target/debug/build/practical_ex1-7d83a62416d7f51d/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/syn-ea622b4609eb9bba/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/winapi-566002eafbbb2de5/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/serde-ca7439b1abc92d66/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/serde_derive-7575d68c6eeb2047/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/serde_json-f8b121ee3b3f010e/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/ryu-27ce48e043ea4f1f/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/num-traits-ac84da2bc8155e03/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/num-integer-1b1acd34a68a98bc/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/byteorder-014daa6a1313f91a/out" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

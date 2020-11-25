@@ -4,47 +4,48 @@ use std::rc::Rc;
 use std::collections::HashMap;
 use futures::channel::oneshot;
 use std::cell::RefCell;
+use std::{error::Error, io};
+use tracing::{debug, error, info, span, warn, Level};
 
 
+#[derive(Debug)]
 struct ProposeResolutionState<T> {
     promises: Vec<Proposal<T>>,
-    resolve: Option<oneshot::Sender<()>>,
     promise_count: usize
 }
 
 impl <T> ProposeResolutionState<T> {
-    pub fn new(resolver: oneshot::Sender<()>) -> ProposeResolutionState<T> {
+    pub fn new() -> ProposeResolutionState<T> {
         ProposeResolutionState {
             promises: Vec::new(),
-            resolve: Some(resolver),
             promise_count: 0
         }
     }
 }
 
+#[derive(Debug)]
 /// Represents a proposer/primary/leader
 pub struct Proposer<T> {
     pub ctx: NodeContext<T>,
     pub quorum_size: usize,
     pub to_be_proposed: Vec<T>,
-    pub next_slot: usize,
     pub next_proposal_number: ProposalNumber,
+
+    // a proposer might propose
     quorum_resolver: HashMap<(ProposalNumber, Slot), ProposeResolutionState<T>>
 }
 
-// pub struct ProposerRef<T>(RefCell<T>);
-
-impl <T> ProposerRef <T> where T: Clone {
+impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
     pub fn id(&self) -> Id {
         self.ctx.my_id
     }
+
     pub fn new(ctx: NodeContext<T>, quorum_size: usize) -> Proposer<T> {
         let leader_id = ctx.my_id;
         Proposer {
             ctx,
             quorum_size,
             to_be_proposed: Vec::new(),
-            next_slot: 0,
             next_proposal_number: ProposalNumber {
                 leader_id,
                 num: 0
@@ -60,54 +61,65 @@ impl <T> ProposerRef <T> where T: Clone {
         self.to_be_proposed.push(value)
     }
 
-    pub async fn try_propose(&mut self) {
+    /// Phase 1a - sending prepare messages
+    pub fn prepare(&mut self, slot: Slot) {
         if self.to_be_proposed.is_empty() {
+            error!("called prepare when there are no values to propose");
             return
         }
 
+        self.next_proposal_number.num += 1;
         let proposal_number = self.next_proposal_number;
-        let slot = self.next_slot;
+        assert!(!self.quorum_resolver.contains_key(&(proposal_number, slot)));
 
-        self.ctx.send_broadcast(MessagePayload::Prepare(proposal_number));
+        let resolution_state = ProposeResolutionState::new();
+        self.quorum_resolver.insert((proposal_number, slot), resolution_state);
+        self.ctx.send_broadcast(MessagePayload::Prepare(proposal_number, slot));
+    }
 
-        let result = self.wait_for_promise_quorum(proposal_number, slot).await;
+    /// Phase 2a - sending accept message
+    #[tracing::instrument]
+    pub fn accept(&mut self, proposal_number: ProposalNumber, slot: Slot, accepted_proposals: &[Proposal<T>])
+    {
+        let result = self.quorum_resolver.remove(&(proposal_number, slot)).unwrap();
         assert_eq!(result.promise_count, self.quorum_size);
 
-        let value = self.to_be_proposed.remove(0);
+        // try accepting a value which was previously accepted at that slot, with the highest
+        // proposal number, otherwise, use our own value
+        let value = accepted_proposals
+            .iter()
+            .max_by_key(|p| p.number)
+            .map(|p| p.value.clone())
+            .unwrap_or_else(|| self.to_be_proposed.remove(0));
+
+        info!("Asking to accept value {:?}", value);
 
         self.ctx.send_broadcast(MessagePayload::Accept(Proposal { number: proposal_number, slot, value }));
-        self.next_proposal_number.num += 1;
     }
 
-    async fn wait_for_promise_quorum(&mut self, proposal_number: ProposalNumber, slot: Slot) -> ProposeResolutionState<T> {
-        assert!(!self.quorum_resolver.contains_key(&(proposal_number, slot)));
-        let (o_sender, o_receiver) = oneshot::channel();
-
-        let resolution_state = ProposeResolutionState::new(o_sender);
-        self.quorum_resolver.insert((proposal_number, slot), resolution_state);
-
-        o_receiver.await.unwrap();
-
-        self.quorum_resolver.remove(&(proposal_number, slot)).unwrap()
-    }
-
-    pub fn on_promise(&mut self, proposal_number: ProposalNumber, slot: Slot, proposals: Vec<Proposal<T>>) {
-        if proposal_number.leader_id != self.id() {
+    pub fn on_promise(&mut self, proposal_number: ProposalNumber, slot: Slot, accepted_proposal: Option<Proposal<T>>) {
+        // ignore promises not meant for us
+        if proposal_number != self.next_proposal_number {
             return
         }
+
         if let Some(mut entry) = self.quorum_resolver.get_mut(&(proposal_number, slot)) {
-            entry.promises.extend(proposals);
+            entry.promises.extend(accepted_proposal.into_iter());
             entry.promise_count += 1;
             // we have a majority of promises
             if entry.promise_count == self.quorum_size {
-                let resolver = entry.resolve.take().unwrap();
-                resolver.send(()).unwrap();
+                let entry = self.quorum_resolver.remove(&(proposal_number, slot)).unwrap();
+                self.accept(proposal_number, slot, &*entry.promises);
             }
 
         } else {
             error!("Received promise for non existing proposal {:?} of slot {:?}", proposal_number, slot)
         }
+    }
 
+    pub fn on_accepted(&mut self, proposal: Proposal<T>) {
+        if !self.to_be_proposed.is_empty() {
+        }
     }
 
 }
@@ -118,29 +130,16 @@ pub mod tests {
     use tokio_test::{assert_pending, assert_ready};
     use futures::TryFutureExt;
 
-    #[tokio::test]
-    async fn successful_promise_quorum() {
+    fn successful_promise_quorum() {
         let (sender, _receiver) = std::sync::mpsc::channel();
         let ctx = NodeContext {
             my_id: 0, sender
         };
         let quorum_size = 3;
         let mut proposer =  Proposer::<u16>::new(ctx, quorum_size);
-        let proposal_number = proposer.next_proposal_number.clone();
+        let proposal_number = proposer.next_proposal_number;
         proposer.push_value_to_be_proposed(1337);
-        let mut proposer = RefCell::new(proposer);
 
-        let local = tokio::task::LocalSet::new();
-        let res = local.spawn_local(
-            proposer.borrow_mut().try_propose()
-        );
 
-        let mut propose_fut = tokio_test::task::spawn(res);
-
-        assert_pending!(propose_fut.poll());
-        proposer.borrow_mut().on_promise(proposal_number, 0, Vec::new());
-        assert_pending!(propose_fut.poll());
-        proposer.borrow_mut().on_promise(proposal_number, 0, Vec::new());
-        assert_ready!(propose_fut.poll());
     }
 }

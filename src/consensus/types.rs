@@ -1,9 +1,18 @@
+use std::collections::BTreeMap;
 
 /// Id of a node
 pub type Id = u64;
 
 /// Index of log entry
 pub type Slot = usize;
+
+/// A replica's view of the log, which may have holes
+pub type Log<T> = BTreeMap<Slot, T>;
+
+/// Returns the next undecided slot
+pub fn next_slot<T>(log: &Log<T>) -> Slot {
+    return log.keys().filter(|&k| !log.contains_key(&(k+1))).cloned().max().unwrap_or(0);
+}
 
 /// A proposal number for some slot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -32,6 +41,8 @@ pub struct ConsensusMessage<T> {
 
     /// None for broadcast
     pub to: Option<Id>,
+
+    /// The actual message
     pub payload: MessagePayload<T>
 }
 
@@ -39,12 +50,12 @@ pub struct ConsensusMessage<T> {
 /// A consensus message between nodes
 pub enum MessagePayload<T> {
     /// Sent from proposer(leader) to all acceptors (replicas)
-    Prepare(ProposalNumber),
+    Prepare(ProposalNumber, Slot),
 
     /// Also called 'ack',sent from an acceptor to the proposer in response to a prepare message
     /// whose proposal number is higher than all other proposals. In case the acceptor has accepted
-    /// a previous value, it will be included in the promise
-    Promise(ProposalNumber, Vec<Proposal<T>>),
+    /// a previous value for that slot, it will be included in the promise
+    Promise(ProposalNumber, Slot, Option<Proposal<T>>),
 
     /// Sent from a proposer to all acceptors once he obtained a majority quorum of promises, includes
     /// a value either originally chosen by the proposer, or the value with the highest proposal number
@@ -66,8 +77,6 @@ pub enum MessagePayload<T> {
     /// Sent by the new designated proposer
     ViewChange(Id),
 
-    /// Sent by
-    Catchup(Vec<T>)
 }
 
 impl <T> MessagePayload<T> {
@@ -89,7 +98,7 @@ impl <T> MessagePayload<T> {
 }
 
 /// Contains fields used by all
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NodeContext<T> {
     pub my_id: Id,
     pub sender: std::sync::mpsc::Sender<ConsensusMessage<T>>,
