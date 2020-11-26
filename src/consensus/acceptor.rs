@@ -46,11 +46,6 @@ impl <T> Acceptor<T> where T: Clone + std::fmt::Debug {
             warn!("proposal number is too low, ignoring");
         }
     }
-
-    #[tracing::instrument]
-    pub fn on_accepted(&mut self, proposal: Proposal<T>) {
-
-    }
 }
 
 

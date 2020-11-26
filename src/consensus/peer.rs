@@ -27,10 +27,9 @@ impl <T> Peer<T> where T: Clone + std::fmt::Debug {
         }
     }
 
-    pub fn propose(&mut self, value: T) {
+    pub async fn propose(&mut self, value: T) {
         self.proposer.push_value_to_be_proposed(value);
-        let slot = next_slot(&self.acceptor.log);
-        self.proposer.prepare(slot);
+        self.proposer.prepare();
         // TODO what if we accepted something else
 
     }

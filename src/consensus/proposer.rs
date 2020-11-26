@@ -18,7 +18,7 @@ impl <T> ProposeResolutionState<T> {
     pub fn new() -> ProposeResolutionState<T> {
         ProposeResolutionState {
             promises: Vec::new(),
-            promise_count: 0
+            promise_count: 0,
         }
     }
 }
@@ -30,6 +30,7 @@ pub struct Proposer<T> {
     pub quorum_size: usize,
     pub to_be_proposed: Vec<T>,
     pub next_proposal_number: ProposalNumber,
+    pub log: Log<T>,
 
     // a proposer might propose
     quorum_resolver: HashMap<(ProposalNumber, Slot), ProposeResolutionState<T>>
@@ -50,6 +51,7 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
                 leader_id,
                 num: 0
             },
+            log: Default::default(),
             quorum_resolver: HashMap::new()
         }
     }
@@ -62,7 +64,7 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
     }
 
     /// Phase 1a - sending prepare messages
-    pub fn prepare(&mut self, slot: Slot) {
+    pub fn prepare(&mut self) {
         if self.to_be_proposed.is_empty() {
             error!("called prepare when there are no values to propose");
             return
@@ -70,6 +72,7 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
 
         self.next_proposal_number.num += 1;
         let proposal_number = self.next_proposal_number;
+        let slot = next_slot(&self.log);
         assert!(!self.quorum_resolver.contains_key(&(proposal_number, slot)));
 
         let resolution_state = ProposeResolutionState::new();
@@ -86,14 +89,23 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
 
         // try accepting a value which was previously accepted at that slot, with the highest
         // proposal number, otherwise, use our own value
-        let value = accepted_proposals
-            .iter()
-            .max_by_key(|p| p.number)
-            .map(|p| p.value.clone())
-            .unwrap_or_else(|| self.to_be_proposed.remove(0));
 
-        info!("Asking to accept value {:?}", value);
+        let previously_accepted_opt = accepted_proposals
+                .iter()
+                .max_by_key(|p| p.number)
+                .map(|p| p.value.clone());
 
+        let value = match previously_accepted_opt {
+            Some(value) => {
+                info!("asking to accept previously accepted value {:?}", value);
+                value
+            },
+            None => {
+                let value = self.to_be_proposed.remove(0);
+                info!("asking to accept my own value {:?}", value);
+                value
+            }
+        };
         self.ctx.send_broadcast(MessagePayload::Accept(Proposal { number: proposal_number, slot, value }));
     }
 
@@ -119,6 +131,8 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
 
     pub fn on_accepted(&mut self, proposal: Proposal<T>) {
         if !self.to_be_proposed.is_empty() {
+            let _prev = self.log.insert(proposal.slot, proposal.value);
+            assert!(_prev.is_none());
         }
     }
 
@@ -130,16 +144,4 @@ pub mod tests {
     use tokio_test::{assert_pending, assert_ready};
     use futures::TryFutureExt;
 
-    fn successful_promise_quorum() {
-        let (sender, _receiver) = std::sync::mpsc::channel();
-        let ctx = NodeContext {
-            my_id: 0, sender
-        };
-        let quorum_size = 3;
-        let mut proposer =  Proposer::<u16>::new(ctx, quorum_size);
-        let proposal_number = proposer.next_proposal_number;
-        proposer.push_value_to_be_proposed(1337);
-
-
-    }
 }
