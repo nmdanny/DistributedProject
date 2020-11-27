@@ -6,29 +6,12 @@ pub type Id = u64;
 /// Index of log entry
 pub type Slot = usize;
 
-/// A replica's view of the log, which may have holes
-pub type Log<T> = BTreeMap<Slot, T>;
-
-/// Returns the next undecided slot
-pub fn next_slot<T>(log: &Log<T>) -> Slot {
-    return log.keys().filter(|&k| !log.contains_key(&(k+1))).cloned().max().unwrap_or(0);
-}
-
-/// A proposal number for some slot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ProposalNumber {
-    /// A strictly increasing number
-    pub num: u64,
-
-    /// Identifies the proposer/leader who initiated the vote, allowing tie-breaking in case
-    /// multiple partitioned leaders send a proposal with the same number
-    pub leader_id: Id
-}
+/// A replica's view of the log, which will never have holes
+pub type Log<T> = Vec<T>;
 
 /// A proposal
 #[derive(Debug, Clone)]
 pub struct Proposal<T> {
-    pub number: ProposalNumber,
     pub slot: Slot,
     pub value: T
 }
@@ -49,34 +32,9 @@ pub struct ConsensusMessage<T> {
 
 /// A consensus message between nodes
 pub enum MessagePayload<T> {
-    /// Sent from proposer(leader) to all acceptors (replicas)
-    Prepare(ProposalNumber, Slot),
-
-    /// Also called 'ack',sent from an acceptor to the proposer in response to a prepare message
-    /// whose proposal number is higher than all other proposals. In case the acceptor has accepted
-    /// a previous value for that slot, it will be included in the promise
-    Promise(ProposalNumber, Slot, Option<Proposal<T>>),
-
-    /// Sent from a proposer to all acceptors once he obtained a majority quorum of promises, includes
-    /// a value either originally chosen by the proposer, or the value with the highest proposal number
-    /// that was in an acceptor's promise
-    Accept(Proposal<T>),
-
-    /// Sent from an acceptor to all proposers and learners after accepting a value
-    Accepted(Proposal<T>),
-
-    /// Sent by proposer(leader) to all nodes
-    Heartbeat(Id),
-
-    /// Sent by an acceptor upon not receiving a heartbeat from the designated proposer
-    Complain(Id),
-
-    /// Sent by acceptors upon receiving a majority quorum of complaints
-    LeaveView(Id),
-
-    /// Sent by the new designated proposer
-    ViewChange(Id),
-
+    Propose(Proposal<T>),
+    Ack,
+    AlreadyCommitted { next_slot: Slot }
 }
 
 impl <T> MessagePayload<T> {
