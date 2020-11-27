@@ -6,19 +6,24 @@ use futures::channel::oneshot;
 use std::cell::RefCell;
 use std::{error::Error, io};
 use tracing::{debug, error, info, span, warn, Level};
+use tokio::time::Duration;
+
+
+pub const HEARTBEAT_FREQ: Duration = Duration::from_secs(1);
+pub const LEADER_CHANGE_FREQ: Duration = Duration::from_secs(2);
 
 
 #[derive(Debug)]
 struct ProposeResolutionState<T> {
-    promises: Vec<Proposal<T>>,
+    accepted_proposals: Vec<Proposal<T>>,
     promise_count: usize
 }
 
 impl <T> ProposeResolutionState<T> {
     pub fn new() -> ProposeResolutionState<T> {
         ProposeResolutionState {
-            promises: Vec::new(),
-            promise_count: 0,
+            accepted_proposals: Vec::new(),
+            promise_count: 0
         }
     }
 }
@@ -31,9 +36,7 @@ pub struct Proposer<T> {
     pub to_be_proposed: Vec<T>,
     pub next_proposal_number: ProposalNumber,
     pub log: Log<T>,
-
-    // a proposer might propose
-    quorum_resolver: HashMap<(ProposalNumber, Slot), ProposeResolutionState<T>>
+    propose_resolutions: HashMap<(ProposalNumber, Slot), ProposeResolutionState<T>>
 }
 
 impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
@@ -52,7 +55,7 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
                 num: 0
             },
             log: Default::default(),
-            quorum_resolver: HashMap::new()
+            propose_resolutions: HashMap::new()
         }
     }
 
@@ -63,33 +66,30 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
         self.to_be_proposed.push(value)
     }
 
-    /// Phase 1a - sending prepare messages
+    /// Phase 1a - sending prepare message, essentially trying to become a leader
     pub fn prepare(&mut self) {
-        if self.to_be_proposed.is_empty() {
-            error!("called prepare when there are no values to propose");
-            return
-        }
-
         self.next_proposal_number.num += 1;
         let proposal_number = self.next_proposal_number;
         let slot = next_slot(&self.log);
-        assert!(!self.quorum_resolver.contains_key(&(proposal_number, slot)));
+        assert!(!self.propose_resolutions.contains_key(&(proposal_number, slot)));
 
         let resolution_state = ProposeResolutionState::new();
-        self.quorum_resolver.insert((proposal_number, slot), resolution_state);
+        self.propose_resolutions.insert((proposal_number, slot), resolution_state);
         self.ctx.send_broadcast(MessagePayload::Prepare(proposal_number, slot));
     }
 
-    /// Phase 2a - sending accept message
+    pub fn send_heartbeat(&mut self) {
+        self.ctx.send_broadcast(MessagePayload::Heartbeat(self.id()))
+    }
+
+    /// Phase 2a - sending accept message. In case there's nothing to accept, None will be returned
     #[tracing::instrument]
-    pub fn accept(&mut self, proposal_number: ProposalNumber, slot: Slot, accepted_proposals: &[Proposal<T>])
+    pub fn accept(&mut self, proposal_number: ProposalNumber, slot: Slot, accepted_proposals: Vec<Proposal<T>>)
     {
-        let result = self.quorum_resolver.remove(&(proposal_number, slot)).unwrap();
-        assert_eq!(result.promise_count, self.quorum_size);
+        let _resolver_state = self.propose_resolutions.remove(&(proposal_number, slot)).unwrap();
 
         // try accepting a value which was previously accepted at that slot, with the highest
         // proposal number, otherwise, use our own value
-
         let previously_accepted_opt = accepted_proposals
                 .iter()
                 .max_by_key(|p| p.number)
@@ -101,12 +101,16 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
                 value
             },
             None => {
+                if self.to_be_proposed.is_empty() {
+                    warn!("tried to accept my own value, but I have nothing to offer");
+                    return
+                }
                 let value = self.to_be_proposed.remove(0);
                 info!("asking to accept my own value {:?}", value);
                 value
             }
         };
-        self.ctx.send_broadcast(MessagePayload::Accept(Proposal { number: proposal_number, slot, value }));
+        self.ctx.send_broadcast(MessagePayload::Accept(Proposal { number: proposal_number, slot, value: value.clone() }));
     }
 
     pub fn on_promise(&mut self, proposal_number: ProposalNumber, slot: Slot, accepted_proposal: Option<Proposal<T>>) {
@@ -115,13 +119,14 @@ impl <T> Proposer <T> where T: Clone + std::fmt::Debug {
             return
         }
 
-        if let Some(mut entry) = self.quorum_resolver.get_mut(&(proposal_number, slot)) {
-            entry.promises.extend(accepted_proposal.into_iter());
+        if let Some(mut entry) = self.propose_resolutions.get_mut(&(proposal_number, slot)) {
+            entry.accepted_proposals.extend(accepted_proposal.into_iter());
             entry.promise_count += 1;
+
             // we have a majority of promises
             if entry.promise_count == self.quorum_size {
-                let entry = self.quorum_resolver.remove(&(proposal_number, slot)).unwrap();
-                self.accept(proposal_number, slot, &*entry.promises);
+                let entry = self.propose_resolutions.remove(&(proposal_number, slot)).unwrap();
+                self.accept(proposal_number, slot, entry.accepted_proposals);
             }
 
         } else {

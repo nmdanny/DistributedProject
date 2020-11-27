@@ -6,10 +6,17 @@ pub type Id = u64;
 /// Index of log entry
 pub type Slot = usize;
 
-/// A replica's view of the log, which may have holes
+/// A replica's view of the log, which may have holes.
+/// The leader should never have holes
 pub type Log<T> = BTreeMap<Slot, T>;
 
-/// Returns the next undecided slot
+pub fn holes<T>(log: &Log<T>) -> impl Iterator<Item = Slot>
+{
+    let highest_seen_index = log.keys().max().cloned();
+    return log.keys().
+}
+
+/// Returns the next undecided slot, disregarding holes
 pub fn next_slot<T>(log: &Log<T>) -> Slot {
     return log.keys().filter(|&k| !log.contains_key(&(k+1))).cloned().max().unwrap_or(0);
 }
@@ -25,6 +32,16 @@ pub struct ProposalNumber {
     pub leader_id: Id
 }
 
+impl ProposalNumber {
+    /// Updates the current proposal number such that it'll be bigger than 'other'
+    pub fn one_up(&self, other: ProposalNumber) -> ProposalNumber {
+        ProposalNumber {
+            num: self.num.max(other.num + 1),
+            leader_id: self.leader_id
+        }
+    }
+}
+
 /// A proposal
 #[derive(Debug, Clone)]
 pub struct Proposal<T> {
@@ -35,6 +52,7 @@ pub struct Proposal<T> {
 
 
 /// Wraps a consensus message
+#[derive(Debug, Clone)]
 pub struct ConsensusMessage<T> {
     /// ID of node that sent the message
     pub from: Id,
@@ -47,15 +65,20 @@ pub struct ConsensusMessage<T> {
 }
 
 
+
 /// A consensus message between nodes
+#[derive(Debug, Clone)]
 pub enum MessagePayload<T> {
+    /// Sent from a client to a potential proposer
+    ClientRequest(T),
+
     /// Sent from proposer(leader) to all acceptors (replicas)
-    Prepare(ProposalNumber, Slot),
+    Prepare(ProposalNumber),
 
     /// Also called 'ack',sent from an acceptor to the proposer in response to a prepare message
     /// whose proposal number is higher than all other proposals. In case the acceptor has accepted
     /// a previous value for that slot, it will be included in the promise
-    Promise(ProposalNumber, Slot, Option<Proposal<T>>),
+    Promise(ProposalNumber, Option<Proposal<T>>),
 
     /// Sent from a proposer to all acceptors once he obtained a majority quorum of promises, includes
     /// a value either originally chosen by the proposer, or the value with the highest proposal number

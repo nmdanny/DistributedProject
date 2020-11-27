@@ -7,7 +7,7 @@ pub struct Acceptor<T> {
     pub highest_promise: Option<ProposalNumber>,
     pub quorum_size: usize,
     pub ctx: NodeContext<T>,
-    pub log: Log<Proposal<T>>
+    pub log: Log<Proposal<T>>,
 }
 
 impl <T> Acceptor<T> where T: Clone + std::fmt::Debug {
@@ -37,6 +37,7 @@ impl <T> Acceptor<T> where T: Clone + std::fmt::Debug {
 
     #[tracing::instrument]
     pub fn on_accept(&mut self, proposal: Proposal<T>) {
+        // TODO: what if proposal.number is higher than the highest promise?
         if Some(proposal.number) == self.highest_promise {
            info!("accepted proposal");
             let _prev = self.log.insert(proposal.slot, proposal.clone());
