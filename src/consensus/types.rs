@@ -1,138 +1,76 @@
-use std::collections::BTreeMap;
+/// Identifier for nodes
+pub type Id = usize;
 
-/// Id of a node
-pub type Id = u64;
-
-/// Index of log entry
-pub type Slot = usize;
-
-/// A replica's view of the log, which may have holes.
-/// The leader should never have holes
-pub type Log<T> = BTreeMap<Slot, T>;
-
-pub fn holes<T>(log: &Log<T>) -> impl Iterator<Item = Slot>
-{
-    let highest_seen_index = log.keys().max().cloned();
-    return log.keys().
-}
-
-/// Returns the next undecided slot, disregarding holes
-pub fn next_slot<T>(log: &Log<T>) -> Slot {
-    return log.keys().filter(|&k| !log.contains_key(&(k+1))).cloned().max().unwrap_or(0);
-}
-
-/// A proposal number for some slot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ProposalNumber {
-    /// A strictly increasing number
-    pub num: u64,
-
-    /// Identifies the proposer/leader who initiated the vote, allowing tie-breaking in case
-    /// multiple partitioned leaders send a proposal with the same number
-    pub leader_id: Id
-}
-
-impl ProposalNumber {
-    /// Updates the current proposal number such that it'll be bigger than 'other'
-    pub fn one_up(&self, other: ProposalNumber) -> ProposalNumber {
-        ProposalNumber {
-            num: self.num.max(other.num + 1),
-            leader_id: self.leader_id
-        }
-    }
-}
-
-/// A proposal
+/// An entry in the log
 #[derive(Debug, Clone)]
-pub struct Proposal<T> {
-    pub number: ProposalNumber,
-    pub slot: Slot,
-    pub value: T
+pub struct LogEntry<V> {
+    /// Value
+    value: V,
+
+    /// In which term was this entry received by the leader
+    term: usize,
+
 }
 
-
-/// Wraps a consensus message
+/// Invoked by candidates to gather votes(sent to all nodes)
 #[derive(Debug, Clone)]
-pub struct ConsensusMessage<T> {
-    /// ID of node that sent the message
-    pub from: Id,
+pub struct RequestVote {
+    /// Candidate's term
+    pub term: usize,
 
-    /// None for broadcast
-    pub to: Option<Id>,
+    /// ID of Candidate
+    pub candidate_id: Id,
 
-    /// The actual message
-    pub payload: MessagePayload<T>
+    /// Index of candidate's last log entry
+    pub last_log_index: usize,
+
+    /// Term of candidate's last log entry
+    pub last_log_term: usize
+
 }
 
-
-
-/// A consensus message between nodes
+/// Response to RequestVote (sent by each node to the candidate)
 #[derive(Debug, Clone)]
-pub enum MessagePayload<T> {
-    /// Sent from a client to a potential proposer
-    ClientRequest(T),
+pub struct RequestVoteResponse {
+    /// Used to update the current candidate's term
+    pub term: usize,
 
-    /// Sent from proposer(leader) to all acceptors (replicas)
-    Prepare(ProposalNumber),
-
-    /// Also called 'ack',sent from an acceptor to the proposer in response to a prepare message
-    /// whose proposal number is higher than all other proposals. In case the acceptor has accepted
-    /// a previous value for that slot, it will be included in the promise
-    Promise(ProposalNumber, Option<Proposal<T>>),
-
-    /// Sent from a proposer to all acceptors once he obtained a majority quorum of promises, includes
-    /// a value either originally chosen by the proposer, or the value with the highest proposal number
-    /// that was in an acceptor's promise
-    Accept(Proposal<T>),
-
-    /// Sent from an acceptor to all proposers and learners after accepting a value
-    Accepted(Proposal<T>),
-
-    /// Sent by proposer(leader) to all nodes
-    Heartbeat(Id),
-
-    /// Sent by an acceptor upon not receiving a heartbeat from the designated proposer
-    Complain(Id),
-
-    /// Sent by acceptors upon receiving a majority quorum of complaints
-    LeaveView(Id),
-
-    /// Sent by the new designated proposer
-    ViewChange(Id),
-
+    /// Whether he candidate received a vote
+    pub vote_granted: bool
 }
 
-impl <T> MessagePayload<T> {
-    pub fn wrap_unicast(self, from: Id, to: Id) -> ConsensusMessage<T> {
-       ConsensusMessage {
-           from,
-           to: Some(to),
-           payload: self
-       }
-    }
 
-    pub fn wrap_broadcast(self, from: Id) -> ConsensusMessage<T> {
-        ConsensusMessage {
-            from,
-            to: None,
-            payload: self
-        }
-    }
+
+/// Invoked by leader to replicate log entries, also used as heartbeat
+#[derive(Debug, Clone)]
+pub struct AppendEntries<V> {
+    /// Leader's term
+    pub term: usize,
+
+    /// Leader's ID, followers must know it in order to redirect clients
+    pub leader_id: Id,
+
+    /// Index of log entry preceding the new entries
+    pub prev_log_index: usize,
+
+    /// Term of log entry preceding the new entries
+    pub prev_log_term: usize,
+
+    /// New entries to store (empty for heartbeat)
+    pub entries: Vec<V>,
+
+    /// Leader's commit index
+    pub leader_commit: usize
 }
 
-/// Contains fields used by all
-#[derive(Clone, Debug)]
-pub struct NodeContext<T> {
-    pub my_id: Id,
-    pub sender: std::sync::mpsc::Sender<ConsensusMessage<T>>,
-}
+/// Invoked by each follower(or candidate, in which case they become followers)
+/// upon receiving AppendEntries
+#[derive(Debug, Clone)]
+pub struct AppendEntriesResponse {
+    /// The current term, used by leader to update its own term
+    pub term: usize,
 
-impl <T> NodeContext<T> {
-    pub fn send_unicast(&mut self, msg: MessagePayload<T>, to: Id) {
-        self.sender.send(msg.wrap_unicast(self.my_id, to)).unwrap();
-    }
-
-    pub fn send_broadcast(&mut self, msg: MessagePayload<T>) {
-        self.sender.send(msg.wrap_broadcast(self.my_id)).unwrap();
-    }
+    /// True if the follower included an entry matching `prev_log_index`, `prev_log_term`
+    /// and thus could have appended the given entries
+    pub success: bool
 }
