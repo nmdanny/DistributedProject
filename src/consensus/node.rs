@@ -1,20 +1,41 @@
 use crate::consensus::types::*;
 use std::time::Instant;
-use tracing::stdlib::collections::HashMap;
+use std::collections::HashMap;
 
 pub trait Transport<T> {
     fn broadcast(msg: MessagePayload<T>);
+}
+
+#[derive(Debug)]
+struct ProposeResolutionState<T> {
+    accepted_proposals: Vec<Proposal<T>>,
+    promise_count: usize
+}
+
+impl <T> ProposeResolutionState<T> {
+    pub fn new() -> ProposeResolutionState<T> {
+        ProposeResolutionState {
+            accepted_proposals: Vec::new(),
+            promise_count: 0
+        }
+    }
 }
 
 pub struct Node<T> {
     pub id: Id,
     pub leader_id: Id,
     pub leader_last_heartbeat: Instant,
-    pub log: Log<T>,
-    pub promises: HashMap<usize, >
-    pub highest_proposal_number: ProposalNumber,
     pub quorum_size: usize,
-    pub transport: Box<dyn Transport<T>>
+    pub transport: Box<dyn Transport<T>>,
+
+    /* acceptor state */
+
+    pub highest_proposal_number: ProposalNumber,
+    pub log: Log<Proposal<T>>,
+
+    /* proposer state */
+    pub promise_resolution: HashMap<Slot, >
+
 }
 
 impl Node<T> {
