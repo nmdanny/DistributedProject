@@ -12,6 +12,7 @@ log = "0.4"
 anyhow = "1.0"
 pretty_env_logger = "0.4"
 futures = "0.3"
+async-trait = "0.1.42"
 tokio = { version = "0.2", features = ["full"] }
 tokio-test = "0.3.0"
 tracing = "0.1"

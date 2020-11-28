@@ -1,14 +1,14 @@
-/// Identifier for nodes
+/// Identifier for nodes, needed in order to communicate with them via the transport
 pub type Id = usize;
 
 /// An entry in the log
 #[derive(Debug, Clone)]
 pub struct LogEntry<V> {
     /// Value
-    value: V,
+    pub value: V,
 
     /// In which term was this entry received by the leader
-    term: usize,
+    pub term: usize,
 
 }
 
@@ -39,6 +39,19 @@ pub struct RequestVoteResponse {
     pub vote_granted: bool
 }
 
+impl RequestVoteResponse {
+    pub fn vote_yes(my_term: usize) -> RequestVoteResponse {
+        RequestVoteResponse {
+            term: my_term, vote_granted: true
+        }
+    }
+
+    pub fn vote_no(my_term: usize) -> RequestVoteResponse {
+        RequestVoteResponse {
+            term: my_term, vote_granted: false
+        }
+    }
+}
 
 
 /// Invoked by leader to replicate log entries, also used as heartbeat
@@ -57,10 +70,17 @@ pub struct AppendEntries<V> {
     pub prev_log_term: usize,
 
     /// New entries to store (empty for heartbeat)
-    pub entries: Vec<V>,
+    pub entries: Vec<LogEntry<V>>,
 
     /// Leader's commit index
     pub leader_commit: usize
+}
+
+impl <V> AppendEntries<V> {
+    pub fn indexed_entries(&self) -> impl Iterator<Item = (usize, &LogEntry<V>)> {
+        let indices = (self.prev_log_index + 1 .. );
+        return indices.zip(self.entries.iter())
+    }
 }
 
 /// Invoked by each follower(or candidate, in which case they become followers)
@@ -71,6 +91,16 @@ pub struct AppendEntriesResponse {
     pub term: usize,
 
     /// True if the follower included an entry matching `prev_log_index`, `prev_log_term`
-    /// and thus could have appended the given entries
+    /// and thus have appended the given entries
     pub success: bool
+}
+
+impl AppendEntriesResponse {
+    pub fn success(my_term: usize) -> AppendEntriesResponse {
+        AppendEntriesResponse { term: my_term, success: true}
+    }
+
+    pub fn failed(my_term: usize) -> AppendEntriesResponse {
+        AppendEntriesResponse { term: my_term, success: false}
+    }
 }
