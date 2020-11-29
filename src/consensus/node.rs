@@ -234,8 +234,9 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
     /// The main loop
     pub async fn run() -> Result<(), anyhow::Error> {
-        // begin as a
+        // the state machine of the consensus module, at first we always follow
         let mut state = FollowerState { time_since_last_heartbeat: Instant::now(), leader_id: 0};
+
         Ok(())
     }
 
@@ -387,7 +388,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             let mut cs = cs.clone();
             task::spawn_local(async move {
                 let res = transport.send_request_vote(node_id, req).await;
-                cs.lock().unwrap().responses.push(res);
+                cs.lock().unwrap().responses.push(res.unwrap());
             });
         }
     }
