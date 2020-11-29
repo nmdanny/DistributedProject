@@ -2,35 +2,105 @@ use crate::consensus::types::*;
 use crate::consensus::transport::*;
 use std::collections::BTreeMap;
 use tracing::instrument;
+use tokio::task;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+
+
+const MIN_ELECTION_TIMEOUT_MS: u64 = 150;
+const MAX_ELECTION_TIMEOUT_MS: u64 = 300;
+
+pub fn generate_election_timeout() -> Duration {
+    use rand::distributions::{Distribution, Uniform};
+    let between = Uniform::from(MIN_ELECTION_TIMEOUT_MS .. MAX_ELECTION_TIMEOUT_MS);
+    let mut rng = rand::thread_rng();
+    Duration::from_millis(between.sample(&mut rng))
+}
 
 /// State used by a follower
 #[derive(Debug, Clone)]
 pub struct FollowerState {
     pub leader_id: Id,
 
-    pub time_since_last_heartbeat: std::time::Instant
+    pub time_since_last_heartbeat: Instant
 }
 
 impl FollowerState {
-    pub fn should_begin_election(&self, timeout: std::time::Duration) -> bool {
-        let time_passed = std::time::Instant::now() - self.time_since_last_heartbeat;
+
+    pub fn should_begin_election_at(&self, at: Instant,
+                                    timeout: Duration) -> bool {
+        let time_passed = at - self.time_since_last_heartbeat;
         time_passed >= timeout
+    }
+
+    pub fn should_begin_election(&self, timeout: Duration) -> bool {
+        self.should_begin_election_at(Instant::now(), timeout)
     }
 }
 
-/// State used by a candidate
+#[derive(Debug, Clone)]
+pub enum ElectionResult {
+    Lost,
+    Pending,
+    Won
+}
+
+/// State used by a candidate, during a single election
 #[derive(Debug, Clone)]
 pub struct CandidateState {
+    /// All votes, including the candidate's vote!
     pub responses: Vec<RequestVoteResponse>,
-    pub required_quorum_size: usize
+    pub required_quorum_size: usize,
+    pub election_start_time: Instant,
+    pub election_timeout: Duration
 }
 
 impl CandidateState {
-    pub fn new(required_quorum_size: usize) -> Self {
+    pub fn new<V, T>(candidate: &Node<V, T>, election_start_time: Instant) -> Self {
+        // a candidate always votes for itself
+        let my_vote = RequestVoteResponse {
+            term: candidate.current_term,
+            vote_granted: true
+        };
         CandidateState {
-            responses: Vec::new(), required_quorum_size
+            responses: vec![my_vote],
+            required_quorum_size: candidate.quorum_size(),
+            election_start_time,
+            election_timeout: candidate.election_timeout
         }
     }
+
+    pub fn election_elapsed_at(&self, at: Instant) -> bool {
+        (at - self.election_start_time) >= self.election_timeout
+    }
+
+    pub fn election_elapsed(&self) -> bool {
+        self.election_elapsed_at(Instant::now())
+    }
+
+    /// Checks the election's status
+    pub fn tally(&self) -> ElectionResult {
+        let mut yes = 0;
+        let mut no = 0;
+        for vote in self.responses.iter() {
+            if vote.vote_granted {
+                yes += 1;
+            } else {
+                no += 1;
+            }
+        };
+        if yes >= self.required_quorum_size {
+            assert!(no < self.required_quorum_size);
+            return ElectionResult::Won
+        }
+        if no >= self.required_quorum_size {
+            assert!(yes < self.required_quorum_size);
+            return ElectionResult::Lost
+        }
+        return ElectionResult::Pending
+    }
+
 }
 
 #[derive(Debug, Clone)]
@@ -57,19 +127,28 @@ pub enum ServerState {
     Leader(LeaderState)
 }
 
-#[derive(Debug, Clone)]
-pub struct Node<V: Clone, T: Transport<V>> {
+#[derive(Debug)]
+pub struct Node<V, T> {
 
-    transport: T,
+    /* related to async & message sending */
+    local_set: tokio::task::LocalSet,
+    pub transport: T,
 
     /// Node ID
-    id: Id,
+    pub id: Id,
+
+    /// IDs of other nodes
+    pub other_nodes: Vec<Id>,
 
     /// Number of nodes
-    number_of_nodes: usize,
+    pub number_of_nodes: usize,
 
     /// Server state
-    state: ServerState,
+    pub state: ServerState,
+
+    /// How long can I go without hearing from the leader in order
+    /// to trigger an election
+    pub election_timeout: Duration,
 
     /* persistent state */
 
@@ -90,14 +169,17 @@ pub struct Node<V: Clone, T: Transport<V>> {
 
 }
 
-impl <V: std::fmt::Debug + Clone, T: std::fmt::Debug + Transport<V>> Node<V, T> {
+impl <V, T> Node<V, T> {
     pub fn new(id: usize, number_of_nodes: usize, transport: T) -> Self {
         Node {
+            local_set: tokio::task::LocalSet::new(),
             transport,
             id,
+            other_nodes: (0 .. number_of_nodes).filter(|&cur_id| cur_id != id).collect(),
             number_of_nodes,
+            election_timeout: generate_election_timeout(),
             state: ServerState::Follower(FollowerState {
-                time_since_last_heartbeat: std::time::Instant::now(),
+                time_since_last_heartbeat: Instant::now(),
                 leader_id: 0
             }),
             log: Default::default(),
@@ -114,7 +196,7 @@ impl <V: std::fmt::Debug + Clone, T: std::fmt::Debug + Transport<V>> Node<V, T> 
 
     /// Iterator over all other node IDs
     pub fn all_other_nodes(&self) -> impl Iterator<Item = Id> {
-        (0 .. self.number_of_nodes)//.filter(|&id| id != self.id)
+        self.other_nodes.clone().into_iter()
     }
 
     pub fn follower_state(&mut self) -> Option<&mut FollowerState> {
@@ -144,6 +226,18 @@ impl <V: std::fmt::Debug + Clone, T: std::fmt::Debug + Transport<V>> Node<V, T> 
         assert!(!self.log.contains_key(&0));
         *self.log.keys().last().unwrap_or(&0)
     }
+}
+
+
+/* Following block contains most of the core logic */
+impl <V: std::fmt::Debug + Clone + Send, T: std::fmt::Debug + Transport<V>> Node<V, T> {
+
+    /// The main loop
+    pub async fn run() -> Result<(), anyhow::Error> {
+        // begin as a
+        let mut state = FollowerState { time_since_last_heartbeat: Instant::now(), leader_id: 0};
+        Ok(())
+    }
 
     /// Invoked by any node upon receiving a request to vote
     #[instrument]
@@ -152,6 +246,9 @@ impl <V: std::fmt::Debug + Clone, T: std::fmt::Debug + Transport<V>> Node<V, T> 
         if self.current_term > req.term {
             return RequestVoteResponse::vote_no(self.current_term);
         }
+
+        // Update our term (Rules for servers, all servers)
+        self.current_term = req.term;
 
         // 2. if we've yet to vote(or we only voted for the candidate - in case of multiple elections in
         // a row, we might receive the same vote request more than once, and `self.voted_for` won't be
@@ -234,9 +331,74 @@ impl <V: std::fmt::Debug + Clone, T: std::fmt::Debug + Transport<V>> Node<V, T> 
 
         // 5. update commit_index
         if req.leader_commit > self.commit_index {
+            // we now know that 'req.leader_commit' is the minimal commit index,
+            // but since we're a follower,
             self.commit_index = req.leader_commit.min(self.last_applied());
         }
 
         AppendEntriesResponse::success(self.current_term)
+    }
+
+    pub fn tick_follower(&mut self) {
+        match &self.state {
+            ServerState::Follower(state) => {
+                if state.should_begin_election(self.election_timeout) {
+                    warn!("Did not receive heartbeat in too long, becoming candidate");
+                    self.start_election();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn tick_candidate(&mut self) {
+        match &self.state {
+            ServerState::Candidate(state) => {
+                if state.election_elapsed() {
+                    warn!("Election elapsed, starting another one");
+                    self.start_election();
+                }
+            },
+            _ => {}
+        }
+    }
+
+    pub fn start_election(&mut self) {
+        use std::sync::{Arc, Mutex};
+        assert!(self.leader_state().is_none(), "A leader cannot start an election");
+        self.state = ServerState::Candidate(CandidateState::new(self,
+                                                                Instant::now()));
+        self.current_term += 1;
+        warn!("Election started for term {}", self.current_term);
+
+        let mut cs = Rc::new(Mutex::new(CandidateState::new(self,
+        Instant::now())));
+        let local = task::LocalSet::new();
+        for node_id in self.all_other_nodes().collect::<Vec<_>>() {
+            let req = RequestVote {
+                term: self.current_term,
+                candidate_id: self.id,
+                last_log_index: self.last_applied(),
+                last_log_term: self.log.get(&self.last_applied())
+                    .map(|e| e.term)
+                    .unwrap_or(0)
+            };
+            let mut transport = self.transport.clone();
+            let mut cs = cs.clone();
+            task::spawn_local(async move {
+                let res = transport.send_request_vote(node_id, req).await;
+                cs.lock().unwrap().responses.push(res);
+            });
+        }
+    }
+
+    pub fn on_vote(&mut self, vote: RequestVoteResponse) {
+        if self.current_term != vote.term {
+
+        }
+    }
+
+    pub fn become_leader(&mut self) {
+
     }
 }
