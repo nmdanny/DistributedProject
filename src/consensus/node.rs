@@ -6,8 +6,9 @@ use tracing::instrument;
 use tokio::task;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-
-
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
+use tokio::sync::oneshot;
 
 const MIN_ELECTION_TIMEOUT_MS: u64 = 150;
 const MAX_ELECTION_TIMEOUT_MS: u64 = 300;
@@ -20,14 +21,24 @@ pub fn generate_election_timeout() -> Duration {
 }
 
 /// State used by a follower
-#[derive(Debug, Clone)]
-pub struct FollowerState {
+#[derive(Debug)]
+pub struct FollowerState<'a, V: Value, T: Transport<V>> {
+    pub node: &'a mut Node<V, T>,
+
     pub leader_id: Id,
 
     pub time_since_last_heartbeat: Instant
 }
 
-impl FollowerState {
+impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
+    /// Creates state used for a node who has just become a follower
+    pub fn new(node: &'a mut Node<V, T>) -> Self {
+        FollowerState {
+            node,
+            leader_id: 0,
+            time_since_last_heartbeat: Instant::now()
+        }
+    }
 
     pub fn should_begin_election_at(&self, at: Instant,
                                     timeout: Duration) -> bool {
@@ -38,9 +49,13 @@ impl FollowerState {
     pub fn should_begin_election(&self, timeout: Duration) -> bool {
         self.should_begin_election_at(Instant::now(), timeout)
     }
+
+    pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ElectionResult {
     Lost,
     Pending,
@@ -48,8 +63,10 @@ pub enum ElectionResult {
 }
 
 /// State used by a candidate, during a single election
-#[derive(Debug, Clone)]
-pub struct CandidateState {
+#[derive(Debug)]
+pub struct CandidateState<'a, V: Value, T: Transport<V>> {
+    pub node: &'a mut Node<V, T>,
+
     /// All votes, including the candidate's vote!
     pub responses: Vec<RequestVoteResponse>,
     pub required_quorum_size: usize,
@@ -57,18 +74,23 @@ pub struct CandidateState {
     pub election_timeout: Duration
 }
 
-impl CandidateState {
-    pub fn new<V: Value, T>(candidate: &Node<V, T>, election_start_time: Instant) -> Self {
+impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
+    /// Creates state for a candidate who has just started an election
+    pub fn new(candidate: &'a mut Node<V, T>) -> Self {
         // a candidate always votes for itself
         let my_vote = RequestVoteResponse {
             term: candidate.current_term,
             vote_granted: true
         };
+        let required_quorum_size = candidate.quorum_size();
+        /// TODO: should I generate a new election timeout?
+        let election_timeout = candidate.election_timeout;
         CandidateState {
+            node: candidate,
             responses: vec![my_vote],
-            required_quorum_size: candidate.quorum_size(),
-            election_start_time,
-            election_timeout: candidate.election_timeout
+            required_quorum_size,
+            election_start_time: Instant::now(),
+            election_timeout
         }
     }
 
@@ -102,10 +124,39 @@ impl CandidateState {
         return ElectionResult::Pending
     }
 
+    pub async fn start_election(&mut self) -> Result<(), RaftError> {
+        self.node.current_term += 1;
+        warn!("Election started for term {}", self.node.current_term);
+
+        let local = task::LocalSet::new();
+        for node_id in self.node.all_other_nodes().collect::<Vec<_>>() {
+            let req = RequestVote {
+                term: self.node.current_term,
+                candidate_id: self.node.id,
+                last_log_index: self.node.storage.last_log_index(),
+                last_log_term: self.node.storage.last_log_term()
+            };
+            let mut transport = self.node.transport.clone();
+            task::spawn_local(async move {
+                let res = transport.send_request_vote(node_id, req).await;
+                // self.responses.push(res.unwrap());
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
+        self.start_election().await?;
+        Ok(())
+    }
+
 }
 
-#[derive(Debug, Clone)]
-pub struct LeaderState {
+#[derive(Debug)]
+pub struct LeaderState<'a, V: Value, T: Transport<V>>{
+
+    pub node: &'a mut Node<V, T>,
+
     /// For each node, index of the next log entry(in the leader's log) to send to him
     /// Usually next_index[peer] is match_index[peer] + 1, however, match_index[peer] is usually
     /// 0 when a leader is initiated(or might lag behind in other cases where `peer` was partitioned
@@ -120,14 +171,31 @@ pub struct LeaderState {
     pub match_index: BTreeMap<Id, usize>
 }
 
-/// In which state is the server currently at
-#[derive(Debug, Clone)]
-pub enum ServerState {
-    Follower(FollowerState),
-    Candidate(CandidateState),
-    Leader(LeaderState)
+impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
+    /// Creates state for a node who just became a leader
+    pub fn new(node: &'a mut Node<V, T>) -> Self {
+        LeaderState {
+            node,
+            next_index: Default::default(),
+            match_index: Default::default()
+        }
+    }
+
+    pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }
 
+
+/// In which state is the server currently at
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ServerState {
+    Follower,
+    Candidate,
+    Leader,
+}
+
+/// Contains all state used by any node
 #[derive(Debug)]
 pub struct Node<V: Value, T> {
 
@@ -168,6 +236,7 @@ pub struct Node<V: Value, T> {
     /// Index of highest log entry known to be committed (replicated to a majority quorum)
     pub commit_index: usize,
 
+    // TODO, maybe add last_applied
 }
 
 impl <V: Value, T> Node<V, T> {
@@ -179,10 +248,7 @@ impl <V: Value, T> Node<V, T> {
             other_nodes: (0 .. number_of_nodes).filter(|&cur_id| cur_id != id).collect(),
             number_of_nodes,
             election_timeout: generate_election_timeout(),
-            state: ServerState::Follower(FollowerState {
-                time_since_last_heartbeat: Instant::now(),
-                leader_id: 0
-            }),
+            state: ServerState::Follower,
             storage: Default::default(),
             current_term: 0,
             voted_for: None,
@@ -199,39 +265,25 @@ impl <V: Value, T> Node<V, T> {
     pub fn all_other_nodes(&self) -> impl Iterator<Item = Id> {
         self.other_nodes.clone().into_iter()
     }
-
-    pub fn follower_state(&mut self) -> Option<&mut FollowerState> {
-        match &mut self.state {
-            ServerState::Follower(s) => Some(s),
-            _ => None
-        }
-    }
-
-    pub fn candidate_state(&mut self) -> Option<&mut CandidateState> {
-        match &mut self.state {
-            ServerState::Candidate(s) => Some(s),
-            _ => None
-        }
-    }
-
-    pub fn leader_state(&mut self) -> Option<&mut LeaderState> {
-        match &mut self.state {
-            ServerState::Leader(s) => Some(s),
-            _ => None
-        }
-    }
 }
 
 
-/* Following block contains most of the core logic */
+/* Following block contains logic shared with all states of a raft node */
 impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
-    /// The main loop
-    pub async fn run() -> Result<(), anyhow::Error> {
+    #[instrument]
+    /// The main loop - this does everything, and it has ownership of the Node
+    pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
         // the state machine of the consensus module, at first we always follow
-        let mut state = FollowerState { time_since_last_heartbeat: Instant::now(), leader_id: 0};
+        info!("Starting loop");
 
-        Ok(())
+        loop {
+            match self.state{
+                ServerState::Follower => FollowerState::new(&mut self).run_loop().await?,
+                ServerState::Candidate => CandidateState::new(&mut self).run_loop().await?,
+                ServerState::Leader => LeaderState::new(&mut self).run_loop().await?,
+            }
+        }
     }
 
     /// Updates the current term to the given one, if it's more up to date
@@ -343,68 +395,6 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         AppendEntriesResponse::success(self.current_term)
     }
 
-    pub fn tick_follower(&mut self) {
-        match &self.state {
-            ServerState::Follower(state) => {
-                if state.should_begin_election(self.election_timeout) {
-                    warn!("Did not receive heartbeat in too long, becoming candidate");
-                    self.start_election();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub fn tick_candidate(&mut self) {
-        match &self.state {
-            ServerState::Candidate(state) => {
-                if state.election_elapsed() {
-                    warn!("Election elapsed, starting another one");
-                    self.start_election();
-                }
-            },
-            _ => {}
-        }
-    }
-
-    pub fn start_election(&mut self) {
-        use std::sync::{Arc, Mutex};
-        assert!(self.leader_state().is_none(), "A leader cannot start an election");
-        self.state = ServerState::Candidate(CandidateState::new(self,
-                                                                Instant::now()));
-        self.current_term += 1;
-        warn!("Election started for term {}", self.current_term);
-
-        let mut cs = Rc::new(Mutex::new(CandidateState::new(self,
-        Instant::now())));
-        let local = task::LocalSet::new();
-        for node_id in self.all_other_nodes().collect::<Vec<_>>() {
-            let req = RequestVote {
-                term: self.current_term,
-                candidate_id: self.id,
-                last_log_index: self.storage.last_log_index(),
-                last_log_term: self.storage.get(&self.storage.last_log_index())
-                    .map(|e| e.term)
-                    .unwrap_or(0)
-            };
-            let mut transport = self.transport.clone();
-            let mut cs = cs.clone();
-            task::spawn_local(async move {
-                let res = transport.send_request_vote(node_id, req).await;
-                cs.lock().unwrap().responses.push(res.unwrap());
-            });
-        }
-    }
-
-    pub fn on_vote(&mut self, vote: RequestVoteResponse) {
-        if self.current_term != vote.term {
-
-        }
-    }
-
-    pub fn become_leader(&mut self) {
-
-    }
 }
 
 #[cfg(test)]
@@ -417,9 +407,7 @@ mod tests {
         let mut node = Node::<String, _>::new(2, 5, NoopTransport);
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
-        assert!(node.follower_state().is_some());;
-        assert!(node.leader_state().is_none());;
-        assert!(node.candidate_state().is_none());;
+        assert_eq!(node.state, ServerState::Follower);
         assert_eq!(node.all_other_nodes().collect::<Vec<_>>(), vec![0, 1, 3, 4]);
     }
 }
