@@ -1,5 +1,6 @@
 use crate::consensus::types::*;
 use crate::consensus::transport::*;
+use crate::consensus::log::*;
 use std::collections::BTreeMap;
 use tracing::instrument;
 use tokio::task;
@@ -128,48 +129,6 @@ pub enum ServerState {
 }
 
 #[derive(Debug)]
-pub struct InMemoryStorage<V: Value>
-{
-    pub log: BTreeMap<usize, LogEntry<V>>
-}
-
-impl <V: Value> Default for InMemoryStorage<V> {
-    fn default() -> Self {
-        InMemoryStorage {
-            log: Default::default()
-        }
-    }
-}
-
-impl <V: Value> InMemoryStorage<V> {
-    /// Gets the log entry at given index
-    pub fn get(&self, index: &usize) -> Option<&LogEntry<V>> {
-        assert!(*index > 0);
-        self.log.get(index)
-    }
-
-    /// Inserts a log entry into given index, returns the previous log entry(if exists)
-    pub fn insert(&mut self, index: usize, entry: impl Into<LogEntry<V>>) -> Option<LogEntry<V>> {
-        self.log.insert(*&index, entry.into())
-    }
-
-    pub fn remove(&mut self, index: &usize) -> Option<LogEntry<V>> {
-        self.log.remove(index)
-    }
-
-    /// Index of last entry in the log
-    pub fn last_log_index(&self) -> usize {
-        assert!(!self.log.contains_key(&0));
-        *self.log.keys().last().unwrap_or(&0)
-    }
-
-    /// Term of the last entry in the log
-    pub fn last_log_term(&self) -> usize {
-        self.log.get(&self.last_log_index()).map(|e| e.term).unwrap_or(0)
-    }
-}
-
-#[derive(Debug)]
 pub struct Node<V: Value, T> {
 
     /* related to async & message sending */
@@ -275,6 +234,14 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         Ok(())
     }
 
+    /// Updates the current term to the given one, if it's more up to date
+    pub fn observe_term(&mut self, term: usize) {
+        if term > self.current_term {
+            self.current_term = term;
+        }
+        // TODO convert to follower
+    }
+
     /// Invoked by any node upon receiving a request to vote
     #[instrument]
     pub fn on_receive_request_vote(&mut self, req: &RequestVote) -> RequestVoteResponse {
@@ -282,9 +249,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         if self.current_term > req.term {
             return RequestVoteResponse::vote_no(self.current_term);
         }
-
-        // Update our term (Rules for servers, all servers)
-        self.current_term = req.term;
+        self.observe_term(req.term);
 
         // 2. if we've yet to vote(or we only voted for the candidate - in case of multiple elections in
         // a row, we might receive the same vote request more than once, and `self.voted_for` won't be
@@ -312,6 +277,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         }
 
         // the sender is on our own term or later
+        self.observe_term(req.term);
 
         // 2. We can't append entries as we have a mismatch - the last entry in our log doesn't
         //    match (in index or term) the one expected by the leader
