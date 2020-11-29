@@ -402,3 +402,22 @@ impl <V: std::fmt::Debug + Clone + Send, T: std::fmt::Debug + Transport<V>> Node
 
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+
+
+    #[test]
+    fn node_initialization_and_getters() {
+        let mut node = Node::<String, _>::new(2, 5, NoopTransport);
+        assert_eq!(node.id, 2);
+        assert_eq!(node.quorum_size(), 3);
+        assert!(node.follower_state().is_some());;
+        assert!(node.leader_state().is_none());;
+        assert!(node.candidate_state().is_none());;
+        assert_eq!(node.all_other_nodes().collect::<Vec<_>>(), vec![0, 1, 3, 4]);
+    }
+}
