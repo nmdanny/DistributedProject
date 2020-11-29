@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
+use thiserror::Error;
 
 /// A value that can be stored in a log entry, must be (de)serializable, owned
 pub trait Value: Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {}
@@ -118,3 +119,11 @@ impl AppendEntriesResponse {
         AppendEntriesResponse { term: my_term, success: false}
     }
 }
+
+#[derive(Error, Debug)]
+pub enum RaftError {
+    #[error("Network Error: {0}")]
+    NetworkError(anyhow::Error)
+}
+
+pub type RaftResult<T> = Result<T, RaftError>;
