@@ -128,6 +128,48 @@ pub enum ServerState {
 }
 
 #[derive(Debug)]
+pub struct InMemoryStorage<V: Value>
+{
+    pub log: BTreeMap<usize, LogEntry<V>>
+}
+
+impl <V: Value> Default for InMemoryStorage<V> {
+    fn default() -> Self {
+        InMemoryStorage {
+            log: Default::default()
+        }
+    }
+}
+
+impl <V: Value> InMemoryStorage<V> {
+    /// Gets the log entry at given index
+    pub fn get(&self, index: &usize) -> Option<&LogEntry<V>> {
+        assert!(*index > 0);
+        self.log.get(index)
+    }
+
+    /// Inserts a log entry into given index, returns the previous log entry(if exists)
+    pub fn insert(&mut self, index: usize, entry: impl Into<LogEntry<V>>) -> Option<LogEntry<V>> {
+        self.log.insert(*&index, entry.into())
+    }
+
+    pub fn remove(&mut self, index: &usize) -> Option<LogEntry<V>> {
+        self.log.remove(index)
+    }
+
+    /// Index of last entry in the log
+    pub fn last_log_index(&self) -> usize {
+        assert!(!self.log.contains_key(&0));
+        *self.log.keys().last().unwrap_or(&0)
+    }
+
+    /// Term of the last entry in the log
+    pub fn last_log_term(&self) -> usize {
+        self.log.get(&self.last_log_index()).map(|e| e.term).unwrap_or(0)
+    }
+}
+
+#[derive(Debug)]
 pub struct Node<V: Value, T> {
 
     /* related to async & message sending */
@@ -154,7 +196,7 @@ pub struct Node<V: Value, T> {
 
     /// Log entries, begins with index 1.
     /// Indices that are 0 are effectively sentinel values
-    pub log: BTreeMap<usize, LogEntry<V>>,
+    pub storage: InMemoryStorage<V>,
 
     /// The latest term the server has seen
     pub current_term: usize,
@@ -182,7 +224,7 @@ impl <V: Value, T> Node<V, T> {
                 time_since_last_heartbeat: Instant::now(),
                 leader_id: 0
             }),
-            log: Default::default(),
+            storage: Default::default(),
             current_term: 0,
             voted_for: None,
             commit_index: 0,
@@ -219,13 +261,6 @@ impl <V: Value, T> Node<V, T> {
             _ => None
         }
     }
-
-    /// The index of the highest(last) log entry that was applied to the state machine, or 0 if nothing
-    /// was applied. Generally this is more useful when we have snapshotting
-    pub fn last_applied(&self) -> usize {
-        assert!(!self.log.contains_key(&0));
-        *self.log.keys().last().unwrap_or(&0)
-    }
 }
 
 
@@ -257,7 +292,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         // and the candidate's log is at least as up-to-date as our log (in particular, its term is
         // as big as our term)
         if (self.voted_for.is_none() || self.voted_for == Some(req.candidate_id))
-            && (req.last_log_term, req.last_log_index) >= (self.current_term, self.log.len())
+            && (req.last_log_term, req.last_log_index) >= (self.storage.last_log_term(), self.storage.last_log_index())
         {
             self.voted_for = Some(req.candidate_id);
             return RequestVoteResponse::vote_yes(self.current_term)
@@ -280,10 +315,11 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
         // 2. We can't append entries as we have a mismatch - the last entry in our log doesn't
         //    match (in index or term) the one expected by the leader
-        match self.log.get(&req.prev_log_index) {
+        match self.storage.get(&req.prev_log_index) {
             None => {
+                // TODO: should last_applied be a different variable?
                 warn!("our log is too short, our last applied index is {}, required prev index is {}",
-                      self.last_applied(), req.prev_log_index);
+                      self.storage.last_log_index(), req.prev_log_index);
                 return AppendEntriesResponse::failed(self.current_term)
             },
             Some(LogEntry { term, ..}) if *term != req.prev_log_term => {
@@ -300,7 +336,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             let mut clip_index = None;
             for (insertion_index, LogEntry { term, ..}) in req.indexed_entries() {
                 assert!(insertion_index >= req.prev_log_index + 1);
-                match self.log.get(&insertion_index) {
+                match self.storage.get(&insertion_index) {
                     Some(LogEntry { term: my_term, ..}) if *term != *my_term => {
                         warn!("our log contains a mismatch at an inserted item index {}\
                                our entry's term is {}, the inserted term is {}",
@@ -316,9 +352,9 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         // delete all entries after the conflicting one
         if let Some(index_to_clip_from) = index_to_clip_from {
             assert!(index_to_clip_from >= req.prev_log_index + 1);
-            let indices_to_clip = (index_to_clip_from ..= self.last_applied());
+            let indices_to_clip = (index_to_clip_from ..= self.storage.last_log_index());
             for ix in indices_to_clip {
-                let _removed = self.log.remove(&ix);
+                let _removed = self.storage.remove(&ix);
                 assert!(_removed.is_some());
             }
         }
@@ -326,7 +362,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         // 4. Append entries not already in the log
         let index_to_append_from = index_to_clip_from.unwrap_or(req.prev_log_index + 1);
         for (insert_index, entry) in (index_to_append_from .. ).zip(req.entries.iter()) {
-            let _prev = self.log.insert(insert_index, entry.clone());
+            let _prev = self.storage.insert(insert_index, entry.clone());
             assert!(_prev.is_some(), "Entry shouldn't be in the log by now");
         }
 
@@ -334,7 +370,8 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         if req.leader_commit > self.commit_index {
             // we now know that 'req.leader_commit' is the minimal commit index,
             // but since we're a follower,
-            self.commit_index = req.leader_commit.min(self.last_applied());
+            // TODO use last_applied here maybe
+            self.commit_index = req.leader_commit.min(self.storage.last_log_index());
         }
 
         AppendEntriesResponse::success(self.current_term)
@@ -379,8 +416,8 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             let req = RequestVote {
                 term: self.current_term,
                 candidate_id: self.id,
-                last_log_index: self.last_applied(),
-                last_log_term: self.log.get(&self.last_applied())
+                last_log_index: self.storage.last_log_index(),
+                last_log_term: self.storage.get(&self.storage.last_log_index())
                     .map(|e| e.term)
                     .unwrap_or(0)
             };
