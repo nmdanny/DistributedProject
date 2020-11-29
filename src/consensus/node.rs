@@ -57,7 +57,7 @@ pub struct CandidateState {
 }
 
 impl CandidateState {
-    pub fn new<V, T>(candidate: &Node<V, T>, election_start_time: Instant) -> Self {
+    pub fn new<V: Value, T>(candidate: &Node<V, T>, election_start_time: Instant) -> Self {
         // a candidate always votes for itself
         let my_vote = RequestVoteResponse {
             term: candidate.current_term,
@@ -128,7 +128,7 @@ pub enum ServerState {
 }
 
 #[derive(Debug)]
-pub struct Node<V, T> {
+pub struct Node<V: Value, T> {
 
     /* related to async & message sending */
     local_set: tokio::task::LocalSet,
@@ -169,7 +169,7 @@ pub struct Node<V, T> {
 
 }
 
-impl <V, T> Node<V, T> {
+impl <V: Value, T> Node<V, T> {
     pub fn new(id: usize, number_of_nodes: usize, transport: T) -> Self {
         Node {
             local_set: tokio::task::LocalSet::new(),
@@ -230,7 +230,7 @@ impl <V, T> Node<V, T> {
 
 
 /* Following block contains most of the core logic */
-impl <V: std::fmt::Debug + Clone + Send, T: std::fmt::Debug + Transport<V>> Node<V, T> {
+impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
     /// The main loop
     pub async fn run() -> Result<(), anyhow::Error> {
@@ -407,8 +407,6 @@ impl <V: std::fmt::Debug + Clone + Send, T: std::fmt::Debug + Transport<V>> Node
 mod tests {
     use super::*;
     use async_trait::async_trait;
-
-
 
     #[test]
     fn node_initialization_and_getters() {

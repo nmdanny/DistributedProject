@@ -1,9 +1,22 @@
+use serde::{Serialize, Deserialize};
+use serde::de::DeserializeOwned;
+use std::fmt::Debug;
+
+/// A value that can be stored in a log entry, must be (de)serializable, owned
+pub trait Value: Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {}
+
+impl <V: Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static> Value for V {
+
+}
+
 /// Identifier for nodes, needed in order to communicate with them via the transport
 pub type Id = usize;
 
 /// An entry in the log
-#[derive(Debug, Clone)]
-pub struct LogEntry<V> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry<V: Value> {
+
+    #[serde(bound = "V: Value")]
     /// Value
     pub value: V,
 
@@ -13,7 +26,7 @@ pub struct LogEntry<V> {
 }
 
 /// Invoked by candidates to gather votes(sent to all nodes)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestVote {
     /// Candidate's term
     pub term: usize,
@@ -30,7 +43,7 @@ pub struct RequestVote {
 }
 
 /// Response to RequestVote (sent by each node to the candidate)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestVoteResponse {
     /// Used to update the current candidate's term
     pub term: usize,
@@ -55,8 +68,8 @@ impl RequestVoteResponse {
 
 
 /// Invoked by leader to replicate log entries, also used as heartbeat
-#[derive(Debug, Clone)]
-pub struct AppendEntries<V> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppendEntries<V: Value> {
     /// Leader's term
     pub term: usize,
 
@@ -69,6 +82,7 @@ pub struct AppendEntries<V> {
     /// Term of log entry preceding the new entries
     pub prev_log_term: usize,
 
+    #[serde(bound = "V: Value")]
     /// New entries to store (empty for heartbeat)
     pub entries: Vec<LogEntry<V>>,
 
@@ -76,7 +90,7 @@ pub struct AppendEntries<V> {
     pub leader_commit: usize
 }
 
-impl <V> AppendEntries<V> {
+impl <V: Value> AppendEntries<V> {
     pub fn indexed_entries(&self) -> impl Iterator<Item = (usize, &LogEntry<V>)> {
         let indices = (self.prev_log_index + 1 .. );
         return indices.zip(self.entries.iter())
@@ -85,7 +99,7 @@ impl <V> AppendEntries<V> {
 
 /// Invoked by each follower(or candidate, in which case they become followers)
 /// upon receiving AppendEntries
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendEntriesResponse {
     /// The current term, used by leader to update its own term
     pub term: usize,
