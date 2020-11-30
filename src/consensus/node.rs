@@ -219,6 +219,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
 
             // start an election, updating node state and sending vote requests
             let mut election_state = self.start_election().await?;
+            let mut _lost = false;
 
             // loop for a single election
             loop {
@@ -230,7 +231,6 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                 // TODO should I generate a new timeout?
                 let election_end = tokio::time::delay_for(self.node.election_timeout);
 
-                let mut _lost = false;
                 tokio::select! {
                     _ = election_end => {
                         // election timed out, start another one
@@ -255,7 +255,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                                 return Ok(())
                             }
                             ElectionResult::Undecided => {
-                                assert!(_lost, "Cannot become undecided after losing(sanity check)");
+                                assert!(!_lost, "Cannot become undecided after losing(sanity check)");
                             }
                         }
                     }
