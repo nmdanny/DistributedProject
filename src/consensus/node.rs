@@ -15,9 +15,10 @@ use tracing_futures::Instrument;
 use crate::consensus::node_communicator::{NodeCommand, CommandHandler};
 use async_trait::async_trait;
 
-const MIN_ELECTION_TIMEOUT_MS: u64 = 150;
-const MAX_ELECTION_TIMEOUT_MS: u64 = 300;
+const MIN_ELECTION_TIMEOUT_MS: u64 = 1500;
+const MAX_ELECTION_TIMEOUT_MS: u64 = 3000;
 
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1000);
 
 pub fn generate_election_timeout() -> Duration {
     use rand::distributions::{Distribution, Uniform};
@@ -345,17 +346,68 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         }
     }
 
+    /// Sends a heartbeat to all nodes
+    pub async fn send_heartbeat(&self) -> Result<(), RaftError> {
+        let msg = AppendEntries {
+            leader_id: self.node.id,
+            term: self.node.current_term,
+            entries: Vec::new(),
+            leader_commit: self.node.commit_index,
+            prev_log_index: self.node.storage.last_log_index(),
+            prev_log_term: self.node.storage.last_log_term()
+        };
+        info!("sending heartbeat");
+        for node_id in self.node.all_other_nodes() {
+            let transport = self.node.transport.clone();
+            let msg = msg.clone();
+            tokio::spawn(async move {
+                let res = transport.send_append_entries(node_id, msg).await;
+                if res.is_err() {
+                    error!("sending heartbeat to {} failed: {:?}", node_id, res);
+                }
+            }).instrument(info_span!("heartbeat"));
+        }
+        Ok(())
+    }
+
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
         self.node.leader_id = Some(self.node.id);
         self.node.voted_for = None;
+
+        info!("became leader for term {}", self.node.current_term);
+        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+
         loop {
             if self.node.state != ServerState::Leader {
                 return Ok(());
             }
-            tokio::time::delay_for(Duration::from_millis(500)).await;
+
+            tokio::select! {
+                _ = heartbeat_interval.tick() => {
+                        self.send_heartbeat().await;
+                },
+                res = self.node.receiver.next() => {
+                    // TODO can this channel close prematurely?
+                    let cmd = res.unwrap();
+                    self.handle_command(cmd).await;
+                }
+
+            }
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl<'a, V: Value, T: Transport<V>> CommandHandler<V> for LeaderState<'a, V, T> {
+    async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
+        return self.node.on_receive_append_entry(req);
+
+    }
+
+    async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
+        return self.node.on_receive_request_vote(&req);
     }
 }
 
