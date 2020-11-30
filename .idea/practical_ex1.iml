@@ -34,6 +34,9 @@
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/num-traits-ac84da2bc8155e03/out" isTestSource="false" />
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/num-integer-1b1acd34a68a98bc/out" isTestSource="false" />
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/byteorder-014daa6a1313f91a/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/crossbeam-utils-fdbeb848dc65e4bf/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/const_fn-c27b0b5cb8dc1e71/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/memoffset-f5c8fb63db3c06c8/out" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

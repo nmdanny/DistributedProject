@@ -2,11 +2,12 @@ use crate::consensus::types::*;
 use async_trait::async_trait;
 use tokio::task;
 use anyhow::Result;
+use std::fmt::Debug;
 
 /// Used for sending and receiving Raft messages
 /// Should be cheap to clone
 #[async_trait]
-pub trait Transport<V : Value> : Clone + Send + Sync + 'static {
+pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
     async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse>;
 
     async fn send_request_vote(&self, to: Id, msg: RequestVote) -> Result<RequestVoteResponse>;

@@ -7,24 +7,33 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = "3.0.0-beta.2"
+
+# logging
 log = "0.4"
-anyhow = "1.0"
-thiserror = "1.0.22"
-pretty_env_logger = "0.4"
-futures = "0.3"
-async-trait = "0.1.42"
-tokio = { version = "0.2", features = ["full"] }
-tokio-test = "0.3.0"
 tracing = "0.1"
 tracing-futures = { version = "0.2.4" }
 tracing-subscriber = "0.2"
+pretty_env_logger = "0.4"
+
+# concurrency/parallelism
+tokio = { version = "0.2", features = ["full"] }
 futures-retry = "0.5.0"
+futures = "0.3"
+crossbeam = "0.8"
+async-trait = "0.1.42"
+tokio-test = "0.3.0"
+
+# util
 rand = "0.7.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+clap = "3.0.0-beta.2"
+anyhow = "1.0"
+thiserror = "1.0.22"
+derivative = "2.1.1"
+
+# grpc
 tonic = "0.3.1"
-# for tonic(&hyper)
 prost = "0.6"
 parking_lot = "0.11.0"
 
@@ -32,9 +41,13 @@ parking_lot = "0.11.0"
 name = "dist_lib"
 path = "src/lib.rs"
 
+#[[bin]]
+#name = "runner"
+#path = "src/runner.rs"
+
 [[bin]]
-name = "runner"
-path = "src/runner.rs"
+name = "raft"
+path = "src/consensus/single_process_runner.rs"
 
 [build-dependencies]
 tonic-build = "0.3"

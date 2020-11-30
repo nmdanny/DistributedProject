@@ -7,8 +7,9 @@ use tokio::task;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
+use futures::SinkExt;
+use serde;
 
 const MIN_ELECTION_TIMEOUT_MS: u64 = 150;
 const MAX_ELECTION_TIMEOUT_MS: u64 = 300;
@@ -51,6 +52,9 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
     }
 
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
+        loop {
+            task::yield_now().await;
+        }
         Ok(())
     }
 }
@@ -128,7 +132,6 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
         self.node.current_term += 1;
         warn!("Election started for term {}", self.node.current_term);
 
-        let local = task::LocalSet::new();
         for node_id in self.node.all_other_nodes().collect::<Vec<_>>() {
             let req = RequestVote {
                 term: self.node.current_term,
@@ -146,7 +149,10 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
     }
 
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
-        self.start_election().await?;
+        // self.start_election().await?;
+        loop {
+            task::yield_now().await;
+        }
         Ok(())
     }
 
@@ -182,6 +188,9 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     }
 
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
+        loop {
+            task::yield_now().await;
+        }
         Ok(())
     }
 }
@@ -195,17 +204,69 @@ pub enum ServerState {
     Leader,
 }
 
-/// Contains all state used by any node
+/// A command, created within a `NodeCommunicator` for invoking various methods on a Node which is
+/// running asynchronously. Sent via concurrency channels. Also includes a sender for sending
+/// a response to the originator of the request.
 #[derive(Debug)]
-pub struct Node<V: Value, T> {
+pub enum NodeCommand<V: Value> {
+    AE(AppendEntries<V>, oneshot::Sender<Result<AppendEntriesResponse, RaftError>>),
+    RV(RequestVote, oneshot::Sender<Result<RequestVoteResponse, RaftError>>)
+}
+
+/// This is used to communicate with a raft node once we begin the main loop
+#[derive(Debug, Clone)]
+pub struct NodeCommunicator<V: Value> {
+    rpc_sender: mpsc::UnboundedSender<NodeCommand<V>>,
+}
+
+impl <V: Value> NodeCommunicator<V> {
+
+    /// Creates a node object, returning it along with a communicator that can be used to interact
+    /// with it after we spawn it on a task/thread.
+    pub fn create_with_node<T: Transport<V>>(id: usize,
+                            number_of_nodes: usize,
+                            transport: T) -> (Node<V, T>, NodeCommunicator<V>) {
+       let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
+        let communicator = NodeCommunicator {
+            rpc_sender
+        };
+        let node = Node::new(id, number_of_nodes, transport, rpc_receiver);
+        (node, communicator)
+    }
+
+    pub async fn append_entries(&self, ae: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
+        let (tx, rx) = oneshot::channel();
+        let cmd = NodeCommand::AE(ae, tx);
+        self.rpc_sender.send(cmd).unwrap();
+        Ok(rx.await.unwrap()?)
+    }
+
+    pub async fn request_vote(&self, rv: RequestVote) -> Result<RequestVoteResponse, RaftError> {
+        let (tx, rx) = oneshot::channel();
+        let cmd = NodeCommand::RV(rv, tx);
+        self.rpc_sender.send(cmd).unwrap();
+        Ok(rx.await.unwrap()?)
+    }
+}
+/// Contains all state used by any node
+#[derive(Derivative)]
+#[derivative(Debug)]
+pub struct Node<V: Value, T: Transport<V>> {
 
     /* related to async & message sending */
-    local_set: tokio::task::LocalSet,
+
+    #[derivative(Debug="ignore")]
+    /// Transport, used for making request RPCs and receiving response RPCs (proactive)
     pub transport: T,
+
+    #[derivative(Debug="ignore")]
+    /// Used for receiving request RPCs (reactive)
+    pub receiver: mpsc::UnboundedReceiver<NodeCommand<V>>,
 
     /// Node ID
     pub id: Id,
 
+    #[derivative(Debug="ignore")]
     /// IDs of other nodes
     pub other_nodes: Vec<Id>,
 
@@ -239,11 +300,14 @@ pub struct Node<V: Value, T> {
     // TODO, maybe add last_applied
 }
 
-impl <V: Value, T> Node<V, T> {
-    pub fn new(id: usize, number_of_nodes: usize, transport: T) -> Self {
+impl <V: Value, T: Transport<V>> Node<V, T> {
+    pub fn new(id: usize,
+               number_of_nodes: usize,
+               transport: T,
+               receiver: mpsc::UnboundedReceiver<NodeCommand<V>>) -> Self {
         Node {
-            local_set: tokio::task::LocalSet::new(),
             transport,
+            receiver,
             id,
             other_nodes: (0 .. number_of_nodes).filter(|&cur_id| cur_id != id).collect(),
             number_of_nodes,
@@ -275,13 +339,25 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
     /// The main loop - this does everything, and it has ownership of the Node
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
         // the state machine of the consensus module, at first we always follow
-        info!("Starting loop");
 
         loop {
+            info!(state = ?self.state, "Switching to new state");
             match self.state{
                 ServerState::Follower => FollowerState::new(&mut self).run_loop().await?,
                 ServerState::Candidate => CandidateState::new(&mut self).run_loop().await?,
                 ServerState::Leader => LeaderState::new(&mut self).run_loop().await?,
+            }
+        }
+    }
+
+    /// This is the main entry point of a `NodeCommunicator` into a spawned `Node` object
+    pub async fn on_request(&mut self, req: NodeCommand<V>) {
+        match req {
+            NodeCommand::AE(ae, res) => {
+                res.send(self.on_receive_append_entry(ae)).unwrap();
+            },
+            NodeCommand::RV(rv, res) => {
+                res.send(self.on_receive_request_vote(&rv)).unwrap();
             }
         }
     }
@@ -296,10 +372,10 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
     /// Invoked by any node upon receiving a request to vote
     #[instrument]
-    pub fn on_receive_request_vote(&mut self, req: &RequestVote) -> RequestVoteResponse {
+    pub fn on_receive_request_vote(&mut self, req: &RequestVote) -> Result<RequestVoteResponse, RaftError> {
         // 1. Our term is more updated
         if self.current_term > req.term {
-            return RequestVoteResponse::vote_no(self.current_term);
+            return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
         self.observe_term(req.term);
 
@@ -312,20 +388,20 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             && (req.last_log_term, req.last_log_index) >= (self.storage.last_log_term(), self.storage.last_log_index())
         {
             self.voted_for = Some(req.candidate_id);
-            return RequestVoteResponse::vote_yes(self.current_term)
+            return Ok(RequestVoteResponse::vote_yes(self.current_term));
         }
 
         // Otherwise(we voted for a different candidate/our log is more up-to-date)
-        return RequestVoteResponse::vote_no(self.current_term);
+        return Ok(RequestVoteResponse::vote_no(self.current_term));
     }
 
     /// Invoked by any node upon receiving a request to append entries
     #[instrument]
-    pub fn on_receive_append_entry(&mut self, req: AppendEntries<V>) -> AppendEntriesResponse {
+    pub fn on_receive_append_entry(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         // 1. The sender is not a leader anymore
         if req.term < self.current_term {
             warn!("old leader (my term = {}, other term = {})", req.term, self.current_term);
-            return AppendEntriesResponse::failed(self.current_term);
+            return Ok(AppendEntriesResponse::failed(self.current_term));
         }
 
         // the sender is on our own term or later
@@ -338,13 +414,13 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
                 // TODO: should last_applied be a different variable?
                 warn!("our log is too short, our last applied index is {}, required prev index is {}",
                       self.storage.last_log_index(), req.prev_log_index);
-                return AppendEntriesResponse::failed(self.current_term)
+                return Ok(AppendEntriesResponse::failed(self.current_term))
             },
             Some(LogEntry { term, ..}) if *term != req.prev_log_term => {
                 warn!("our log contains a mismatch at the request's prev index {}, our entry's term is {},\
                        the required prev term is {}",
                       req.prev_log_index, *term, req.prev_log_term);
-                return AppendEntriesResponse::failed(self.current_term);
+                return Ok(AppendEntriesResponse::failed(self.current_term));
             },
             _ => {}
         }
@@ -392,7 +468,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             self.commit_index = req.leader_commit.min(self.storage.last_log_index());
         }
 
-        AppendEntriesResponse::success(self.current_term)
+        Ok(AppendEntriesResponse::success(self.current_term))
     }
 
 }
@@ -404,7 +480,8 @@ mod tests {
 
     #[test]
     fn node_initialization_and_getters() {
-        let mut node = Node::<String, _>::new(2, 5, NoopTransport);
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut node = Node::<String, _>::new(2, 5, NoopTransport(), rx);
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
         assert_eq!(node.state, ServerState::Follower);
