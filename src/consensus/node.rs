@@ -266,7 +266,9 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                         election_state.count_vote(vote);
                         match election_state.tally() {
                             ElectionResult::Lost => {
-                                info!("lost election, results: {:?}", election_state);
+                                if (!_lost) {
+                                    info!("lost election, results: {:?}", election_state);
+                                }
                                 _lost = true;
                                 // we will not change the state yet, this will be done once we
                                 // receive a new AppendEntries message(might be slightly wasteful
