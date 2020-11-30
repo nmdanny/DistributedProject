@@ -9,6 +9,7 @@ use anyhow::Error;
 use std::collections::HashMap;
 use async_trait::async_trait;
 use std::sync::Arc;
+use tracing_futures::Instrument;
 
 #[derive(Debug, Clone)]
 pub struct ThreadTransport<V: Value>
@@ -72,7 +73,10 @@ pub async fn main() -> Result<(), Error> {
     for node in nodes.into_iter() {
         let id = node.id;
         let handle = tokio::spawn(async move {
-            node.run_loop().await.unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
+            node.run_loop()
+                .instrument(tracing::info_span!("node-loop", node.id = id))
+                .await
+                .unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
         });
         handles.push(handle);
     }
