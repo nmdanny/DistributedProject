@@ -14,6 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tracing_futures::Instrument;
 use crate::consensus::node_communicator::{NodeCommand, CommandHandler};
 use async_trait::async_trait;
+use futures::TryFutureExt;
 
 const MIN_ELECTION_TIMEOUT_MS: u64 = 1500;
 const MAX_ELECTION_TIMEOUT_MS: u64 = 3000;
@@ -268,7 +269,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                         // to follower. (§5.1)
                         if self.node.try_update_term(vote.term, None) {
                             assert!(!vote.vote_granted);
-                            return;
+                            return Ok(());
                         }
                         election_state.count_vote(vote);
                         match election_state.tally() {
@@ -302,7 +303,6 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                 }
             }
         }
-        Ok(())
     }
 
 }
@@ -352,8 +352,9 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         }
     }
 
-    /// Sends a heartbeat to all nodes
-    pub async fn send_heartbeat(&self) -> Result<(), RaftError> {
+    /// Sends a heartbeat to all nodes. If it detects we are stale(encounters a higher term),
+    /// sends the newer term via given sender.
+    pub async fn send_heartbeat(&self, stale_notifier: mpsc::Sender<usize>) {
         let msg = AppendEntries {
             leader_id: self.node.id,
             term: self.node.current_term,
@@ -363,17 +364,25 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
             prev_log_term: self.node.storage.last_log_term()
         };
         info!("sending heartbeat");
+        let my_term = self.node.current_term;
         for node_id in self.node.all_other_nodes() {
             let transport = self.node.transport.clone();
             let msg = msg.clone();
+            let mut tx = stale_notifier.clone();
             tokio::spawn(async move {
                 let res = transport.send_append_entries(node_id, msg).await;
-                if res.is_err() {
+                if let Ok(res) = res {
+                    if res.term > my_term {
+                        tx.send(res.term).unwrap_or_else(|_| {
+                            // TODO not really an error
+                            error!("Couldn't notify leader that he's stale(someone else probably notified him already");
+                        });
+                    }
+                } else {
                     error!("sending heartbeat to {} failed: {:?}", node_id, res);
                 }
             }).instrument(info_span!("heartbeat"));
         }
-        Ok(())
     }
 
     #[instrument]
@@ -383,6 +392,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
         info!("became leader for term {}", self.node.current_term);
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let (stale_notifier, mut stale_receiver) = mpsc::channel(self.node.number_of_nodes);
 
         loop {
             if self.node.state != ServerState::Leader {
@@ -391,7 +401,13 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
-                        self.send_heartbeat().await;
+                        self.send_heartbeat(stale_notifier.clone()).await;
+                },
+                res = stale_receiver.next() => {
+                    let res = res.unwrap();
+                    info!(self.node.current_term, new_term=res, "Received out of date term in reply");
+                    self.node.try_update_term(res, None);
+                    return Ok(())
                 },
                 res = self.node.receiver.next() => {
                     // TODO can this channel close prematurely?
@@ -615,9 +631,11 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
         // this is a heartbeat, nothing to do
         if req.entries.is_empty() {
+            trace!("got heartbeat");
             return Ok(AppendEntriesResponse::success(self.current_term));
         }
 
+        info!("got receive append entry");
 
         // 2. We can't append entries as we have a mismatch - the last entry in our log doesn't
         //    match (in index or term) the one expected by the leader
