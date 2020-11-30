@@ -264,6 +264,11 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                         break;
                     },
                     Some(vote) = election_state.vote_receiver.next() => {
+                        // We got a vote from a node at a later term, so convert
+                        // to follower. (§5.1)
+                        if self.node.try_update_term(vote.term, None) {
+                            assert!(!vote.vote_granted);
+                        }
                         election_state.count_vote(vote);
                         match election_state.tally() {
                             ElectionResult::Lost => {
@@ -548,12 +553,16 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         }
     }
 
-    /// Updates the current term to the given one, if it's more up to date
-    pub fn observe_term(&mut self, term: usize) {
+    /// Updates the current term to the given one, if it's more up to date.
+    /// Also updates the leader in that case. Returns true if the term was indeed updated
+    pub fn try_update_term(&mut self, term: usize, leader: Option<Id>) -> bool {
         if term > self.current_term {
             self.current_term = term;
+            self.change_state(ServerState::Follower);
+            self.leader_id = leader;
+            return true
         }
-        // TODO convert to follower
+        return false
     }
 
     /// Invoked by any node upon receiving a request to vote
@@ -565,7 +574,10 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
                    "My term is more up-to-date, ignoring vote request");
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
-        self.observe_term(req.term);
+
+        // if the candidate has a higher term, then convert to follower(§5.1)
+        // in that case, we don't know the leader id(as the candidate doesn't know it either)
+        self.try_update_term(req.term, None);
 
         if self.voted_for.is_some() && self.voted_for != Some(req.candidate_id) {
             info!(cur_vote=self.voted_for.unwrap(),
@@ -597,8 +609,13 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             return Ok(AppendEntriesResponse::failed(self.current_term));
         }
 
-        // the sender is on our own term or later
-        self.observe_term(req.term);
+        self.try_update_term(req.term, Some(req.leader_id));
+
+        // this is a heartbeat, nothing to do
+        if req.entries.is_empty() {
+            return Ok(AppendEntriesResponse::success(self.current_term));
+        }
+
 
         // 2. We can't append entries as we have a mismatch - the last entry in our log doesn't
         //    match (in index or term) the one expected by the leader
