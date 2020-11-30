@@ -581,21 +581,6 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         self.state = new_state;
     }
 
-    /// This is the main entry point of a `NodeCommunicator` into a spawned `Node` object
-    #[instrument]
-    pub async fn on_request(&mut self, req: NodeCommand<V>) {
-        match req {
-            NodeCommand::AE(ae, res) => {
-                res.send(self.on_receive_append_entry(ae)).unwrap();
-            },
-            NodeCommand::RV(rv, res) => {
-                res.send(self.on_receive_request_vote(&rv)).unwrap();
-            }
-            NodeCommand::ClientWriteRequest(_, _) => {}
-            NodeCommand::ClientReadRequest(_, _) => {}
-        }
-    }
-
     /// Updates the current term to the given one, if it's more up to date.
     /// Also updates the leader in that case. Returns true if the term was indeed updated
     pub fn try_update_term(&mut self, term: usize, leader: Option<Id>) -> bool {
