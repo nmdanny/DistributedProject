@@ -27,10 +27,12 @@ impl <V: Value> ThreadTransport<V> {
 
 #[async_trait]
 impl <V: Value> Transport<V> for ThreadTransport<V> {
+    #[instrument]
     async fn send_append_entries(&self, to: usize, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, Error> {
         Ok(self.senders.get(&to).unwrap().clone().append_entries(msg).await?)
     }
 
+    #[instrument]
     async fn send_request_vote(&self, to: usize, msg: RequestVote) -> Result<RequestVoteResponse, Error> {
         Ok(self.senders.get(&to).unwrap().clone().request_vote(msg).await?)
     }
@@ -42,7 +44,13 @@ const NUM_NODES: usize = 7;
 pub async fn main() -> Result<(), Error> {
     // set up logging
     use tracing_subscriber::FmtSubscriber;
-    let subscriber = FmtSubscriber::builder().pretty().finish();
+    let subscriber = FmtSubscriber::builder()
+        .pretty()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("dist_lib=debug".parse()?)
+            .add_directive("raft=debug".parse()?)
+        )
+    .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("Couldn't set up default tracing subscriber");
 

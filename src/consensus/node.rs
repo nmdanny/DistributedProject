@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::stream::StreamExt;
 use serde;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tracing_futures::Instrument;
 
 const MIN_ELECTION_TIMEOUT_MS: u64 = 150;
 const MAX_ELECTION_TIMEOUT_MS: u64 = 300;
@@ -70,6 +71,7 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
         Instant::now() - self.time_since_last_heartbeat >= timeout
     }
 
+    #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
         // leader ID should've been set(at the beginning, leader is 0,
         // otherwise, we only transition to follower after receiving a matching AE)
@@ -109,7 +111,8 @@ pub enum ElectionResult {
     Undecided
 }
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ElectionState {
     /// NOTE: it is assumed that Raft RPC messages cannot be duplicated, in other words,
     /// since each node only votes once, we can not have more than one response for every nodee
@@ -122,6 +125,7 @@ pub struct ElectionState {
     pub quorum_size: usize,
     pub term: usize,
 
+    #[derivative(Debug="ignore")]
     pub vote_receiver: UnboundedReceiver<RequestVoteResponse>
 }
 
@@ -202,17 +206,22 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
             let transport = self.node.transport.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
+                trace!("sending request to {}", node_id);
                 if let Ok(res) = transport.send_request_vote(node_id, req).await {
+                    debug!("response is {:?}", res);
                     tx.send(res.clone()).unwrap_or_else(|e| {
                         // TODO this isn't really an error, just the result of delays
                         error!("Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
                     });
+                    return;
                 }
-            });
+                error!("request failed(no response)");
+            }.instrument(info_span!("vote request", to=node_id)));
         }
         Ok(ElectionState::new(self.node.quorum_size(), self.node.current_term, rx))
     }
 
+    #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
         // loop for multiple consecutive elections(1 or more)
         loop {
@@ -296,6 +305,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         }
     }
 
+    #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
         self.node.leader_id = Some(self.node.id);
         self.node.voted_for = None;
@@ -348,6 +358,7 @@ impl <V: Value> NodeCommunicator<V> {
         (node, communicator)
     }
 
+    #[instrument]
     pub async fn append_entries(&self, ae: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::AE(ae, tx);
@@ -355,6 +366,7 @@ impl <V: Value> NodeCommunicator<V> {
         Ok(rx.await.unwrap()?)
     }
 
+    #[instrument]
     pub async fn request_vote(&self, rv: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::RV(rv, tx);
@@ -478,6 +490,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
     }
 
     /// This is the main entry point of a `NodeCommunicator` into a spawned `Node` object
+    #[instrument]
     pub async fn on_request(&mut self, req: NodeCommand<V>) {
         match req {
             NodeCommand::AE(ae, res) => {
@@ -502,24 +515,31 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
     pub fn on_receive_request_vote(&mut self, req: &RequestVote) -> Result<RequestVoteResponse, RaftError> {
         // 1. Our term is more updated
         if self.current_term > req.term {
+            info!(cur_term=self.current_term, vote_term=req.term,
+                   "My term is more up-to-date, ignoring vote request");
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
         self.observe_term(req.term);
 
-        // 2. if we've yet to vote(or we only voted for the candidate - in case of multiple elections in
-        // a row, we might receive the same vote request more than once, and `self.voted_for` won't be
-        // reset, so we will vote for the same candidate again)
-        // and the candidate's log is at least as up-to-date as our log (in particular, its term is
-        // as big as our term)
-        if (self.voted_for.is_none() || self.voted_for == Some(req.candidate_id))
-            && (req.last_log_term, req.last_log_index) >= (self.storage.last_log_term(), self.storage.last_log_index())
-        {
-            self.voted_for = Some(req.candidate_id);
-            return Ok(RequestVoteResponse::vote_yes(self.current_term));
+        if self.voted_for.is_some() && self.voted_for != Some(req.candidate_id) {
+            info!(cur_vote=self.voted_for.unwrap(),
+                  "I already voted for someone else, ignoring vote request",
+                 );
+            return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
 
-        // Otherwise(we voted for a different candidate/our log is more up-to-date)
-        return Ok(RequestVoteResponse::vote_no(self.current_term));
+        if (self.storage.last_log_term(), self.storage.last_log_index()) >
+            (req.last_log_term, req.last_log_index) {
+            info!(last_log_term = self.storage.last_log_term(),
+                  last_log_index = self.storage.last_log_index(),
+                 "My log is more up to date than the candidate's log"
+            );
+            return Ok(RequestVoteResponse::vote_no(self.current_term));
+        }
+
+        info!("I voted for {}", req.candidate_id);
+        self.voted_for = Some(req.candidate_id);
+        return Ok(RequestVoteResponse::vote_yes(self.current_term));
     }
 
     /// Invoked by any node upon receiving a request to append entries
