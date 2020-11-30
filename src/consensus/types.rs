@@ -135,7 +135,7 @@ pub type RaftResult<T> = Result<T, RaftError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientWriteRequest<V: Value> {
     #[serde(bound = "V: Value")]
-    value: V
+    pub value: V
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,13 +145,13 @@ pub enum ClientWriteResponse {
 }
 
 /// A request to read all committed entries in [from, to)
-/// If commit_index < to, we'll return [from, commit_index] instead
-/// If commit_Index < from, an empty result will be given
+/// If commit_index < to, we'll return log[from, commit_index] instead
+/// If commit_Index < from, an empty log will be given
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientReadRequest {
-    from: usize,
+    pub from: usize,
 
-    to: Option<usize>
+    pub to: Option<usize>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,4 +159,13 @@ pub enum ClientReadResponse<V: Value> {
     #[serde(bound = "V: Value")]
     Ok { range: Vec<V> },
     NotALeader { leader_id: Option<Id> }
+}
+
+/// Represents a committed log entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitEntry<V: Value> {
+    #[serde(bound = "V: Value")]
+    pub value: V,
+    pub index: usize,
+    pub term: usize
 }

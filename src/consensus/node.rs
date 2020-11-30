@@ -122,6 +122,14 @@ impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, 
         }
         return res;
     }
+
+    async fn handle_client_write_request(&mut self, _req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+        Ok(ClientWriteResponse::NotALeader { leader_id: self.node.leader_id })
+    }
+
+    async fn handle_client_read_request(&mut self, _req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
+        Ok(ClientReadResponse::NotALeader { leader_id: self.node.leader_id })
+    }
 }
 #[derive(Debug, Eq, PartialEq)]
 pub enum ElectionResult {
@@ -321,6 +329,14 @@ impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for CandidateState<'a, V,
         }
         return res;
     }
+
+    async fn handle_client_write_request(&mut self, _req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+        Ok(ClientWriteResponse::NotALeader { leader_id: self.node.leader_id })
+    }
+
+    async fn handle_client_read_request(&mut self, _req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
+        Ok(ClientReadResponse::NotALeader { leader_id: self.node.leader_id })
+    }
 }
 
 #[derive(Debug)]
@@ -430,6 +446,14 @@ impl<'a, V: Value, T: Transport<V>> CommandHandler<V> for LeaderState<'a, V, T> 
 
     async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         return self.node.on_receive_request_vote(&req);
+    }
+
+    async fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+        unimplemented!()
+    }
+
+    async fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
+        unimplemented!()
     }
 }
 
@@ -567,6 +591,8 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             NodeCommand::RV(rv, res) => {
                 res.send(self.on_receive_request_vote(&rv)).unwrap();
             }
+            NodeCommand::ClientWriteRequest(_, _) => {}
+            NodeCommand::ClientReadRequest(_, _) => {}
         }
     }
 

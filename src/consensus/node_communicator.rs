@@ -1,4 +1,4 @@
-use crate::consensus::types::{Value, AppendEntries, AppendEntriesResponse, RaftError, RequestVote, RequestVoteResponse};
+use crate::consensus::types::{Value, AppendEntries, AppendEntriesResponse, RaftError, RequestVote, RequestVoteResponse, ClientWriteRequest, ClientWriteResponse, ClientReadRequest, ClientReadResponse};
 use tokio::sync::{oneshot, mpsc};
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
@@ -11,7 +11,9 @@ use async_trait::async_trait;
 #[derive(Debug)]
 pub enum NodeCommand<V: Value> {
     AE(AppendEntries<V>, oneshot::Sender<Result<AppendEntriesResponse, RaftError>>),
-    RV(RequestVote, oneshot::Sender<Result<RequestVoteResponse, RaftError>>)
+    RV(RequestVote, oneshot::Sender<Result<RequestVoteResponse, RaftError>>),
+    ClientWriteRequest(ClientWriteRequest<V>, oneshot::Sender<Result<ClientWriteResponse, RaftError>>),
+    ClientReadRequest(ClientReadRequest, oneshot::Sender<Result<ClientReadResponse<V>, RaftError>>)
 }
 
 /// This is used to communicate with a raft node once we begin the main loop
@@ -50,6 +52,21 @@ impl <V: Value> NodeCommunicator<V> {
         self.rpc_sender.send(cmd).unwrap();
         Ok(rx.await.unwrap()?)
     }
+
+    #[instrument]
+    pub async fn submit_value(&self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+        let (tx, rx) = oneshot::channel();
+        let cmd = NodeCommand::ClientWriteRequest(req, tx);
+        self.rpc_sender.send(cmd).unwrap();
+        Ok(rx.await.unwrap()?)
+    }
+
+    pub async fn request_values(&self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
+        let (tx, rx) = oneshot::channel();
+        let cmd = NodeCommand::ClientReadRequest(req, tx);
+        self.rpc_sender.send(cmd).unwrap();
+        Ok(rx.await.unwrap()?)
+    }
 }
 
 /// Handles commands sent from a `NodeCommunicator`
@@ -60,6 +77,8 @@ impl <V: Value> NodeCommunicator<V> {
 pub(in crate::consensus) trait CommandHandler<V: Value> {
     async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError>;
     async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError>;
+    async fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError>;
+    async fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError>;
 
     /// Handles a command sent from `NodeCommunicator`
     async fn handle_command(&mut self, cmd: NodeCommand<V>) {
@@ -69,6 +88,12 @@ pub(in crate::consensus) trait CommandHandler<V: Value> {
             },
             NodeCommand::RV(rv, res) => {
                 res.send(self.handle_request_vote(rv).await).unwrap();
+            }
+            NodeCommand::ClientWriteRequest(req, res) => {
+                res.send(self.handle_client_write_request(req).await).unwrap();
+            }
+            NodeCommand::ClientReadRequest(req, res) => {
+                res.send(self.handle_client_read_request(req).await).unwrap();
             }
         }
 
