@@ -12,6 +12,8 @@ use tokio::stream::StreamExt;
 use serde;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing_futures::Instrument;
+use crate::consensus::node_communicator::{NodeCommand, CommandHandler};
+use async_trait::async_trait;
 
 const MIN_ELECTION_TIMEOUT_MS: u64 = 150;
 const MAX_ELECTION_TIMEOUT_MS: u64 = 300;
@@ -29,7 +31,9 @@ pub fn generate_election_timeout() -> Duration {
 pub struct FollowerState<'a, V: Value, T: Transport<V>> {
     pub node: &'a mut Node<V, T>,
 
-    pub time_since_last_heartbeat: Instant
+    /// The last time since we granted a vote or got a heartbeat from the leader
+    /// Once this elapses, convert to a candidate. (§5.2)
+    pub time_since_last_heartbeat_or_grant_vote: Instant
 }
 
 impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
@@ -37,43 +41,18 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
     pub fn new(node: &'a mut Node<V, T>) -> Self {
         FollowerState {
             node,
-            time_since_last_heartbeat: Instant::now()
+            time_since_last_heartbeat_or_grant_vote: Instant::now()
         }
     }
 
     /// Performs follower specific changes when receiving an AE request
     /// (notably, updates the follower state)
     pub fn on_receive_append_entries(&mut self, req: &AppendEntries<V>) {
-
-        if req.term < self.node.current_term {
-            return;
-        }
-
-        // if we had just lost an election
-        if self.node.leader_id.is_none() {
-            info!("Now I know the new leader: {}", req.leader_id);
-            self.node.leader_id = Some(req.leader_id);
-        }
-
-        // our leader might have changed if the term has changed
-        if self.node.current_term != req.term {
-            assert!(req.term > self.node.current_term);
-            self.node.leader_id = Some(req.leader_id);
-        } else {
-            // a leader cannot change within the same term
-            assert_eq!(self.node.leader_id, Some(req.leader_id));
-        }
-
-        self.time_since_last_heartbeat = Instant::now();
-    }
-
-    pub fn should_begin_election(&self, timeout: Duration) -> bool {
-        Instant::now() - self.time_since_last_heartbeat >= timeout
     }
 
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
-        // leader ID should've been set(at the beginning, leader is 0,
+        // leader ID should've been set(at the beginning, leader is 0)
         // otherwise, we only transition to follower after receiving a matching AE)
         assert!(self.node.leader_id.is_some());
         self.node.voted_for = None;
@@ -93,10 +72,7 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
                 res = self.node.receiver.next() => {
                     // TODO can this channel close prematurely?
                     let cmd = res.unwrap();
-                    if let NodeCommand::AE(ae, _) = &cmd {
-                        self.on_receive_append_entries(ae);
-                    }
-                    self.node.on_request(cmd).await;
+                    self.handle_command(cmd).await;
                 }
             }
         }
@@ -104,6 +80,47 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
     }
 }
 
+#[async_trait]
+impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, T> {
+    #[instrument]
+    async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
+        if req.term < self.node.current_term {
+            return Ok(AppendEntriesResponse::failed(self.node.current_term));
+        }
+
+        // if we had just lost an election
+        if self.node.leader_id.is_none() {
+            info!("Now I know the new leader: {}", req.leader_id);
+            self.node.leader_id = Some(req.leader_id);
+        }
+
+        if self.node.leader_id != Some(req.leader_id) {
+            assert!(req.term > self.node.current_term,
+                "If there's a mismatch between leaders, the term must have changed(increased)");
+        }
+        self.node.leader_id = Some(req.leader_id);
+
+        // update heartbeat to prevent switch to candidate
+        self.time_since_last_heartbeat_or_grant_vote = Instant::now();
+
+        // continue with the default handling of append entry
+        return self.node.on_receive_append_entry(req);
+    }
+
+    async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
+        // use default handling of request vote
+        let res = self.node.on_receive_request_vote(&req);
+
+        match res.as_ref() {
+            Ok(res) if res.vote_granted => {
+                // if we granted a vote, delay switch to candidate
+                self.time_since_last_heartbeat_or_grant_vote = Instant::now();
+            }
+            _ => {}
+        }
+        return res;
+    }
+}
 #[derive(Debug, Eq, PartialEq)]
 pub enum ElectionResult {
     Lost,
@@ -328,52 +345,6 @@ pub enum ServerState {
     Leader,
 }
 
-/// A command, created within a `NodeCommunicator` for invoking various methods on a Node which is
-/// running asynchronously. Sent via concurrency channels. Also includes a sender for sending
-/// a response to the originator of the request.
-#[derive(Debug)]
-pub enum NodeCommand<V: Value> {
-    AE(AppendEntries<V>, oneshot::Sender<Result<AppendEntriesResponse, RaftError>>),
-    RV(RequestVote, oneshot::Sender<Result<RequestVoteResponse, RaftError>>)
-}
-
-/// This is used to communicate with a raft node once we begin the main loop
-#[derive(Debug, Clone)]
-pub struct NodeCommunicator<V: Value> {
-    rpc_sender: mpsc::UnboundedSender<NodeCommand<V>>,
-}
-
-impl <V: Value> NodeCommunicator<V> {
-
-    /// Creates a node object, returning it along with a communicator that can be used to interact
-    /// with it after we spawn it on a task/thread.
-    pub fn create_with_node<T: Transport<V>>(id: usize,
-                            number_of_nodes: usize,
-                            transport: T) -> (Node<V, T>, NodeCommunicator<V>) {
-       let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
-        let communicator = NodeCommunicator {
-            rpc_sender
-        };
-        let node = Node::new(id, number_of_nodes, transport, rpc_receiver);
-        (node, communicator)
-    }
-
-    #[instrument]
-    pub async fn append_entries(&self, ae: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
-        let (tx, rx) = oneshot::channel();
-        let cmd = NodeCommand::AE(ae, tx);
-        self.rpc_sender.send(cmd).unwrap();
-        Ok(rx.await.unwrap()?)
-    }
-
-    #[instrument]
-    pub async fn request_vote(&self, rv: RequestVote) -> Result<RequestVoteResponse, RaftError> {
-        let (tx, rx) = oneshot::channel();
-        let cmd = NodeCommand::RV(rv, tx);
-        self.rpc_sender.send(cmd).unwrap();
-        Ok(rx.await.unwrap()?)
-    }
-}
 /// Contains all state used by any node
 #[derive(Derivative)]
 #[derivative(Debug)]

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tracing_futures::Instrument;
+use dist_lib::consensus::node_communicator::NodeCommunicator;
 
 #[derive(Debug, Clone)]
 pub struct ThreadTransport<V: Value>
