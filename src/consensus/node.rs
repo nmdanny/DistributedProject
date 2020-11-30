@@ -615,8 +615,8 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
 
-        if (self.storage.last_log_term(), self.storage.last_log_index()) >
-            (req.last_log_term, req.last_log_index) {
+        if (self.storage.last_log_index(), self.storage.last_log_term()) >
+            (req.last_log_index, req.last_log_term) {
             info!(last_log_term = self.storage.last_log_term(),
                   last_log_index = self.storage.last_log_index(),
                  "My log is more up to date than the candidate's log"
