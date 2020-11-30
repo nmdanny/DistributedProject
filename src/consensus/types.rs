@@ -127,3 +127,36 @@ pub enum RaftError {
 }
 
 pub type RaftResult<T> = Result<T, RaftError>;
+
+
+// Client requests are serviced by the leader,
+// Other nodes will
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientWriteRequest<V: Value> {
+    #[serde(bound = "V: Value")]
+    value: V
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ClientWriteResponse {
+    Ok { commit_index: usize },
+    NotALeader { leader_id: Option<Id> }
+}
+
+/// A request to read all committed entries in [from, to)
+/// If commit_index < to, we'll return [from, commit_index] instead
+/// If commit_Index < from, an empty result will be given
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientReadRequest {
+    from: usize,
+
+    to: Option<usize>
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ClientReadResponse<V: Value> {
+    #[serde(bound = "V: Value")]
+    Ok { range: Vec<V> },
+    NotALeader { leader_id: Option<Id> }
+}
