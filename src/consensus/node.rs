@@ -264,10 +264,11 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                         break;
                     },
                     Some(vote) = election_state.vote_receiver.next() => {
-                        // We got a vote from a node at a later term, so convert
+                        // If we get vote from a node at a later term, we'll convert
                         // to follower. (§5.1)
                         if self.node.try_update_term(vote.term, None) {
                             assert!(!vote.vote_granted);
+                            return;
                         }
                         election_state.count_vote(vote);
                         match election_state.tally() {
@@ -560,6 +561,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             self.current_term = term;
             self.change_state(ServerState::Follower);
             self.leader_id = leader;
+            info!("found newer term {} with leader {:?}, becoming follower.", term, leader);
             return true
         }
         return false
