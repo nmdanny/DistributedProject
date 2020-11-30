@@ -8,11 +8,13 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
-use futures::SinkExt;
+use tokio::stream::StreamExt;
 use serde;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 const MIN_ELECTION_TIMEOUT_MS: u64 = 150;
 const MAX_ELECTION_TIMEOUT_MS: u64 = 300;
+
 
 pub fn generate_election_timeout() -> Duration {
     use rand::distributions::{Distribution, Uniform};
@@ -26,8 +28,6 @@ pub fn generate_election_timeout() -> Duration {
 pub struct FollowerState<'a, V: Value, T: Transport<V>> {
     pub node: &'a mut Node<V, T>,
 
-    pub leader_id: Id,
-
     pub time_since_last_heartbeat: Instant
 }
 
@@ -36,101 +36,161 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
     pub fn new(node: &'a mut Node<V, T>) -> Self {
         FollowerState {
             node,
-            leader_id: 0,
             time_since_last_heartbeat: Instant::now()
         }
     }
 
-    pub fn should_begin_election_at(&self, at: Instant,
-                                    timeout: Duration) -> bool {
-        let time_passed = at - self.time_since_last_heartbeat;
-        time_passed >= timeout
+    /// Performs follower specific changes when receiving an AE request
+    /// (notably, updates the follower state)
+    pub fn on_receive_append_entries(&mut self, req: &AppendEntries<V>) {
+
+        if req.term < self.node.current_term {
+            return;
+        }
+
+        // if we had just lost an election
+        if self.node.leader_id.is_none() {
+            info!("Now I know the new leader: {}", req.leader_id);
+            self.node.leader_id = Some(req.leader_id);
+        }
+
+        // our leader might have changed if the term has changed
+        if self.node.current_term != req.term {
+            assert!(req.term > self.node.current_term);
+            self.node.leader_id = Some(req.leader_id);
+        } else {
+            // a leader cannot change within the same term
+            assert_eq!(self.node.leader_id, Some(req.leader_id));
+        }
+
+        self.time_since_last_heartbeat = Instant::now();
     }
 
     pub fn should_begin_election(&self, timeout: Duration) -> bool {
-        self.should_begin_election_at(Instant::now(), timeout)
+        Instant::now() - self.time_since_last_heartbeat >= timeout
     }
 
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
+        // leader ID should've been set(at the beginning, leader is 0,
+        // otherwise, we only transition to follower after receiving a matching AE)
+        assert!(self.node.leader_id.is_some());
+        self.node.voted_for = None;
         loop {
-            task::yield_now().await;
+            // One of the later operations might have changed our state
+            if self.node.state != ServerState::Follower {
+                return Ok(())
+            }
+
+            // create a single timer for a heartbeat
+            let mut heartbeat_timeout = tokio::time::delay_for(self.node.election_timeout);
+            tokio::select! {
+                _ = heartbeat_timeout => {
+                        warn!("haven't received a heartbeat in too long");
+                        self.node.change_state(ServerState::Candidate);
+                },
+                res = self.node.receiver.next() => {
+                    // TODO can this channel close prematurely?
+                    let cmd = res.unwrap();
+                    if let NodeCommand::AE(ae, _) = &cmd {
+                        self.on_receive_append_entries(ae);
+                    }
+                    self.node.on_request(cmd).await;
+                }
+            }
         }
         Ok(())
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ElectionResult {
     Lost,
-    Pending,
-    Won
+    Won,
+    Undecided
 }
 
-/// State used by a candidate, during a single election
+#[derive(Debug)]
+pub struct ElectionState {
+    /// NOTE: it is assumed that Raft RPC messages cannot be duplicated, in other words,
+    /// since each node only votes once, we can not have more than one response for every nodee
+    /// (We can assume reliability by our network protocol, e.g, unique message ID)
+    pub votes: Vec<RequestVoteResponse>,
+
+    pub yes: usize,
+    pub no: usize,
+
+    pub quorum_size: usize,
+    pub term: usize,
+
+    pub vote_receiver: UnboundedReceiver<RequestVoteResponse>
+}
+
+impl ElectionState {
+    pub fn new(quorum_size: usize, term: usize,
+               vote_receiver: UnboundedReceiver<RequestVoteResponse>) -> Self {
+        // we always vote for ourself
+        let votes = vec![
+            RequestVoteResponse {
+                term, vote_granted: true
+            }
+        ];
+        ElectionState {
+            votes, yes: 1, no: 0, quorum_size, term, vote_receiver
+        }
+    }
+
+    /// Counts the given vote(if it is for the current election)
+    pub fn count_vote(&mut self, vote: RequestVoteResponse) {
+        if vote.term != self.term {
+            error!("Got vote for another term, my term: {}, vote term: {}", self.term, vote.term);
+            return;
+        }
+        if vote.vote_granted {
+            self.yes += 1;
+        } else {
+            self.no += 1;
+        }
+        self.votes.push(vote);
+    }
+
+    /// Tallies all current votes and returns the result
+    pub fn tally(&self) -> ElectionResult {
+        if self.yes >= self.quorum_size {
+            return ElectionResult::Won;
+        }
+        if self.no >= self.quorum_size {
+            return ElectionResult::Lost;
+        }
+        return ElectionResult::Undecided;
+    }
+}
+
+/// State used by a candidate over one or more consecutive elections
 #[derive(Debug)]
 pub struct CandidateState<'a, V: Value, T: Transport<V>> {
-    pub node: &'a mut Node<V, T>,
+    pub node: &'a mut Node<V, T>
 
-    /// All votes, including the candidate's vote!
-    pub responses: Vec<RequestVoteResponse>,
-    pub required_quorum_size: usize,
-    pub election_start_time: Instant,
-    pub election_timeout: Duration
 }
 
 impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
     /// Creates state for a candidate who has just started an election
     pub fn new(candidate: &'a mut Node<V, T>) -> Self {
         // a candidate always votes for itself
-        let my_vote = RequestVoteResponse {
-            term: candidate.current_term,
-            vote_granted: true
-        };
-        let required_quorum_size = candidate.quorum_size();
-        /// TODO: should I generate a new election timeout?
-        let election_timeout = candidate.election_timeout;
         CandidateState {
-            node: candidate,
-            responses: vec![my_vote],
-            required_quorum_size,
-            election_start_time: Instant::now(),
-            election_timeout
+            node: candidate
         }
     }
 
-    pub fn election_elapsed_at(&self, at: Instant) -> bool {
-        (at - self.election_start_time) >= self.election_timeout
-    }
-
-    pub fn election_elapsed(&self) -> bool {
-        self.election_elapsed_at(Instant::now())
-    }
-
-    /// Checks the election's status
-    pub fn tally(&self) -> ElectionResult {
-        let mut yes = 0;
-        let mut no = 0;
-        for vote in self.responses.iter() {
-            if vote.vote_granted {
-                yes += 1;
-            } else {
-                no += 1;
-            }
-        };
-        if yes >= self.required_quorum_size {
-            assert!(no < self.required_quorum_size);
-            return ElectionResult::Won
-        }
-        if no >= self.required_quorum_size {
-            assert!(yes < self.required_quorum_size);
-            return ElectionResult::Lost
-        }
-        return ElectionResult::Pending
-    }
-
-    pub async fn start_election(&mut self) -> Result<(), RaftError> {
+    /// Starts a new election
+    pub async fn start_election(&mut self) -> Result<ElectionState, RaftError>{
+        self.node.leader_id = None;
         self.node.current_term += 1;
+        self.node.voted_for = Some(self.node.id);
         warn!("Election started for term {}", self.node.current_term);
+
+        /// for notifying the loop of received votes
+        let (tx, rx) = mpsc::unbounded_channel();
+
 
         for node_id in self.node.all_other_nodes().collect::<Vec<_>>() {
             let req = RequestVote {
@@ -139,19 +199,68 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                 last_log_index: self.node.storage.last_log_index(),
                 last_log_term: self.node.storage.last_log_term()
             };
-            let mut transport = self.node.transport.clone();
-            task::spawn_local(async move {
-                let res = transport.send_request_vote(node_id, req).await;
-                // self.responses.push(res.unwrap());
+            let transport = self.node.transport.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Ok(res) = transport.send_request_vote(node_id, req).await {
+                    tx.send(res.clone()).unwrap_or_else(|e| {
+                        // TODO this isn't really an error, just the result of delays
+                        error!("Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
+                    });
+                }
             });
         }
-        Ok(())
+        Ok(ElectionState::new(self.node.quorum_size(), self.node.current_term, rx))
     }
 
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
-        // self.start_election().await?;
+        // loop for multiple consecutive elections(1 or more)
         loop {
-            task::yield_now().await;
+
+            // start an election, updating node state and sending vote requests
+            let mut election_state = self.start_election().await?;
+
+            // loop for a single election
+            loop {
+
+                if self.node.state != ServerState::Candidate {
+                    return Ok(());
+                }
+
+                // TODO should I generate a new timeout?
+                let election_end = tokio::time::delay_for(self.node.election_timeout);
+
+                let mut _lost = false;
+                tokio::select! {
+                    _ = election_end => {
+                        // election timed out, start another one
+                        break;
+                    },
+                    Some(vote) = election_state.vote_receiver.next() => {
+                        election_state.count_vote(vote);
+                        match election_state.tally() {
+                            ElectionResult::Lost => {
+                                info!("lost election, results: {:?}", election_state);
+                                _lost = true;
+                                // we will not change the state yet, this will be done once we
+                                // receive a new AppendEntries message(might be slightly wasteful
+                                // as we might try another election, but this is a rare scenario
+                                // as the election timeout is bigger by an order of magnitude than
+                                // the broadcast time.)
+                            }
+                            ElectionResult::Won => {
+                                assert!(!_lost, "Cannot win election after losing(sanity check)");
+                                info!("won election, results: {:?}", election_state);
+                                self.node.change_state(ServerState::Leader);
+                                return Ok(())
+                            }
+                            ElectionResult::Undecided => {
+                                assert!(_lost, "Cannot become undecided after losing(sanity check)");
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -188,8 +297,13 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     }
 
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
+        self.node.leader_id = Some(self.node.id);
+        self.node.voted_for = None;
         loop {
-            task::yield_now().await;
+            if self.node.state != ServerState::Leader {
+                return Ok(());
+            }
+            tokio::time::delay_for(Duration::from_millis(500)).await;
         }
         Ok(())
     }
@@ -266,6 +380,9 @@ pub struct Node<V: Value, T: Transport<V>> {
     /// Node ID
     pub id: Id,
 
+    /// Leader ID. None when we are a candidate
+    pub leader_id: Option<Id>,
+
     #[derivative(Debug="ignore")]
     /// IDs of other nodes
     pub other_nodes: Vec<Id>,
@@ -305,14 +422,16 @@ impl <V: Value, T: Transport<V>> Node<V, T> {
                number_of_nodes: usize,
                transport: T,
                receiver: mpsc::UnboundedReceiver<NodeCommand<V>>) -> Self {
+        let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
         Node {
             transport,
             receiver,
             id,
+            leader_id: Some(0),
             other_nodes: (0 .. number_of_nodes).filter(|&cur_id| cur_id != id).collect(),
             number_of_nodes,
             election_timeout: generate_election_timeout(),
-            state: ServerState::Follower,
+            state,
             storage: Default::default(),
             current_term: 0,
             voted_for: None,
@@ -348,6 +467,14 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
                 ServerState::Leader => LeaderState::new(&mut self).run_loop().await?,
             }
         }
+    }
+
+    /// Changes the state of the node
+    #[instrument]
+    pub fn change_state(&mut self, new_state: ServerState) {
+        // from an implementation standpoint, this will cause the old state's loop to terminate
+        assert_ne!(self.state, new_state);
+        self.state = new_state;
     }
 
     /// This is the main entry point of a `NodeCommunicator` into a spawned `Node` object

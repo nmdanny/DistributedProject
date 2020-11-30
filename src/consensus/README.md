@@ -21,3 +21,7 @@ The main loop of a `Node` is spawned in a separate task/thread, yet we need to n
 messages (AppendEntry/RequestVote RPCs, which should be handled in any state) when our networking layer receives them.
  
 This is done via channels - the `NodeCommunicator` struct is essentially our access hatch to the `Node`
+
+State changes are done by the `Node::change_state` function - the various state loops constantly check they're in
+the matching state, otherwise we break out of the (Follower/Candidate/Leader) state loop, and the main Node loop
+will begin a state loop for the new state.
