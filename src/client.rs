@@ -90,7 +90,7 @@ mod tests {
 
 
     async fn test_base(address: SocketAddr, timeout_ms: u64) {
-        let (mut client, mut broadcasts) = ClientState::new(address, timeout_ms).await.unwrap();
+        let (client, mut broadcasts) = ClientState::new(address, timeout_ms).await.unwrap();
 
         let check_broadcasts_proper_order = tokio::spawn(async move {
             let mut last_chat_response = 0;

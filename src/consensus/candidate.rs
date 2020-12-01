@@ -107,7 +107,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
         self.node.voted_for = Some(self.node.id);
         warn!("Election started for term {}", self.node.current_term);
 
-        /// for notifying the loop of received votes
+        // for notifying the loop of received votes
         let (tx, rx) = mpsc::unbounded_channel();
 
 
@@ -173,7 +173,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                         election_state.count_vote(vote);
                         match election_state.tally() {
                             ElectionResult::Lost => {
-                                if (!_lost) {
+                                if !_lost {
                                     info!("lost election, results: {:?}", election_state);
                                 }
                                 _lost = true;

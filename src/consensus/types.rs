@@ -93,7 +93,7 @@ pub struct AppendEntries<V: Value> {
 
 impl <V: Value> AppendEntries<V> {
     pub fn indexed_entries(&self) -> impl Iterator<Item = (usize, &LogEntry<V>)> {
-        let indices = (self.prev_log_index + 1 .. );
+        let indices = self.prev_log_index + 1 .. ;
         return indices.zip(self.entries.iter())
     }
 }

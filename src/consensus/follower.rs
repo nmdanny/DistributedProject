@@ -66,7 +66,6 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
                 }
             }
         }
-        Ok(())
     }
 }
 

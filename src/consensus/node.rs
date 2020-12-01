@@ -115,7 +115,6 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
             }
         }
-        Ok(())
     }
 }
 
@@ -364,7 +363,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         // delete all entries after the conflicting one
         if let Some(index_to_clip_from) = index_to_clip_from {
             assert!(index_to_clip_from >= req.prev_log_index + 1);
-            let indices_to_clip = (index_to_clip_from ..= self.storage.last_log_index());
+            let indices_to_clip = index_to_clip_from ..= self.storage.last_log_index();
             for ix in indices_to_clip {
                 let _removed = self.storage.remove(&ix);
                 assert!(_removed.is_some());
@@ -399,7 +398,7 @@ mod tests {
     #[test]
     fn node_initialization_and_getters() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<String, _>::new(2, 5, NoopTransport(), rx);
+        let node = Node::<String, _>::new(2, 5, NoopTransport(), rx);
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
         assert_eq!(node.state, ServerState::Follower);
