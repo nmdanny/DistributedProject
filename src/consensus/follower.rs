@@ -36,9 +36,6 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
 
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
-        // leader ID should've been set(at the beginning, leader is 0)
-        // otherwise, we only transition to follower after receiving a matching AE)
-        assert!(self.node.leader_id.is_some());
         self.node.voted_for = None;
 
 
