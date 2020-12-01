@@ -135,8 +135,6 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
     /// Changes the state of the node
     #[instrument]
     pub fn change_state(&mut self, new_state: ServerState) {
-        // from an implementation standpoint, this will cause the old state's loop to terminate
-        assert_ne!(self.state, new_state);
         self.state = new_state;
     }
 
