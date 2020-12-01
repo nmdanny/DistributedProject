@@ -5,3 +5,4 @@ pub mod log;
 pub mod node_communicator;
 pub mod follower;
 pub mod candidate;
+pub mod leader;
