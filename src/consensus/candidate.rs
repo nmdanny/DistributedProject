@@ -8,6 +8,7 @@ use tokio::stream::StreamExt;
 use crate::consensus::node_communicator::CommandHandler;
 use tracing_futures::Instrument;
 use async_trait::async_trait;
+use anyhow::Error;
 
 pub const MIN_ELECTION_TIMEOUT_MS: u64 = 1500;
 pub const MAX_ELECTION_TIMEOUT_MS: u64 = 3000;
@@ -121,15 +122,19 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
             let tx = tx.clone();
             tokio::spawn(async move {
                 trace!("sending request to {}", node_id);
-                if let Ok(res) = transport.send_request_vote(node_id, req).await {
-                    debug!("response is {:?}", res);
-                    tx.send(res.clone()).unwrap_or_else(|e| {
-                        // TODO this isn't really an error, just the result of delays
-                        error!("Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
-                    });
-                    return;
+                let res = transport.send_request_vote(node_id, req).await;
+                match &res {
+                    Ok(res) => {
+                        debug!("response is {:?}", res);
+                        tx.send(res.clone()).unwrap_or_else(|e| {
+                            // TODO this isn't really an error, just the result of delays
+                            error!("Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
+                        });
+                    }
+                    Err(e) => {
+                        error!("Error when sending request {:?}: {:?}", res, e);
+                    }
                 }
-                error!("request failed(no response)");
             }.instrument(info_span!("vote request", to=node_id)));
         }
         Ok(ElectionState::new(self.node.quorum_size(), self.node.current_term, rx))

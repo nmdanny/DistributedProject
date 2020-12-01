@@ -142,6 +142,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
     /// Updates the current term to the given one, if it's more up to date.
     /// Also updates the leader in that case. Returns true if the term was indeed updated
+    #[instrument]
     pub fn try_update_term(&mut self, term: usize, leader: Option<Id>) -> bool {
         if term > self.current_term {
             self.current_term = term;
@@ -204,7 +205,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         }
 
         info!("got receive append entry");
-        unimplemented!();
+        unimplemented!("on_receive_append_entry");
 
 
         Ok(AppendEntriesResponse::success(self.current_term))

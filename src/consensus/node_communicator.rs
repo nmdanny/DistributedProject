@@ -1,8 +1,9 @@
-use crate::consensus::types::{Value, AppendEntries, AppendEntriesResponse, RaftError, RequestVote, RequestVoteResponse, ClientWriteRequest, ClientWriteResponse, ClientReadRequest, ClientReadResponse};
+use crate::consensus::types::{Value, AppendEntries, AppendEntriesResponse, RaftError, RequestVote, RequestVoteResponse, ClientWriteRequest, ClientWriteResponse, ClientReadRequest, ClientReadResponse, CommitEntry};
 use tokio::sync::{oneshot, mpsc};
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
 use async_trait::async_trait;
+use anyhow::{anyhow, Context};
 
 
 /// A command, created within a `NodeCommunicator` for invoking various methods on a Node which is
@@ -41,31 +42,31 @@ impl <V: Value> NodeCommunicator<V> {
     pub async fn append_entries(&self, ae: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::AE(ae, tx);
-        self.rpc_sender.send(cmd).unwrap();
-        Ok(rx.await.unwrap()?)
+        self.rpc_sender.send(cmd).context("send command to append entries").map_err(RaftError::CommunicatorError)?;
+        rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
     }
 
     #[instrument]
     pub async fn request_vote(&self, rv: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::RV(rv, tx);
-        self.rpc_sender.send(cmd).unwrap();
-        Ok(rx.await.unwrap()?)
+        self.rpc_sender.send(cmd).context("send command to request vote").map_err(RaftError::CommunicatorError)?;
+        rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
     }
 
     #[instrument]
     pub async fn submit_value(&self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::ClientWriteRequest(req, tx);
-        self.rpc_sender.send(cmd).unwrap();
-        Ok(rx.await.unwrap()?)
+        self.rpc_sender.send(cmd).context("send command to submit value").map_err(RaftError::CommunicatorError)?;
+        rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
     }
 
     pub async fn request_values(&self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::ClientReadRequest(req, tx);
-        self.rpc_sender.send(cmd).unwrap();
-        Ok(rx.await.unwrap()?)
+        self.rpc_sender.send(cmd).context("send command to request values").map_err(RaftError::CommunicatorError)?;
+        rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
     }
 }
 
@@ -84,16 +85,24 @@ pub(in crate::consensus) trait CommandHandler<V: Value> {
     async fn handle_command(&mut self, cmd: NodeCommand<V>) {
         match cmd {
             NodeCommand::AE(ae, res) => {
-                res.send(self.handle_append_entries(ae).await).unwrap();
+                res.send(self.handle_append_entries(ae).await).unwrap_or_else(|e| {
+                    error!("Couldn't send response: {:?}", e);
+                });
             },
             NodeCommand::RV(rv, res) => {
-                res.send(self.handle_request_vote(rv).await).unwrap();
+                res.send(self.handle_request_vote(rv).await).unwrap_or_else(|e| {
+                    error!("Couldn't send response: {:?}", e);
+                });
             }
             NodeCommand::ClientWriteRequest(req, res) => {
-                res.send(self.handle_client_write_request(req).await).unwrap();
+                res.send(self.handle_client_write_request(req).await).unwrap_or_else(|e| {
+                    error!("Couldn't send response: {:?}", e);
+                });
             }
             NodeCommand::ClientReadRequest(req, res) => {
-                res.send(self.handle_client_read_request(req).await).unwrap();
+                res.send(self.handle_client_read_request(req).await).unwrap_or_else(|e| {
+                    error!("Couldn't send response: {:?}", e);
+                });
             }
         }
 

@@ -110,7 +110,14 @@ impl AppendEntriesResponse {
 #[derive(Error, Debug)]
 pub enum RaftError {
     #[error("Network Error: {0}")]
-    NetworkError(anyhow::Error)
+    NetworkError(anyhow::Error),
+
+    #[error("Internal Error: {0}")]
+    InternalError(anyhow::Error),
+
+    /// An error
+    #[error("Communicator Error: {0}")]
+    CommunicatorError(anyhow::Error)
 }
 
 pub type RaftResult<T> = Result<T, RaftError>;
