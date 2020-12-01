@@ -3,3 +3,5 @@ pub mod transport;
 pub mod node;
 pub mod log;
 pub mod node_communicator;
+pub mod follower;
+pub mod candidate;
