@@ -35,11 +35,8 @@ pub struct RequestVote {
     /// ID of Candidate
     pub candidate_id: Id,
 
-    /// Index of candidate's last log entry
-    pub last_log_index: usize,
-
-    /// Term of candidate's last log entry
-    pub last_log_term: usize
+    /// Index and term of candidate's last log entry
+    pub last_log_index_term: IndexTerm
 
 }
 
@@ -77,11 +74,8 @@ pub struct AppendEntries<V: Value> {
     /// Leader's ID, followers must know it in order to redirect clients
     pub leader_id: Id,
 
-    /// Index of log entry preceding the new entries
-    pub prev_log_index: usize,
-
-    /// Term of log entry preceding the new entries
-    pub prev_log_term: usize,
+    /// Index and term of log entry preceding the new entries
+    pub prev_log_index_term: IndexTerm,
 
     #[serde(bound = "V: Value")]
     /// New entries to store (empty for heartbeat)
@@ -89,13 +83,6 @@ pub struct AppendEntries<V: Value> {
 
     /// Leader's commit index
     pub leader_commit: usize
-}
-
-impl <V: Value> AppendEntries<V> {
-    pub fn indexed_entries(&self) -> impl Iterator<Item = (usize, &LogEntry<V>)> {
-        let indices = self.prev_log_index + 1 .. ;
-        return indices.zip(self.entries.iter())
-    }
 }
 
 /// Invoked by each follower(or candidate, in which case they become followers)
@@ -168,4 +155,78 @@ pub struct CommitEntry<V: Value> {
     pub value: V,
     pub index: usize,
     pub term: usize
+}
+
+/// A pair of index and term
+/// Unlike
+#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IndexTerm(pub Option<(usize, usize)>);
+
+impl std::fmt::Debug for IndexTerm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some((index, term)) = self.0 {
+            f.debug_struct("IndexTerm")
+                .field("index", &index)
+                .field("term", &term)
+                .finish()
+        } else {
+            f.write_str("IndexTerm(NoEntry)")
+        }
+
+
+    }
+}
+
+impl IndexTerm {
+    pub fn new(index: usize, term: usize) -> Self {
+        IndexTerm(Some((index, term)))
+    }
+    pub fn no_entry() -> Self {
+        IndexTerm(None)
+    }
+
+
+    pub fn for_entry<V: Value>(index: usize, entry: &LogEntry<V>) -> Self {
+        IndexTerm(Some((index, entry.term)))
+    }
+
+    pub fn contains_entry(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub fn index(&self) -> Option<usize> {
+        self.0.map(|t| t.0)
+    }
+
+    pub fn term(&self) -> Option<usize> {
+        self.0.map(|t| t.1)
+    }
+}
+
+impl From<(usize, usize)> for IndexTerm {
+    fn from((index, term) : (usize, usize)) -> Self {
+        Self::new(index, term)
+    }
+}
+
+#[cfg(test)]
+mod tests{
+    use crate::consensus::types::IndexTerm;
+
+    #[test]
+    fn test_index_term() {
+        let none = IndexTerm::no_entry();
+
+        let a = IndexTerm::new(0, 0);
+        assert!(none < a);
+
+        let b = IndexTerm::new(5, 10);
+        assert!(a < b);
+
+        let c = IndexTerm::new(6, 20);
+        assert!(b < c);
+
+        let d = IndexTerm::new(6, 25);
+        assert!(c < d);
+    }
 }

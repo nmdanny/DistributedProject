@@ -115,8 +115,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
             let req = RequestVote {
                 term: self.node.current_term,
                 candidate_id: self.node.id,
-                last_log_index: self.node.storage.last_log_index(),
-                last_log_term: self.node.storage.last_log_term()
+                last_log_index_term: self.node.storage.last_log_index_term()
             };
             let transport = self.node.transport.clone();
             let tx = tx.clone();

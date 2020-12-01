@@ -174,11 +174,9 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
 
-        if (self.storage.last_log_index(), self.storage.last_log_term()) >
-            (req.last_log_index, req.last_log_term) {
-            info!(last_log_term = self.storage.last_log_term(),
-                  last_log_index = self.storage.last_log_index(),
-                 "My log is more up to date than the candidate's log"
+        if self.storage.last_log_index_term() > req.last_log_index_term {
+            info!(my=?self.storage.last_log_index_term(), req=?req.last_log_index_term,
+                "My log is more up to date than the candidate's log"
             );
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
@@ -206,67 +204,8 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         }
 
         info!("got receive append entry");
+        unimplemented!();
 
-        // 2. We can't append entries as we have a mismatch - the last entry in our log doesn't
-        //    match (in index or term) the one expected by the leader
-        match self.storage.get(&req.prev_log_index) {
-            None => {
-                // TODO: should last_applied be a different variable?
-                warn!("our log is too short, our last applied index is {}, required prev index is {}",
-                      self.storage.last_log_index(), req.prev_log_index);
-                return Ok(AppendEntriesResponse::failed(self.current_term))
-            },
-            Some(LogEntry { term, ..}) if *term != req.prev_log_term => {
-                warn!("our log contains a mismatch at the request's prev index {}, our entry's term is {},\
-                       the required prev term is {}",
-                      req.prev_log_index, *term, req.prev_log_term);
-                return Ok(AppendEntriesResponse::failed(self.current_term));
-            },
-            _ => {}
-        }
-
-        // 3. Find conflicting entries
-        let index_to_clip_from = {
-            let mut clip_index = None;
-            for (insertion_index, LogEntry { term, ..}) in req.indexed_entries() {
-                assert!(insertion_index >= req.prev_log_index + 1);
-                match self.storage.get(&insertion_index) {
-                    Some(LogEntry { term: my_term, ..}) if *term != *my_term => {
-                        warn!("our log contains a mismatch at an inserted item index {}\
-                               our entry's term is {}, the inserted term is {}",
-                        insertion_index, my_term, term);
-                        clip_index = Some(insertion_index);
-                        break;
-                    },
-                    _ => {}
-                }
-            }
-            clip_index
-        };
-        // delete all entries after the conflicting one
-        if let Some(index_to_clip_from) = index_to_clip_from {
-            assert!(index_to_clip_from >= req.prev_log_index + 1);
-            let indices_to_clip = index_to_clip_from ..= self.storage.last_log_index();
-            for ix in indices_to_clip {
-                let _removed = self.storage.remove(&ix);
-                assert!(_removed.is_some());
-            }
-        }
-
-        // 4. Append entries not already in the log
-        let index_to_append_from = index_to_clip_from.unwrap_or(req.prev_log_index + 1);
-        for (insert_index, entry) in (index_to_append_from .. ).zip(req.entries.iter()) {
-            let _prev = self.storage.insert(insert_index, entry.clone());
-            assert!(_prev.is_some(), "Entry shouldn't be in the log by now");
-        }
-
-        // 5. update commit_index
-        if req.leader_commit > self.commit_index {
-            // we now know that 'req.leader_commit' is the minimal commit index,
-            // but since we're a follower,
-            // TODO use last_applied here maybe
-            self.commit_index = req.leader_commit.min(self.storage.last_log_index());
-        }
 
         Ok(AppendEntriesResponse::success(self.current_term))
     }

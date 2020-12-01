@@ -49,8 +49,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
             term: self.node.current_term,
             entries: Vec::new(),
             leader_commit: self.node.commit_index,
-            prev_log_index: self.node.storage.last_log_index(),
-            prev_log_term: self.node.storage.last_log_term()
+            prev_log_index_term: self.node.storage.last_log_index_term()
         };
         info!("sending heartbeat");
         let my_term = self.node.current_term;
