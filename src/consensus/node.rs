@@ -74,7 +74,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                         tx.send(res.term).unwrap_or_else(|_| {
                             // TODO not really an error
                             error!("Couldn't notify leader that he's stale(someone else probably notified him already");
-                        });
+                        }).await;
                     }
                 } else {
                     error!("sending heartbeat to {} failed: {:?}", node_id, res);
