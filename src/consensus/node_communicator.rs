@@ -4,6 +4,7 @@ use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
 use async_trait::async_trait;
 use anyhow::{anyhow, Context};
+use tokio::sync::broadcast;
 
 
 /// A command, created within a `NodeCommunicator` for invoking various methods on a Node which is
@@ -20,8 +21,16 @@ pub enum NodeCommand<V: Value> {
 /// This is used to communicate with a raft node once we begin the main loop
 #[derive(Debug, Clone)]
 pub struct NodeCommunicator<V: Value> {
+    // used for sending messages to the node
     rpc_sender: mpsc::UnboundedSender<NodeCommand<V>>,
+
+    // only used to subscribe new clients
+    commit_sender: broadcast::Sender<CommitEntry<V>>,
 }
+
+/// Size of commit notification channel. Note that in case of lagging receivers(clients), they will never block
+/// the node from sending values, but they might lose some commit notifications - see https://docs.rs/tokio/0.3.5/tokio/sync/broadcast/index.html#lagging
+const COMMIT_CHANNEL_SIZE: usize = 1024;
 
 impl <V: Value> NodeCommunicator<V> {
 
@@ -31,11 +40,18 @@ impl <V: Value> NodeCommunicator<V> {
                             number_of_nodes: usize,
                             transport: T) -> (Node<V, T>, NodeCommunicator<V>) {
        let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
+        let (commit_sender, _commit_receiver) = broadcast::channel(COMMIT_CHANNEL_SIZE);
         let communicator = NodeCommunicator {
-            rpc_sender
+            rpc_sender, commit_sender: commit_sender.clone()
         };
-        let node = Node::new(id, number_of_nodes, transport, rpc_receiver);
+        let node = Node::new(id, number_of_nodes, transport, rpc_receiver,
+                             commit_sender);
         (node, communicator)
+    }
+
+    /// Allows one to be notified of entries that were committed AFTER this function is called.
+    pub async fn commit_channel(&self) -> Result<broadcast::Receiver<CommitEntry<V>>, RaftError> {
+        Ok(self.commit_sender.subscribe())
     }
 
     #[instrument]

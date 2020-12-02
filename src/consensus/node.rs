@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::stream::StreamExt;
 use serde;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::broadcast;
 use tracing_futures::Instrument;
 use async_trait::async_trait;
 use futures::TryFutureExt;
@@ -44,6 +45,10 @@ pub struct Node<V: Value, T: Transport<V>> {
     #[derivative(Debug="ignore")]
     /// Used for receiving request RPCs (reactive)
     pub receiver: mpsc::UnboundedReceiver<NodeCommand<V>>,
+
+    /// Used for notifying subscribed clients of committed entries
+    /// Note that sending will often fail if no clients have subscribed, this is OK.
+    pub commit_sender: broadcast::Sender<CommitEntry<V>>,
 
     /// Node ID
     pub id: Id,
@@ -85,11 +90,13 @@ impl <V: Value, T: Transport<V>> Node<V, T> {
     pub fn new(id: usize,
                number_of_nodes: usize,
                transport: T,
-               receiver: mpsc::UnboundedReceiver<NodeCommand<V>>) -> Self {
+               cmd_receiver: mpsc::UnboundedReceiver<NodeCommand<V>>,
+               commit_sender: broadcast::Sender<CommitEntry<V>>) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
         Node {
             transport,
-            receiver,
+            receiver: cmd_receiver,
+            commit_sender,
             id,
             leader_id: Some(0),
             other_nodes: (0 .. number_of_nodes).filter(|&cur_id| cur_id != id).collect(),
@@ -244,7 +251,6 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         if req.leader_commit > self.commit_index {
             let index_of_last_new_entry = req.entries.len() - 1 + insertion_index;
             self.commit_index = req.leader_commit.min(Some(index_of_last_new_entry));
-            println!("after set {:?}", self.commit_index);
         }
 
         Ok(AppendEntriesResponse::success(self.current_term))
@@ -260,7 +266,8 @@ mod tests {
     #[test]
     fn node_initialization_and_getters() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let node = Node::<String, _>::new(2, 5, NoopTransport(), rx);
+        let (tx2, _rx2) = broadcast::channel(1);
+        let node = Node::<String, _>::new(2, 5, NoopTransport(), rx, tx2);
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
         assert_eq!(node.state, ServerState::Follower);
@@ -283,7 +290,8 @@ mod tests {
     #[test]
     fn node_on_receive_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+        let (tx2, _rx2) = broadcast::channel(1);
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);
 
         let req1 = AppendEntries {
             term: 0,
@@ -347,7 +355,8 @@ mod tests {
     #[test]
     fn node_on_receive_ae_clipping() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+        let (tx2, _rx2) = broadcast::channel(1);
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);
         node.current_term = 2;
 
 
@@ -408,7 +417,8 @@ mod tests {
     #[test]
     fn node_on_receive_mismatching_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+        let (tx2, _rx2) = broadcast::channel(1);
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);
         node.current_term = 2;
 
         // first request is just to initialize the node
