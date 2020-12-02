@@ -16,7 +16,7 @@ pub struct FollowerState<'a, V: Value, T: Transport<V>> {
     pub node: &'a mut Node<V, T>,
 
     /// The last time since we granted a vote or got a heartbeat from the leader
-    /// Once this elapses, convert to a candidate. (§5.2)
+    /// If more time passed than the election timeout, convert to a candidate. (§5.2)
     pub time_since_last_heartbeat_or_grant_vote: Instant
 }
 

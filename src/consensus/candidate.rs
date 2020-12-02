@@ -106,7 +106,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
         self.node.leader_id = None;
         self.node.current_term += 1;
         self.node.voted_for = Some(self.node.id);
-        warn!("Election started for term {}", self.node.current_term);
+        warn!("Starting elections started for term {}", self.node.current_term);
 
         // for notifying the loop of received votes
         let (tx, rx) = mpsc::unbounded_channel();
@@ -152,7 +152,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
 
             let duration = generate_election_length();
             let election_end = tokio::time::Instant::now() + duration;
-            info!("Starting election, duration: {:?}", duration);
+            warn!("elections started, duration: {:?}", duration);
 
             // loop for a single election
             loop {
