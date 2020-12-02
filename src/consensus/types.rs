@@ -4,9 +4,9 @@ use std::fmt::Debug;
 use thiserror::Error;
 
 /// A value that can be stored in a log entry, must be (de)serializable, owned
-pub trait Value: Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {}
+pub trait Value: Eq + Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {}
 
-impl <V: Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static> Value for V {
+impl <V: Eq + Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static> Value for V {
 
 }
 
@@ -14,7 +14,7 @@ impl <V: Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static> V
 pub type Id = usize;
 
 /// An entry in the log
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct LogEntry<V: Value> {
 
     #[serde(bound = "V: Value")]
@@ -24,6 +24,12 @@ pub struct LogEntry<V: Value> {
     /// In which term was this entry received by the leader
     pub term: usize,
 
+}
+
+impl <V: Value> LogEntry<V> {
+    pub fn new(value: V, term: usize) -> Self {
+        LogEntry { value, term }
+    }
 }
 
 /// Invoked by candidates to gather votes(sent to all nodes)
@@ -81,8 +87,8 @@ pub struct AppendEntries<V: Value> {
     /// New entries to store (empty for heartbeat)
     pub entries: Vec<LogEntry<V>>,
 
-    /// Leader's commit index
-    pub leader_commit: usize
+    /// Leader's commit index (None if he hasn't committed anything)
+    pub leader_commit: Option<usize>
 }
 
 /// Invoked by each follower(or candidate, in which case they become followers)

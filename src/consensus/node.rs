@@ -76,7 +76,7 @@ pub struct Node<V: Value, T: Transport<V>> {
     /* volatile state */
 
     /// Index of highest log entry known to be committed (replicated to a majority quorum)
-    pub commit_index: usize,
+    pub commit_index: Option<usize>,
 
     // TODO, maybe add last_applied
 }
@@ -98,7 +98,7 @@ impl <V: Value, T: Transport<V>> Node<V, T> {
             storage: Default::default(),
             current_term: 0,
             voted_for: None,
-            commit_index: 0,
+            commit_index: None,
         }
     }
 
@@ -188,23 +188,64 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
     /// Invoked by any node upon receiving a request to append entries
     #[instrument]
     pub fn on_receive_append_entry(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
-        // 1. The sender is not a leader anymore
+
+        assert_ne!(req.leader_id, self.id, "A leader cannot send append entry to himself");
+        assert!(req.entries.iter().all(|e| e.term <= req.term), "A leader cannot have entries whose term is higher than his own");
+
+        // 1. Check if sender is stale leader
         if req.term < self.current_term {
-            warn!("old leader (my term = {}, other term = {})", req.term, self.current_term);
+            warn!("sender is stale leader (my term = {}, other term = {})", req.term, self.current_term);
             return Ok(AppendEntriesResponse::failed(self.current_term));
         }
 
         self.try_update_term(req.term, Some(req.leader_id));
 
+        // 2. Check if we have a mismatch with the prev_log_index_term
+        if req.prev_log_index_term.contains_entry() {
+            let (prev_log_index, prev_log_term) = req.prev_log_index_term.0.unwrap();
+            match self.storage.get(prev_log_index) {
+                None => {
+                    warn!("mismatching prev_log_term for index {}. my log is too short, their term: {}",
+                          prev_log_index, prev_log_term);
+                    return Ok(AppendEntriesResponse::failed(self.current_term));
+                }
+                Some(entry) => {
+                    if entry.term != prev_log_term {
+                        warn!("mismatching prev_log_term for index {}. mine: {}, their: {}",
+                            prev_log_index, entry.term, prev_log_term);
+                        return Ok(AppendEntriesResponse::failed(self.current_term));
+                    }
+                }
+            }
+        }
+
         // this is a heartbeat, nothing to do
         if req.entries.is_empty() {
-            trace!("got heartbeat");
+            trace!("got heartbeat/empty entry list");
             return Ok(AppendEntriesResponse::success(self.current_term));
         }
 
-        info!("got receive append entry");
-        unimplemented!("on_receive_append_entry");
+        let mut insertion_index = req.prev_log_index_term.index()
+            .map(|prev_log_index| prev_log_index + 1).unwrap_or(0);
 
+        // 3. delete conflicting entries
+        if let Some(conflicting_index) = self.storage.find_index_of_conflicting_entry(&req.entries,
+                                                                                      insertion_index) {
+            warn!("Found conflicting index {}", conflicting_index);
+            assert!(self.commit_index.map(|commit_index| {
+                conflicting_index > commit_index
+            }).unwrap_or(true), "there cannot be conflicting entries before/at the commit index");
+            self.storage.delete_entries(conflicting_index);
+        }
+
+        // 4. append entries that aren't in the log
+        self.storage.append_entries_not_in_log(&req.entries, insertion_index);
+
+        if req.leader_commit > self.commit_index {
+            let index_of_last_new_entry = req.entries.len() - 1 + insertion_index;
+            self.commit_index = req.leader_commit.min(Some(index_of_last_new_entry));
+            println!("after set {:?}", self.commit_index);
+        }
 
         Ok(AppendEntriesResponse::success(self.current_term))
     }
@@ -224,5 +265,190 @@ mod tests {
         assert_eq!(node.quorum_size(), 3);
         assert_eq!(node.state, ServerState::Follower);
         assert_eq!(node.all_other_nodes().collect::<Vec<_>>(), vec![0, 1, 3, 4]);
+    }
+
+    // just sanity checks on Ord
+    #[test]
+    fn ord_on_option() {
+        assert_eq!(None.min(Some(0)), None);
+        assert_eq!(None.max(Some(0)), Some(0));
+        assert_eq!(Some(0).min(None), None);
+        assert_eq!(Some(0).max(None), Some(0));
+        assert_eq!(Some(3).min(None), None);
+        assert_eq!(Some(3).max(None), Some(3));
+
+        assert!(None < Some(0) && Some(0) < Some(1) && Some(0) > None);
+    }
+
+    #[test]
+    fn node_on_receive_ae() {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+
+        let req1 = AppendEntries {
+            term: 0,
+            leader_id: 0,
+            prev_log_index_term: IndexTerm::no_entry(),
+            entries: vec![
+                LogEntry::new(1337, 0),
+                LogEntry::new(1338, 0),
+                LogEntry::new(1339, 0),
+            ],
+            leader_commit: None
+        };
+
+
+        // Valid request + RPCs are idempotent
+        for _ in 1 .. 3 {
+            let res1 = node.on_receive_append_entry(req1.clone()).unwrap();
+            assert_eq!(res1.term, 0);
+            assert!(res1.success);
+        }
+
+        // Another attempt of sending entries that are already in the log
+        let req2 = AppendEntries {
+            term: 0,
+            leader_id: 0,
+            prev_log_index_term: IndexTerm::new(0, 0),
+            entries: vec![
+                LogEntry::new(1338, 0),
+                LogEntry::new(1339, 0),
+            ],
+            leader_commit: None
+        };
+
+        let res2 = node.on_receive_append_entry(req2).unwrap();
+        assert_eq!(res2.term, 0);
+        assert!(res2.success);
+
+        let req3 = AppendEntries {
+            term: 0,
+            leader_id: 0,
+            prev_log_index_term: IndexTerm::new(1, 0),
+            entries: vec![
+                LogEntry::new(1339, 0),
+            ],
+            leader_commit: None
+        };
+
+        let res3 = node.on_receive_append_entry(req3).unwrap();
+        assert_eq!(res3.term, 0);
+        assert!(res3.success);
+
+        assert_eq!(node.storage.get_from(0), &[
+            LogEntry::new(1337, 0),
+            LogEntry::new(1338, 0),
+            LogEntry::new(1339, 0),
+        ]);
+
+        assert_eq!(node.commit_index, None);
+    }
+
+    #[test]
+    fn node_on_receive_ae_clipping() {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+        node.current_term = 2;
+
+
+        // first request is just to initialize the node
+        let req1 = AppendEntries {
+            term: 4,
+            leader_id: 0,
+            prev_log_index_term: IndexTerm::no_entry(),
+            entries: vec![
+                LogEntry::new(0, 0),
+                LogEntry::new(1, 0),
+                LogEntry::new(2, 0),
+                LogEntry::new(3, 2),
+                LogEntry::new(4, 2),
+                LogEntry::new(5, 3),
+            ],
+            leader_commit: Some(3)
+        };
+
+        let res1 = node.on_receive_append_entry(req1).unwrap();
+        assert!(res1.success);
+        assert_eq!(res1.term, 4);
+        assert_eq!(node.leader_id, Some(0));
+        assert_eq!(node.current_term, 4);
+        assert_eq!(node.commit_index, Some(3));
+
+        // another request is from a different leader at term 5
+        // that leader did not see entries (4,2) and (5,3), thus they will be clipped
+        let req2 = AppendEntries {
+            term: 5,
+            leader_id: 3,
+            prev_log_index_term: IndexTerm::new(3, 2),
+            entries: vec![
+                LogEntry::new(1337, 5),
+                LogEntry::new(1338, 5),
+                LogEntry::new(1339, 5),
+            ],
+            leader_commit: Some(4)
+        };
+        let res2 = node.on_receive_append_entry(req2).unwrap();
+        assert!(res2.success);
+        assert_eq!(res2.term, 5);
+        assert_eq!(node.current_term, 5);
+        assert_eq!(node.leader_id, Some(3));
+        assert_eq!(node.commit_index, Some(4));
+
+        assert_eq!(node.storage.get_from(0), &[
+            LogEntry::new(0, 0),
+            LogEntry::new(1, 0),
+            LogEntry::new(2, 0),
+            LogEntry::new(3, 2),
+            LogEntry::new(1337, 5),
+            LogEntry::new(1338, 5),
+            LogEntry::new(1339, 5),
+        ]);
+    }
+
+    #[test]
+    fn node_on_receive_mismatching_ae() {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+        node.current_term = 2;
+
+        // first request is just to initialize the node
+        let req1 = AppendEntries {
+            term: 3,
+            leader_id: 0,
+            prev_log_index_term: IndexTerm::no_entry(),
+            entries: vec![
+                LogEntry::new(0, 0),
+                LogEntry::new(1, 0),
+            ],
+            leader_commit: None
+        };
+        let res1 = node.on_receive_append_entry(req1).unwrap();
+        assert!(res1.success);
+        assert_eq!(res1.term, 3);
+        assert_eq!(node.current_term, 3);
+        assert_eq!(node.commit_index, None);
+
+        // now, a mismatching req
+        let req2 = AppendEntries {
+            term: 4,
+            leader_id: 5,
+            prev_log_index_term: IndexTerm::new(1, 3),
+            entries: vec![
+                LogEntry::new(1337, 3)
+            ],
+            leader_commit: Some(1)
+        };
+        let res2 = node.on_receive_append_entry(req2).unwrap();
+        assert!(!res2.success);
+
+        // ensure the failed request did not affect the node other than updating his term
+        assert_eq!(res2.term, 4);
+        assert_eq!(node.current_term, 4);
+        assert_eq!(node.commit_index, None);
+
+        assert_eq!(node.storage.get_from(0), &[
+            LogEntry::new(0, 0),
+            LogEntry::new(1, 0),
+        ]);
     }
 }
