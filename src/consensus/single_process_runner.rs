@@ -39,7 +39,7 @@ impl <V: Value> Transport<V> for ThreadTransport<V> {
     }
 }
 
-const NUM_NODES: usize = 7;
+const NUM_NODES: usize = 3;
 
 #[tokio::main]
 pub async fn main() -> Result<(), Error> {
@@ -79,18 +79,21 @@ pub async fn main() -> Result<(), Error> {
     }
 
     let mut handles = Vec::new();
-    for node in nodes.into_iter() {
-        let id = node.id;
-        let handle = tokio::spawn(async move {
-            node.run_loop()
-                .instrument(tracing::info_span!("node-loop", node.id = id))
-                .await
-                .unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
-        });
-        handles.push(handle);
-    }
+    let ls = tokio::task::LocalSet::new();
+    ls.run_until(async move {
+        for node in nodes.into_iter() {
+            let id = node.id;
+            let handle = tokio::task::spawn_local(async move {
+                node.run_loop()
+                    .instrument(tracing::info_span!("node-loop", node.id = id))
+                    .await
+                    .unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
+            });
+            handles.push(handle);
+        }
+        futures::future::join_all(handles).await;
+    }).await;
 
-    futures::future::join_all(handles).await;
 
     Ok(())
 }
