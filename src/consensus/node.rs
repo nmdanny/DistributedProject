@@ -45,7 +45,12 @@ pub struct Node<V: Value, T: Transport<V>> {
 
     #[derivative(Debug="ignore")]
     /// Used for receiving request RPCs (reactive)
-    pub receiver: mpsc::UnboundedReceiver<NodeCommand<V>>,
+    ///
+    /// Note, this is `Option` just so the `LeaderState` can move it out, as it needs
+    /// to await on this receiver(use it mutably), yet it also wraps `Node` in a `Rc<RefCell<..>>`, and we
+    /// must never hold a mutable shared borrow across await points.
+    /// It is the `LeaderState` job to ensure this receiver is `Some` before he finishes.
+    pub receiver: Option<mpsc::UnboundedReceiver<NodeCommand<V>>>,
 
     /// Used for notifying subscribed clients of committed entries
     /// Note that sending will often fail if no clients have subscribed, this is OK.
@@ -96,7 +101,7 @@ impl <V: Value, T: Transport<V>> Node<V, T> {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
         Node {
             transport,
-            receiver: cmd_receiver,
+            receiver: Some(cmd_receiver),
             commit_sender,
             id,
             leader_id: Some(0),

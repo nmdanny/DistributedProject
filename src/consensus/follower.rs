@@ -56,7 +56,7 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
                         warn!("haven't received a heartbeat in too long, becoming candidate");
                         self.node.change_state(ServerState::Candidate);
                 },
-                res = self.node.receiver.next() => {
+                res = self.node.receiver.as_mut().expect("follower - Node::receiver was None").next() => {
                     // TODO can this channel close prematurely?
                     let cmd = res.unwrap();
                     self.handle_command(cmd).await;

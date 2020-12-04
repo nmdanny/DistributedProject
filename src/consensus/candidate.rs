@@ -198,7 +198,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                             }
                         }
                     },
-                    res = self.node.receiver.next() => {
+                    res = self.node.receiver.as_mut().expect("candidate - Node::receiver was None").next() => {
                         // TODO can this channel close prematurely?
                         let cmd = res.unwrap();
                         self.handle_command(cmd).await;

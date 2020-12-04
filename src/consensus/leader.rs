@@ -1,7 +1,7 @@
 use crate::consensus::types::*;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::{Node, ServerState};
-use crate::consensus::node_communicator::CommandHandler;
+use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::stream::StreamExt;
@@ -132,6 +132,21 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
+        let mut receiver = self.node
+            .borrow_mut().receiver
+            .take().expect("Receiver was null");
+
+        let res = self.run_loop_inner(&mut receiver).await;
+
+        // since only LeaderState can take out `receiver`, we ensure the receiver is back in the
+        // state no matter if run_loop_inner has exited in an error or not.
+
+        self.node.borrow_mut().receiver = Some(receiver);
+        res
+
+    }
+
+    async fn run_loop_inner(&mut self, receiver: &mut mpsc::UnboundedReceiver<NodeCommand<V>>) -> Result<(), anyhow::Error> {
         let mut node_ref = self.node.borrow_mut();
         node_ref.leader_id = Some(node_ref.id);
         node_ref.voted_for = None;
@@ -173,14 +188,11 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                     node.try_update_term(res, None);
                     return Ok(())
                 },
-                // res = {
-                //     let mut receiver = &self.node.borrow_mut().receiver;
-                //     receiver.next()
-                // } => {
-                //     // TODO can this channel close prematurely?
-                //     let cmd = res.unwrap();
-                //     self.handle_command(cmd).await;
-                // }
+                res = receiver.next() => {
+                    // TODO can this channel close prematurely?
+                    let cmd = res.unwrap();
+                    self.handle_command(cmd).await;
+                }
 
             }
         }
