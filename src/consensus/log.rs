@@ -15,7 +15,6 @@ impl <V: Value> Default for InMemoryStorage<V> {
     }
 }
 
-
 impl <V: Value> InMemoryStorage<V> {
     /// Gets the log entry at given index
     pub fn get(&self, index: usize) -> Option<&LogEntry<V>> {
@@ -28,12 +27,17 @@ impl <V: Value> InMemoryStorage<V> {
     }
 
 
+    pub fn get_from_to(&self, from: usize, to_exclusive: usize) -> &[LogEntry<V>] {
+        return &self.log[from .. to_exclusive]
+    }
 
-    /// Inserts a log entry into given index, returns the previous log entry(if exists)
-    pub fn insert(&mut self, index: usize, entry: impl Into<LogEntry<V>>) -> Option<LogEntry<V>> {
-        let prev = self.log.remove(index);
-        self.log.insert(index, entry.into());
-        unimplemented!("InMemoryStorage::insert")
+    pub fn len(&self) -> usize {
+        return self.log.len();
+    }
+
+    /// Inserts a log entry to the end of the log
+    pub fn push(&mut self, entry: LogEntry<V>) {
+        self.log.push(entry);
     }
 
     /// Returns the last log index and term of the last entry in the log, if it exists
