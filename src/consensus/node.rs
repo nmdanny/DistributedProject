@@ -145,6 +145,42 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         self.state = new_state;
     }
 
+    /// Updates the commit index, notifying subscribed clients of the new entries
+    pub fn update_commit_index(&mut self, new_commit_index: Option<usize>)
+    {
+        assert!(self.commit_index <= new_commit_index, "Cannot decrease commit index");
+        if self.commit_index == new_commit_index {
+            return
+        }
+
+        assert!(new_commit_index.is_some(), "if new commit index is bigger than old, it cant be None");
+        let new_commit_index = new_commit_index.unwrap();
+
+        let old_commit_index = self.commit_index;
+        self.commit_index = Some(new_commit_index);
+
+
+        let new_entries_from = old_commit_index.map(|i| i + 1).unwrap_or(0);
+        let new_entries_to_inc = new_commit_index;
+
+        let new_entries = self.storage.get_from_to(
+            new_entries_from, new_entries_to_inc + 1);
+
+        info!("Updated commit index from {:?} to {:?}, new entries: {:?}",
+              old_commit_index, self.commit_index, new_entries);
+
+        for (entry, index) in new_entries.iter().zip(new_entries_from ..= new_entries_to_inc) {
+            self.commit_sender.send(CommitEntry {
+               index, term: entry.term, value: entry.value.clone()
+            }).unwrap_or_else(|e| {
+                error!("No one is subscribed to commit channel, couldn't send commit notification: {:?}", e);
+                0
+            });
+        }
+
+
+    }
+
     /// Updates the current term to the given one, if it's more up to date.
     /// Also updates the leader in that case. Returns true if the term was indeed updated
     #[instrument]
@@ -250,7 +286,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
         if req.leader_commit > self.commit_index {
             let index_of_last_new_entry = req.entries.len() - 1 + insertion_index;
-            self.commit_index = req.leader_commit.min(Some(index_of_last_new_entry));
+            self.update_commit_index(req.leader_commit.min(Some(index_of_last_new_entry)));
         }
 
         Ok(AppendEntriesResponse::success(self.current_term))
