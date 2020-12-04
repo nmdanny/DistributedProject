@@ -66,7 +66,7 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, T> {
     #[instrument]
     async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {

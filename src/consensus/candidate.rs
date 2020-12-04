@@ -211,7 +211,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
 }
 
 
-#[async_trait]
+#[async_trait(?Send)]
 impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for CandidateState<'a, V, T> {
     async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         return self.node.on_receive_append_entry(req);

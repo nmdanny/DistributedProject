@@ -90,7 +90,7 @@ impl <V: Value> NodeCommunicator<V> {
 /// This should be implemented by all states of a `Node`, in addition to Node itself.
 /// States should compose the Node implementation, and may do additional things before or after
 /// the node's handlers is called.
-#[async_trait]
+#[async_trait(?Send)]
 pub(in crate::consensus) trait CommandHandler<V: Value> {
     async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError>;
     async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError>;
