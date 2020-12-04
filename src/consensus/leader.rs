@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use anyhow::Context;
 use std::rc::Rc;
 use std::cell::{Cell, RefCell};
+use tokio::sync::watch::Ref;
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1000);
 
@@ -56,37 +57,40 @@ impl <V: Value> PeerReplicationStream<V> {
 #[derive(Debug)]
 pub struct LeaderState<'a, V: Value, T: Transport<V>>{
 
-    pub node: &'a mut Node<V, T>,
+    pub node: Rc<RefCell<Node<V, T>>>,
 
     /// Used to notify replication streams of a heartbeat or a
     /// newly inserted entry that came from a client
     pub replicate_sender: watch::Sender<()>,
 
     /// To be passed to all peer replication streams
-    pub replicate_receiver: watch::Receiver<()>
+    pub replicate_receiver: watch::Receiver<()>,
+
+    phantom: std::marker::PhantomData<&'a ()>
 
 }
 
 
 impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     /// Creates state for a node who just became a leader
-    pub fn new(node: &'a mut Node<V, T>) -> Self {
+    pub fn new(node: Rc<RefCell<Node<V, T>>>) -> Self {
 
 
         let (replicate_sender, replicate_receiver) = watch::channel(());
         LeaderState {
-            node, replicate_sender, replicate_receiver
+            node, replicate_sender, replicate_receiver, phantom: Default::default()
         }
     }
 
     /// Creates an AppendEntries request containing nothing.
     fn create_append_entries_for_heartbeat(&self) -> AppendEntries<V> {
+        let node = self.node.borrow();
         AppendEntries {
-            leader_id: self.node.id,
-            term: self.node.current_term,
+            leader_id: node.id,
+            term: node.current_term,
             entries: Vec::new(),
-            leader_commit: self.node.commit_index,
-            prev_log_index_term: self.node.storage.last_log_index_term()
+            leader_commit: node.commit_index,
+            prev_log_index_term: node.storage.last_log_index_term()
         }
 
     }
@@ -94,14 +98,15 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     /// Creates an AppendEntries request containing `log[index ..]`
     /// Uses `index-1` as the previous log index(or an empty IndexTerm if `index` == 0)
     fn create_append_entries_for_index(&self, index: usize) -> AppendEntries<V> {
-        assert!(index < self.node.storage.len(), "invalid index");
-        let leader_id = self.node.id;
-        let term = self.node.current_term;
-        let entries = self.node.storage.get_from(index).iter().cloned().collect();
-        let leader_commit = self.node.commit_index;
+        let node = self.node.borrow();
+        assert!(index < node.storage.len(), "invalid index");
+        let leader_id = node.id;
+        let term = node.current_term;
+        let entries = node.storage.get_from(index).iter().cloned().collect();
+        let leader_commit = node.commit_index;
 
         let prev_log_index_term = if index > 0 {
-            let entry = self.node.storage.get(index).unwrap();
+            let entry = node.storage.get(index).unwrap();
             IndexTerm::new(index, entry.term)
         } else { IndexTerm::no_entry() };
 
@@ -110,31 +115,6 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         }
     }
 
-    /// Sends a heartbeat to all nodes. If it detects we are stale(encounters a higher term),
-    /// sends the newer term via given sender.
-    pub async fn send_heartbeat(&mut self, stale_notifier: mpsc::Sender<usize>) {
-        let msg = self.create_append_entries_for_heartbeat();
-        info!("sending heartbeat");
-        let my_term = self.node.current_term;
-        for node_id in self.node.all_other_nodes() {
-            let transport = self.node.transport.clone();
-            let msg = msg.clone();
-            let mut tx = stale_notifier.clone();
-            tokio::spawn(async move {
-                let res = transport.send_append_entries(node_id, msg).await;
-                if let Ok(res) = res {
-                    if res.term > my_term {
-                        tx.send(res.term).unwrap_or_else(|_| {
-                            // TODO not really an error
-                            error!("Couldn't notify leader that he's stale(someone else probably notified him already");
-                        }).await;
-                    }
-                } else {
-                    error!("sending heartbeat to {} failed: {:?}", node_id, res);
-                }
-            }).instrument(info_span!("heartbeat"));
-        }
-    }
 
     #[instrument]
     pub async fn replication_stream(&mut self, mut stream: PeerReplicationStream<V>) -> Result<(), StaleLeader> {
@@ -152,26 +132,29 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
-        self.node.leader_id = Some(self.node.id);
-        self.node.voted_for = None;
+        let mut node_ref = self.node.borrow_mut();
+        node_ref.leader_id = Some(node_ref.id);
+        node_ref.voted_for = None;
 
-        info!("became leader for term {}", self.node.current_term);
+        info!("became leader for term {}", node_ref.current_term);
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
 
         let (heartbeat_sender, heartbeat_receiver) = watch::channel(());
 
-        let (stale_notifier, mut stale_receiver) = mpsc::channel(self.node.number_of_nodes);
+        let (stale_notifier, mut stale_receiver) = mpsc::channel(node_ref.number_of_nodes);
 
 
-        let mut replication_streams = self.node
+        let mut replication_streams = node_ref
             .all_other_nodes()
             .into_iter()
-            .map(|id| PeerReplicationStream::new(&self.node, id,
+            .map(|id| PeerReplicationStream::new(&node_ref, id,
                                                  heartbeat_receiver.clone()))
             .collect::<Vec<_>>();
 
+        drop(node_ref);
+
         loop {
-            if self.node.state != ServerState::Leader {
+            if self.node.borrow().state != ServerState::Leader {
                 return Ok(());
             }
             tokio::select! {
@@ -179,22 +162,25 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                         heartbeat_sender.broadcast(()).unwrap_or_else(|e| {
                             error!("Couldn't send heartbeat, no peer replication streams");
                         });
-                        self.send_heartbeat(stale_notifier.clone()).await;
                 },
                 res = self.replicate_receiver.next() => {
                     let todo = self.replicate(&mut replication_streams).await;
                 },
                 res = stale_receiver.next() => {
                     let res = res.unwrap();
-                    info!(self.node.current_term, new_term=res, "Received out of date term in reply");
-                    self.node.try_update_term(res, None);
+                    let mut node = self.node.borrow_mut();
+                    info!(node.current_term, new_term=res, "Received out of date term in reply");
+                    node.try_update_term(res, None);
                     return Ok(())
                 },
-                res = self.node.receiver.next() => {
-                    // TODO can this channel close prematurely?
-                    let cmd = res.unwrap();
-                    self.handle_command(cmd).await;
-                }
+                // res = {
+                //     let mut receiver = &self.node.borrow_mut().receiver;
+                //     receiver.next()
+                // } => {
+                //     // TODO can this channel close prematurely?
+                //     let cmd = res.unwrap();
+                //     self.handle_command(cmd).await;
+                // }
 
             }
         }
@@ -205,49 +191,55 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 #[async_trait(?Send)]
 impl<'a, V: Value, T: Transport<V>> CommandHandler<V> for LeaderState<'a, V, T> {
     async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
-        return self.node.on_receive_append_entry(req);
+        let mut node = self.node.borrow_mut();
+        return node.on_receive_append_entry(req);
 
     }
 
     async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
-        return self.node.on_receive_request_vote(&req);
+        let mut node = self.node.borrow_mut();
+        return node.on_receive_request_vote(&req);
     }
 
     async fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
-        if self.node.state != ServerState::Leader {
-            return Ok(ClientWriteResponse::NotALeader { leader_id: self.node.leader_id })
+        let mut node = self.node.borrow_mut();
+        if node.state != ServerState::Leader {
+            return Ok(ClientWriteResponse::NotALeader { leader_id: node.leader_id })
         }
         let (res_send, res_receive) = oneshot::channel();
 
-        self.node.storage.push(LogEntry {
+        let term = node.current_term;
+        node.storage.push(LogEntry {
             value: req.value,
-            term: self.node.current_term
+            term
         });
 
         // notify all replication streams of the newly added
         self.replicate_sender.broadcast(()).unwrap_or_else(|e| {
             error!("No replication stream to be notified of added entry: {:?}", e);
         });
+        drop(node);
 
         // res_send can be closed if we become a follower and the PeerReplicationStream is dropped
         res_receive.await.map_err(|e| RaftError::InternalError((e.into())))
     }
 
     async fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
-        if self.node.state != ServerState::Leader {
-            return Ok(ClientReadResponse::NotALeader { leader_id: self.node.leader_id })
+        let node = self.node.borrow();
+        if node.state != ServerState::Leader {
+            return Ok(ClientReadResponse::NotALeader { leader_id: node.leader_id })
         }
 
-        let commit_index = self.node.commit_index;
-        Ok(match (req.from, req.to, self.node.commit_index) {
+        let commit_index = node.commit_index;
+        Ok(match (req.from, req.to, node.commit_index) {
             (from, None, Some(commit_index)) if from <= commit_index => {
                 ClientReadResponse::Ok {
-                    range: self.node.storage.get_from_to(from, commit_index + 1
+                    range: node.storage.get_from_to(from, commit_index + 1
                     ).iter().map(|e| e.value.clone()).collect() }
             },
             (from, Some(to), Some(commit_index))
             if from <= commit_index && to <= commit_index + 1 && from < to => {
-                ClientReadResponse::Ok { range: self.node.storage.get_from_to(
+                ClientReadResponse::Ok { range: node.storage.get_from_to(
                     from, to
                 ).iter().map(|e| e.value.clone()).collect() }
             },

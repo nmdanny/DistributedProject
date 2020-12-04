@@ -19,12 +19,13 @@ use tokio::sync::broadcast;
 use tracing_futures::Instrument;
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use std::cell::RefCell;
 
 
 
 
 /// In which state is the server currently at
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Copy)]
 pub enum ServerState {
     Follower,
     Candidate,
@@ -126,15 +127,16 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
     #[instrument]
     /// The main loop - this does everything, and it has ownership of the Node
-    pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
-        // the state machine of the consensus module, at first we always follow
+    pub async fn run_loop(self) -> Result<(), anyhow::Error> {
+        let node = Rc::new(RefCell::new(self));
 
         loop {
-            info!(state = ?self.state, "Switching to new state");
-            match self.state{
-                ServerState::Follower => FollowerState::new(&mut self).run_loop().await?,
-                ServerState::Candidate => CandidateState::new(&mut self).run_loop().await?,
-                ServerState::Leader => LeaderState::new(&mut self).run_loop().await?,
+            let state = node.borrow().state;
+            info!(state = ?state, "Switching to new state");
+            match state {
+                ServerState::Follower => FollowerState::new(&mut node.borrow_mut()).run_loop().await?,
+                ServerState::Candidate => CandidateState::new(&mut node.borrow_mut()).run_loop().await?,
+                ServerState::Leader => LeaderState::new(node.clone()).run_loop().await?
             }
         }
     }
