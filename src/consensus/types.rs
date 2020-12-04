@@ -144,9 +144,10 @@ pub enum ClientWriteResponse {
     NotALeader { leader_id: Option<Id> }
 }
 
-/// A request to read all committed entries in [from, to)
-/// If commit_index < to, we'll return log[from, commit_index] instead
-/// If commit_Index < from, an empty log will be given
+/// A request to read all committed entries in `[from, to)`, or `[from, commit_index)` if 'to' isn't
+/// specified.
+/// If `commit_index +1 < to` or `commit_index < from`, an error response
+/// will be given
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientReadRequest {
     pub from: usize,
@@ -158,6 +159,7 @@ pub struct ClientReadRequest {
 pub enum ClientReadResponse<V: Value> {
     #[serde(bound = "V: Value")]
     Ok { range: Vec<V> },
+    BadRange { commit_index: Option<usize> },
     NotALeader { leader_id: Option<Id> }
 }
 
