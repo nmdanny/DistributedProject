@@ -12,6 +12,8 @@ use std::sync::Arc;
 use tracing_futures::Instrument;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
 use rand::distributions::{Distribution, Uniform};
+use tokio::time::Duration;
+
 #[derive(Debug, Clone)]
 pub struct ThreadTransport<V: Value>
 {
@@ -94,29 +96,31 @@ pub async fn main() -> Result<(), Error> {
         }
 
         let mut rng = rand::thread_rng();
-        let between = Uniform::from(0 .. NUM_NODES);
+        let posible_leaders = Uniform::from(0 .. NUM_NODES);
+        let submit_delay_ms = Uniform::from(0 .. 500);
         let mut leader  = 0;
         let mut i = 1337;
         loop {
-            println!(">>>>> submitting value {} to peer {}", i, leader);
+            tokio::time::delay_for(Duration::from_millis(submit_delay_ms.sample(&mut rng))).await;
+            info!(">>>>> submitting value {} to peer {}", i, leader);
             let res = communicators[leader].submit_value(ClientWriteRequest { value: format!("val {}", i)}).await;
             match res {
                 Ok(ClientWriteResponse::NotALeader { leader_id: Some(new_leader)}) => {
-                    println!(">>>>> got new leader: {}", new_leader);
+                    warn!(">>>>> got new leader: {}", new_leader);
                     leader = new_leader
                 },
                 Ok(ClientWriteResponse::NotALeader { leader_id: None}) => {
-                    leader = between.sample(&mut rng);
-                    println!(">>>>> leader is unknown, guessing it is {}", leader);
+                    leader = posible_leaders.sample(&mut rng);
+                    warn!(">>>>> leader is unknown, guessing it is {}", leader);
                 },
                 Ok(ClientWriteResponse::Ok { commit_index }) => {
-                    println!(">>>>> submitted {} to {}, committed at {}", i, leader, commit_index);
+                    info!(">>>>> submitted {} to {}, committed at {}", i, leader, commit_index);
                     i += 1;
 
                 },
                 Err(e) => {
                     error!("Raft error while submitting value: {:?}", e);
-                    leader = between.sample(&mut rng);
+                    leader = posible_leaders.sample(&mut rng);
                 }
             }
         }
