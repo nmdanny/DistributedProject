@@ -8,7 +8,7 @@ use crate::consensus::node_communicator::NodeCommunicator;
 
 /// Used for sending and receiving Raft messages
 /// Should be cheap to clone
-#[async_trait]
+#[async_trait(?Send)]
 pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
     async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse>;
 
@@ -16,13 +16,13 @@ pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
 
     /// A hook that runs after a `NodeCommunicator` is created(along with a node)
     /// but before the node is spawned.
-    async fn on_node_communicator_created(_comm: &mut NodeCommunicator<V>, _node: &mut Node<V, Self>) {
+    async fn on_node_communicator_created(&mut self, _id: Id, _comm: &mut NodeCommunicator<V>) {
 
     }
 
     /// A hook that runs right before a node starts running. By this point we should've
     /// configured all peers in the transport.
-    async fn before_node_loop(_node: &mut Node<V, Self>) {
+    async fn before_node_loop(&mut self, _id: Id) {
 
     }
 }
@@ -32,7 +32,7 @@ pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct NoopTransport();
 
-#[async_trait]
+#[async_trait(?Send)]
 impl <V : Value> Transport<V> for NoopTransport {
     async fn send_append_entries(&self, _: usize, _: AppendEntries<V>) -> Result<AppendEntriesResponse> {
         loop {

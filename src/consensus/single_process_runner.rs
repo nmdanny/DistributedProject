@@ -10,7 +10,7 @@ pub extern crate derivative;
 use anyhow::Error;
 use std::collections::HashMap;
 use async_trait::async_trait;
-use tokio::sync::{RwLock, watch, Barrier};
+use tokio::sync::{RwLock, Barrier};
 use std::sync::Arc;
 use tracing_futures::Instrument;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
@@ -19,13 +19,10 @@ use tokio::time::Duration;
 use dist_lib::consensus::node::Node;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use futures::StreamExt;
 
 struct ThreadTransportState<V: Value>
 {
     senders: HashMap<Id, NodeCommunicator<V>>,
-
-    barrier: Arc<Barrier>
 
 }
 
@@ -44,7 +41,7 @@ impl <V: Value> ThreadTransport<V> {
     pub fn new(expected_num_nodes: usize) -> Self {
         let barrier = Arc::new(Barrier::new(expected_num_nodes));
         let state = ThreadTransportState {
-            senders: Default::default(), barrier: barrier.clone()
+            senders: Default::default()
         };
         ThreadTransport {
             state: Arc::new(RwLock::new(state)),
@@ -53,7 +50,7 @@ impl <V: Value> ThreadTransport<V> {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl <V: Value> Transport<V> for ThreadTransport<V> {
     #[instrument]
     async fn send_append_entries(&self, to: usize, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, Error> {
@@ -71,15 +68,15 @@ impl <V: Value> Transport<V> for ThreadTransport<V> {
         Ok(comm.request_vote(msg).await?)
     }
 
-    async fn on_node_communicator_created(comm: &mut NodeCommunicator<V>, node: &mut Node<V, Self>) {
-        let mut map = &mut node.transport.state.write().await.senders;
+    async fn on_node_communicator_created(&mut self, id: Id, comm: &mut NodeCommunicator<V>) {
+        let mut state = self.state.write().await;
 
-        let _prev = map.insert(node.id, comm.clone());
-        assert!(_prev.is_none(), "Can't ");
+        let _prev = state.senders.insert(id, comm.clone());
+        assert!(_prev.is_none(), "Can't insert same node twice");
     }
 
-    async fn before_node_loop(_node: &mut Node<V, Self>) {
-        _node.transport.barrier.wait().await;
+    async fn before_node_loop(&mut self, _id: Id) {
+        self.barrier.wait().await;
     }
 }
 

@@ -135,7 +135,8 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
     /// The main loop - this does everything, and it has ownership of the Node
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
 
-        Transport::before_node_loop(&mut self).await;
+        let id = self.id;
+        self.transport.before_node_loop(id).await;
 
         let node = Rc::new(RefCell::new(self));
 

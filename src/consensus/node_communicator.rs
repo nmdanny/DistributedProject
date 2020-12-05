@@ -1,4 +1,4 @@
-use crate::consensus::types::{Value, AppendEntries, AppendEntriesResponse, RaftError, RequestVote, RequestVoteResponse, ClientWriteRequest, ClientWriteResponse, ClientReadRequest, ClientReadResponse, CommitEntry};
+use crate::consensus::types::*;
 use tokio::sync::{oneshot, mpsc};
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
@@ -46,7 +46,7 @@ impl <V: Value> NodeCommunicator<V> {
         };
         let mut node = Node::new(id, number_of_nodes, transport, rpc_receiver,
                              commit_sender);
-        Transport::on_node_communicator_created(&mut communicator, &mut node).await;
+        node.transport.on_node_communicator_created(id, &mut communicator).await;
         (node, communicator)
     }
 
