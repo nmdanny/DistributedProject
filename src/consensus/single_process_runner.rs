@@ -19,6 +19,7 @@ use tokio::time::Duration;
 use dist_lib::consensus::node::Node;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use dist_lib::consensus::adversarial_transport::AdversaryTransport;
 
 struct ThreadTransportState<V: Value>
 {
@@ -80,7 +81,7 @@ impl <V: Value> Transport<V> for ThreadTransport<V> {
     }
 }
 
-const NUM_NODES: usize = 30;
+const NUM_NODES: usize = 3;
 
 #[tokio::main]
 pub async fn main() -> Result<(), Error> {
@@ -99,7 +100,9 @@ pub async fn main() -> Result<(), Error> {
 
 
     // initializing all nodes and their communicators
-    let transport = ThreadTransport::<String>::new(NUM_NODES);
+    let transport = AdversaryTransport::new(
+        ThreadTransport::<String>::new(NUM_NODES),
+        NUM_NODES);
     let node_and_comms_fut = futures::future::join_all(
         (0 .. NUM_NODES).map(|i| {
             NodeCommunicator::create_with_node(i, NUM_NODES, transport.clone())
