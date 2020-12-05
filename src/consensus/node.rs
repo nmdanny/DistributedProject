@@ -52,6 +52,7 @@ pub struct Node<V: Value, T: Transport<V>> {
     /// It is the `LeaderState` job to ensure this receiver is `Some` before he finishes.
     pub receiver: Option<mpsc::UnboundedReceiver<NodeCommand<V>>>,
 
+    #[derivative(Debug="ignore")]
     /// Used for notifying subscribed clients of committed entries
     /// Note that sending will often fail if no clients have subscribed, this is OK.
     pub commit_sender: broadcast::Sender<CommitEntry<V>>,
