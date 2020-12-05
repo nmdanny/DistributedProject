@@ -3,7 +3,7 @@ use crate::consensus::transport::Transport;
 use crate::consensus::node::{Node, ServerState};
 use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, broadcast};
 use tokio::stream::StreamExt;
 use futures::{TryFutureExt, FutureExt};
 use tracing_futures::Instrument;
@@ -161,7 +161,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                 self.match_index = Some(last_index);
                 self.match_index_sender.send((self.id, last_index)).unwrap_or_else(|e| {
                     error!("Peer couldn't send match index to leader")
-                });
+                }).await;
                 info!("Successfully replicated to peer {} values up to, including, index {}",
                       self.id, last_index);
                 return Ok(())
@@ -277,15 +277,91 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     #[instrument]
     pub fn on_receive_match_index(&mut self, peer: Id, match_index: usize)
     {
-        let mut entry = self.match_indices.get_mut(&peer).unwrap();
-        assert!(Some(match_index) >= *entry, "match index for a peer cannot decrease");
+        let mut node = self.node.borrow_mut();
+        if node.state != ServerState::Leader {
+            return;
+        }
 
+        debug!("on_receive_match_index from peer {} and match_index {}", peer, match_index);
+        {
+            let mut entry = self.match_indices.get_mut(&peer).unwrap();
+            assert!(Some(match_index) >= *entry, "match index for a peer cannot decrease");
+            if Some(match_index) == *entry {
+                debug!("match index did not increase");
+                return;
+            }
+            *entry = Some(match_index);
+        }
+
+        assert!(node.storage.len() > 0, "if match_index increased, log is definitely not empty");
+
+
+        // find 'n' such that n > commit_index AND forall peer. match_index[peer] >= n
+        // AND log[n].term = current_term
+        // we try to be optimistic, starting with the highest 'n' and going down
+
+        let maximal_n = node.storage.len() - 1;
+
+        // (if node is committed, commit_index + 1 == storage.len(), hence why we use 'min)
+        let minimal_n = node.commit_index.map(|i| i + 1).unwrap_or(0)
+            .min(maximal_n);
+
+        assert!(minimal_n <= maximal_n, "index math sanity check");
+
+        debug!("match index increased, testing from {} to {}", maximal_n, minimal_n);
+
+        for n in maximal_n ..= minimal_n
+        {
+            if node.storage.get(n).unwrap().term != node.current_term {
+                continue;
+            }
+            // check if a majority committed all entries up to 'n' (plus 1 for the leader itself)
+            if self.match_indices.values().filter(|v| **v >= Some(n)).count() + 1 >= node.quorum_size()
+            {
+                info!("Determined that {} is a new commit index", n);
+                node.update_commit_index(Some(n));
+
+                // note: this will indirectly trigger `on_commit` (by commit channel)
+                // It would've been slightly more efficient to call 'on_commit' here, but for
+                // the sake of uniformity, only the commit channel will trigger this.
+            }
+        }
+    }
+
+    fn on_commit(&mut self, commit_entry: CommitEntry<V>)
+    {
+
+        let mut node = self.node.borrow();
+
+        let mut committed_writes = {
+            // split the writes that weren't yet committed
+            let mut rest_of_writes = self.pending_writes.split_off(&(commit_entry.index + 1));
+
+            // now, self.pending_writes contains the committed writes, swap the above two
+            // and return the committed writes
+
+            std::mem::swap(&mut self.pending_writes, &mut rest_of_writes);
+            rest_of_writes
+        };
+
+        assert!(node.commit_index.unwrap() >= commit_entry.index,
+                "commit_entry and commit_index aren't consistent");
+
+
+        for (commit_index, req) in committed_writes.into_iter() {
+            req.responder.send(Ok(ClientWriteResponse::Ok { commit_index })).unwrap_or_else(|e| {
+                error!("Couldn't send client write response, client probably dropped his request: {:?}", e);
+            });
+        }
     }
 
     async fn run_loop_inner(&mut self, receiver: &mut mpsc::UnboundedReceiver<NodeCommand<V>>) -> Result<(), anyhow::Error> {
         let mut node_ref = self.node.borrow_mut();
         node_ref.leader_id = Some(node_ref.id);
         node_ref.voted_for = None;
+
+        let mut commit_receiver = node_ref.commit_sender.subscribe();
+
         drop(node_ref);
         let node_ref = self.node.borrow();
         info!("became leader for term {}", node_ref.current_term);
@@ -311,7 +387,12 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
         let replication_fut = futures::future::join_all(replication_streams
             .into_iter()
-            .map(|mut stream| stream.run_replication_loop(stale_sender.clone())));
+            .map(|mut stream| {
+                let id = stream.id;
+                stream
+                    .run_replication_loop(stale_sender.clone())
+                    .instrument(info_span!("replication-stream", peer_id = ?id))
+            }));
 
 
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -340,6 +421,13 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                 },
                 Some((peer, match_index)) = match_index_receiver.next() => {
                     self.on_receive_match_index(peer, match_index);
+                },
+                res = commit_receiver.recv() => {
+                    match res {
+                        Ok(commit) => self.on_commit(commit),
+                        Err(broadcast::RecvError::Lagged(s)) => error!("Leader lagged for {} commits, how is this possible", s) ,
+                        _ => {}
+                    }
                 },
                 Some(StaleLeader { newer_term}) = stale_receiver.next() => {
                     let mut node = self.node.borrow_mut();
