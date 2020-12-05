@@ -158,7 +158,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                 self.next_index = last_index + 1;
                 self.match_index = Some(last_index);
                 self.match_index_sender.send((self.id, last_index)).unwrap_or_else(|e| {
-                    error!("Peer couldn't send match index to leader")
+                    error!("Peer couldn't send match index to leader: {:?}", e);
                 }).await;
                 trace!("Successfully replicated to peer {} values up to, including, index {}",
                       self.id, last_index);
@@ -417,7 +417,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                             error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
                         });
                 },
-                res = self.replicate_receiver.next() => {
+                _ = self.replicate_receiver.next() => {
                     heartbeat_sender.broadcast(()).unwrap_or_else(|e| {
                         error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
                     });

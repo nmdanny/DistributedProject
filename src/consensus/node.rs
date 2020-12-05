@@ -283,7 +283,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             return Ok(AppendEntriesResponse::success(self.current_term));
         }
 
-        let mut insertion_index = req.prev_log_index_term.index()
+        let insertion_index = req.prev_log_index_term.index()
             .map(|prev_log_index| prev_log_index + 1).unwrap_or(0);
 
         // 3. delete conflicting entries

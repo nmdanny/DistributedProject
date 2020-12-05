@@ -124,7 +124,6 @@ pub async fn main() -> Result<(), Error> {
                 }
             }
         }
-        futures::future::join_all(handles).await;
     }).await;
 
 
