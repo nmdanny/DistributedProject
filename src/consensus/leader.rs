@@ -321,6 +321,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
             if self.match_indices.values().filter(|v| **v >= Some(n)).count() + 1 >= node.quorum_size()
             {
                 node.update_commit_index(Some(n));
+                return;
 
                 // note: this will indirectly trigger `on_commit` (by commit channel)
                 // It would've been slightly more efficient to call 'on_commit' here, but for
