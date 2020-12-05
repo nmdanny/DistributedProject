@@ -44,6 +44,7 @@ const NUM_NODES: usize = 3;
 #[tokio::main]
 pub async fn main() -> Result<(), Error> {
     // set up logging
+    color_eyre::install().unwrap();
     use tracing_subscriber::FmtSubscriber;
     let subscriber = FmtSubscriber::builder()
         .pretty()

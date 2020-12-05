@@ -37,6 +37,8 @@
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/crossbeam-utils-fdbeb848dc65e4bf/out" isTestSource="false" />
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/const_fn-c27b0b5cb8dc1e71/out" isTestSource="false" />
       <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/memoffset-f5c8fb63db3c06c8/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/eyre-11a50ef4b7df6ee0/out" isTestSource="false" />
+      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/miniz_oxide-14205c2692b4e3bf/out" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
