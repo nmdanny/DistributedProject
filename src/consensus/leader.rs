@@ -13,13 +13,20 @@ use anyhow::Context;
 use std::rc::Rc;
 use std::cell::{Cell, RefCell};
 use tokio::sync::watch::Ref;
+use thiserror::Error;
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1000);
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 /// Contains state used to replicate the leader's data to a peer.
 /// Note, this is re-initialized every time a node becomes a leader
-pub struct PeerReplicationStream<V: Value> {
+pub struct PeerReplicationStream<V: Value, T: Transport<V>> {
+
+    #[derivative(Debug="ignore")]
+    /// Reference to node
+    pub node: Rc<RefCell<Node<V, T>>>,
+
     /// Peer ID
     pub id: Id,
 
@@ -29,8 +36,7 @@ pub struct PeerReplicationStream<V: Value> {
     /// The maximal index of a leader log entry known to be replicated on the peer
     pub match_index: Option<usize>,
 
-    // TODO: this is redundant, why do we even have 'run_replication_loop' as a loop?
-    /// Used to receive heartbeats
+    /// Triggered whenever there's a heartbeat or a client submits a new request
     pub tick_receiver: watch::Receiver<()>,
 
     phantom: std::marker::PhantomData<V>
@@ -38,20 +44,143 @@ pub struct PeerReplicationStream<V: Value> {
 }
 
 #[derive(Debug, Clone)]
-pub struct StaleLeader { newer_term: usize }
-
-impl <V: Value> PeerReplicationStream<V> {
-    pub fn new<T: Transport<V>>(node: &Node<V, T>, id: Id,
-                                tick_receiver: watch::Receiver<()>) -> Self {
+pub struct StaleLeader { pub newer_term: usize }
 
 
-        // at first, assume the peer is completely synchronized
-        let next_index = node.storage.len();
+/// Creates an AppendEntries request containing `log[index ..]`, using `index-1` as the previous log
+/// index(or an empty IndexTerm if `index = 0`)
+/// In case `index == log.len`, this will be treated as a heartbeat request.
+fn create_append_entries_for_index<V: Value, T: Transport<V>>(node: &Node<V, T>, index: usize) -> AppendEntries<V> {
+    assert!(index <= node.storage.len(), "invalid index");
+    let leader_id = node.id;
+    let term = node.current_term;
+
+    let entries = if index < node.storage.len() {
+        node.storage.get_from(index).iter().cloned().collect()
+    } else { Vec::new() };
+
+    let leader_commit = node.commit_index;
+
+    let prev_log_index_term = if index >= 1 {
+        let entry = node.storage.get(index - 1).unwrap();
+        IndexTerm::new(index - 1, entry.term)
+    } else { IndexTerm::no_entry() };
+
+    AppendEntries {
+        leader_id, term, entries, leader_commit, prev_log_index_term
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum ReplicationLoopError {
+    #[error("Stale leader error")]
+    StaleLeaderError(StaleLeader),
+
+    #[error("Network error: {0}")]
+    NetworkError(anyhow::Error),
+}
+
+impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
+    pub fn new(node: Rc<RefCell<Node<V, T>>>, id: Id,
+               tick_receiver: watch::Receiver<()>) -> Self {
+
+
+        // at first, assume the peer is completely synchronized, so `next_index` points to one past
+        // the last element
+        let next_index = node.borrow().storage.len();
         let match_index = None;
         PeerReplicationStream {
-            id, next_index, match_index, tick_receiver, phantom: Default::default()
+            node, id, next_index, match_index, tick_receiver, phantom: Default::default()
         }
     }
+
+    #[instrument]
+    /// Sends an AE, treating network errors or stale responses as errors, and conflict or successful
+    /// responses as success.
+    async fn send_ae(&self, transport: &T, current_term: usize, req: AppendEntries<V>) -> Result<AppendEntriesResponse, ReplicationLoopError>
+    {
+        let res = transport.send_append_entries(self.id, req).await;
+        debug!("send_ae, res: {:?}", res);
+        let res = res .map_err(ReplicationLoopError::NetworkError)?;
+        match res.meaning(current_term) {
+            AEResponseMeaning::Ok => Ok(res),
+            AEResponseMeaning::Conflict => Ok(res),
+            AEResponseMeaning::Stale { newer_term } =>
+                Err(ReplicationLoopError::StaleLeaderError(StaleLeader { newer_term })),
+        }
+    }
+
+    /// Tries to replicate all data available at this time to the peer,
+    /// or sends a heartbeat if he's already synchronized.
+    #[instrument]
+    pub async fn try_replication(&mut self) -> Result<(), ReplicationLoopError>
+    {
+        let node = self.node.borrow();
+        let current_term = node.current_term;
+
+        let transport = node.transport.clone();
+
+        // the client is definitely synchronized(and we've must've been triggered by heartbeat),
+        // so send him a heartbeat
+        if self.match_index == node.storage.last_log_index_term().index() {
+            let heartbeat = create_append_entries_for_index(&node, node.storage.len());
+
+            drop(node);
+            let res = self.send_ae(&transport, current_term, heartbeat).await?;
+
+            // more entries might have been inserted to the log during the .await, but
+            // compared to the heartbeat sent, it should be a success
+            // (stale leader event is considered an error by 'send_ae' and would cause early exit)
+            assert!(res.success, "considering match_index, client must be synchronized now");
+            return Ok(())
+        }
+
+        debug!("Beginning to replicate data to peer id {}", self.id);
+        loop {
+            self.next_index -= 1;
+            let node = self.node.borrow();
+            assert!(self.next_index < node.storage.len(), "if we're not synchronized, next_index must be valid");
+            let req = create_append_entries_for_index(&node, self.next_index);
+            let last_index = node.storage
+                .last_log_index_term()
+                .index().expect("If a peer isn't synchronized, the log must be non empty");
+
+            drop(node);
+            let res = self.send_ae(&transport, current_term, req).await?;
+
+            if res.success {
+                self.match_index = Some(last_index);
+                info!("Successfully replicated to peer {} values up to index {}",
+                      self.id, last_index);
+                return Ok(())
+            }
+
+            assert!(self.next_index > 0, "We could not have failed for next_index = 0");
+        }
+
+    }
+
+    #[instrument]
+    /// To run concurrently as long as the leader is active.
+    pub async fn run_replication_loop(&mut self) -> Result<(), StaleLeader> {
+        let current_term = self.node.borrow().current_term;
+        while let Some(()) = self.tick_receiver.next().await {
+            match self.try_replication().await {
+                Ok(_) => {},
+                Err(ReplicationLoopError::NetworkError(e)) => {
+                    error!("Received IO error during replication stream for {}, will try again later: {:?}",
+                    self.id, e);
+                },
+                Err(ReplicationLoopError::StaleLeaderError(stale)) => {
+                    warn!("Determined I'm a stale leader via peer {}, my term is {}, newer term is {}",
+                          self.id, current_term, stale.newer_term);
+                    return Err(stale)
+                }
+            }
+        }
+        Ok(())
+    }
+
 }
 
 #[derive(Debug)]
@@ -82,60 +211,15 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         }
     }
 
-    /// Creates an AppendEntries request containing nothing.
-    fn create_append_entries_for_heartbeat(&self) -> AppendEntries<V> {
-        let node = self.node.borrow();
-        AppendEntries {
-            leader_id: node.id,
-            term: node.current_term,
-            entries: Vec::new(),
-            leader_commit: node.commit_index,
-            prev_log_index_term: node.storage.last_log_index_term()
-        }
 
-    }
-
-    /// Creates an AppendEntries request containing `log[index ..]`
-    /// Uses `index-1` as the previous log index(or an empty IndexTerm if `index` == 0)
-    fn create_append_entries_for_index(&self, index: usize) -> AppendEntries<V> {
-        let node = self.node.borrow();
-        assert!(index < node.storage.len(), "invalid index");
-        let leader_id = node.id;
-        let term = node.current_term;
-        let entries = node.storage.get_from(index).iter().cloned().collect();
-        let leader_commit = node.commit_index;
-
-        let prev_log_index_term = if index > 0 {
-            let entry = node.storage.get(index).unwrap();
-            IndexTerm::new(index, entry.term)
-        } else { IndexTerm::no_entry() };
-
-        AppendEntries {
-            leader_id, term, entries, leader_commit, prev_log_index_term
-        }
-    }
-
-
-    #[instrument]
-    pub async fn replication_stream(&mut self, mut stream: PeerReplicationStream<V>) -> Result<(), StaleLeader> {
-        while let Some(()) = stream.tick_receiver.next().await {
-
-        }
-        Ok(())
-    }
-
-    /// Tries replicating a message to all clients
-    #[instrument]
-    pub async fn replicate(&mut self, streams: &mut [PeerReplicationStream<V>]) -> Result<(), StaleLeader> {
-        Ok(())
-    }
 
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
-        let mut receiver = self.node
-            .borrow_mut().receiver
+        // let mut node = self.node.borrow_mut();
+        let mut receiver = self.node.borrow_mut().receiver
             .take().expect("Receiver was null");
 
+        // drop(node);
         let res = self.run_loop_inner(&mut receiver).await;
 
         // since only LeaderState can take out `receiver`, we ensure the receiver is back in the
@@ -150,43 +234,53 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         let mut node_ref = self.node.borrow_mut();
         node_ref.leader_id = Some(node_ref.id);
         node_ref.voted_for = None;
-
+        drop(node_ref);
+        let node_ref = self.node.borrow();
         info!("became leader for term {}", node_ref.current_term);
-        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
 
         let (heartbeat_sender, heartbeat_receiver) = watch::channel(());
-
-        let (stale_notifier, mut stale_receiver) = mpsc::channel(node_ref.number_of_nodes);
-
-
         let mut replication_streams = node_ref
             .all_other_nodes()
             .into_iter()
-            .map(|id| PeerReplicationStream::new(&node_ref, id,
+            .map(|id| PeerReplicationStream::new(self.node.clone(), id,
                                                  heartbeat_receiver.clone()))
             .collect::<Vec<_>>();
-
         drop(node_ref);
 
+        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+
+
         loop {
+
             if self.node.borrow().state != ServerState::Leader {
+
                 return Ok(());
             }
+
+            let futs = replication_streams
+                .iter_mut()
+                .map(|mut stream| stream.run_replication_loop())
+                .collect::<Vec<_>>();
+            let drive_replications = futures::future::try_join_all(futs);
+
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
                         heartbeat_sender.broadcast(()).unwrap_or_else(|e| {
-                            error!("Couldn't send heartbeat, no peer replication streams");
+                            error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
                         });
                 },
                 res = self.replicate_receiver.next() => {
-                    let todo = self.replicate(&mut replication_streams).await;
+                    heartbeat_sender.broadcast(()).unwrap_or_else(|e| {
+                        error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
+                    });
                 },
-                res = stale_receiver.next() => {
-                    let res = res.unwrap();
-                    let mut node = self.node.borrow_mut();
-                    info!(node.current_term, new_term=res, "Received out of date term in reply");
-                    node.try_update_term(res, None);
-                    return Ok(())
+                res = drive_replications => {
+                    if let Err(StaleLeader { newer_term }) = res {
+                        let mut node = self.node.borrow_mut();
+                        node.try_update_term(newer_term, None);
+                        assert!(node.state == ServerState::Follower);
+                        return Ok(())
+                    }
                 },
                 res = receiver.next() => {
                     // TODO can this channel close prematurely?

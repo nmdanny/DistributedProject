@@ -103,6 +103,28 @@ pub struct AppendEntriesResponse {
     pub success: bool
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum AEResponseMeaning {
+    Ok,
+    Stale { newer_term: usize },
+    Conflict
+}
+
+impl AppendEntriesResponse {
+    pub fn meaning(&self, current_term: usize) -> AEResponseMeaning {
+        assert!(self.term >= current_term, "An AE response cannot have a lower term than the current one");
+        if self.success {
+            assert_eq!(self.term, current_term, "a successful response must have the current term");
+            return AEResponseMeaning::Ok;
+        }
+        if self.term == current_term {
+            return AEResponseMeaning::Conflict;
+        }
+        return AEResponseMeaning::Stale { newer_term: self.term }
+    }
+}
+
+
 impl AppendEntriesResponse {
     pub fn success(my_term: usize) -> AppendEntriesResponse {
         AppendEntriesResponse { term: my_term, success: true}
