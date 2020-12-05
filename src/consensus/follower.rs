@@ -29,10 +29,6 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
         }
     }
 
-    /// Performs follower specific changes when receiving an AE request
-    /// (notably, updates the follower state)
-    pub fn on_receive_append_entries(&mut self, req: &AppendEntries<V>) {
-    }
 
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
@@ -59,17 +55,16 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
                 res = self.node.receiver.as_mut().expect("follower - Node::receiver was None").next() => {
                     // TODO can this channel close prematurely?
                     let cmd = res.unwrap();
-                    self.handle_command(cmd).await;
+                    self.handle_command(cmd);
                 }
             }
         }
     }
 }
 
-#[async_trait(?Send)]
 impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, T> {
     #[instrument]
-    async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
+    fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         if req.term < self.node.current_term {
             return Ok(AppendEntriesResponse::failed(self.node.current_term));
         }
@@ -93,7 +88,7 @@ impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, 
         return self.node.on_receive_append_entry(req);
     }
 
-    async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
+    fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         // use default handling of request vote
         let res = self.node.on_receive_request_vote(&req);
 
@@ -107,11 +102,11 @@ impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, 
         return res;
     }
 
-    async fn handle_client_write_request(&mut self, _req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+    fn handle_client_write_request(&mut self, _req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
         Ok(ClientWriteResponse::NotALeader { leader_id: self.node.leader_id })
     }
 
-    async fn handle_client_read_request(&mut self, _req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
+    fn handle_client_read_request(&mut self, _req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
         Ok(ClientReadResponse::NotALeader { leader_id: self.node.leader_id })
     }
 }

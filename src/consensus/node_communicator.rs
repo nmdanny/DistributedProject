@@ -89,50 +89,42 @@ impl <V: Value> NodeCommunicator<V> {
 /// Handles commands sent from a `NodeCommunicator`
 /// This should be implemented by all states of a `Node`
 ///
-/// NOTE: These handlers essentially "block" the task(the node running them), as they're usually
-/// called indirectly from `handle_command` within a select loop handler, thus they should be resolved quickly, otherwise,
-/// they may block other, critical functionality in the same select(e.g, heartbeats, and handling
-/// other messages)
+/// This only supports synchronous handlers, which should resolve quickly(as they're in the body
+/// of a select! branch handler).
 ///
-/// Usually we don't mind that they block responses to other messages, because handling a command
-/// should be fast (in most cases, the `handle_xxx` doesn't await anything), and we don't want it to
-/// occur concurrently with other things in the select loop (for example, these handlers often
-/// trigger a state change, and if they run concurrently, it would be harder to reason about their behavior)
-///
-/// However, write requests to leaders are, by their nature, asynchronous/slow - we have to wait until
-/// a submitted value is committed to a majority before sending a response, and this can take
+/// Write requests to leaders are, by their nature, asynchronous - we have to wait until
+/// a submitted value is replicated to a majority before sending a response, and this can take
 /// a relatively long time. We do not want to block heartbeats or handling of other messages in that
 /// time, therefore, we will handle them differently (see implementation in leader) by passing
-/// the `tx` to some other task
-#[async_trait(?Send)]
+/// the `tx` to a different task which will eventually send a response.
 pub(in crate::consensus) trait CommandHandler<V: Value> {
-    async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError>;
-    async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError>;
+    fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError>;
+    fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError>;
 
     /// Should not be used by leader, see note above
-    async fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError>;
-    async fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError>;
+    fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError>;
+    fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError>;
 
     /// Handles a command sent from `NodeCommunicator`
-    async fn handle_command(&mut self, cmd: NodeCommand<V>) {
+    fn handle_command(&mut self, cmd: NodeCommand<V>) {
         match cmd {
             NodeCommand::AE(ae, res) => {
-                res.send(self.handle_append_entries(ae).await).unwrap_or_else(|e| {
+                res.send(self.handle_append_entries(ae)).unwrap_or_else(|e| {
                     error!("Couldn't send response: {:?}", e);
                 });
             },
             NodeCommand::RV(rv, res) => {
-                res.send(self.handle_request_vote(rv).await).unwrap_or_else(|e| {
+                res.send(self.handle_request_vote(rv)).unwrap_or_else(|e| {
                     error!("Couldn't send response: {:?}", e);
                 });
             }
             NodeCommand::ClientWriteRequest(req, res) => {
-                res.send(self.handle_client_write_request(req).await).unwrap_or_else(|e| {
+                res.send(self.handle_client_write_request(req)).unwrap_or_else(|e| {
                     error!("Couldn't send response: {:?}", e);
                 });
             }
             NodeCommand::ClientReadRequest(req, res) => {
-                res.send(self.handle_client_read_request(req).await).unwrap_or_else(|e| {
+                res.send(self.handle_client_read_request(req)).unwrap_or_else(|e| {
                     error!("Couldn't send response: {:?}", e);
                 });
             }

@@ -201,7 +201,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                     res = self.node.receiver.as_mut().expect("candidate - Node::receiver was None").next() => {
                         // TODO can this channel close prematurely?
                         let cmd = res.unwrap();
-                        self.handle_command(cmd).await;
+                        self.handle_command(cmd);
                     }
                 }
             }
@@ -211,13 +211,12 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
 }
 
 
-#[async_trait(?Send)]
 impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for CandidateState<'a, V, T> {
-    async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
+    fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         return self.node.on_receive_append_entry(req);
     }
 
-    async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
+    fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         let res = self.node.on_receive_request_vote(&req);
         if let Ok(res) = &res {
             assert!(!res.vote_granted, "A candidate will never grant votes to other candidates");
@@ -225,11 +224,11 @@ impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for CandidateState<'a, V,
         return res;
     }
 
-    async fn handle_client_write_request(&mut self, _req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+    fn handle_client_write_request(&mut self, _req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
         Ok(ClientWriteResponse::NotALeader { leader_id: self.node.leader_id })
     }
 
-    async fn handle_client_read_request(&mut self, _req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
+    fn handle_client_read_request(&mut self, _req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
         Ok(ClientReadResponse::NotALeader { leader_id: self.node.leader_id })
     }
 }

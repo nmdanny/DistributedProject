@@ -440,7 +440,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                     let cmd = res.unwrap();
                     match cmd {
                         NodeCommand::ClientWriteRequest(req, tx) => self.handle_client_write_command(req, tx),
-                        _ => self.handle_command(cmd).await
+                        _ => self.handle_command(cmd)
 
                     }
                 }
@@ -475,24 +475,23 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     }
 }
 
-#[async_trait(?Send)]
 impl<'a, V: Value, T: Transport<V>> CommandHandler<V> for LeaderState<'a, V, T> {
-    async fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
+    fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         let mut node = self.node.borrow_mut();
         return node.on_receive_append_entry(req);
 
     }
 
-    async fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
+    fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         let mut node = self.node.borrow_mut();
         return node.on_receive_request_vote(&req);
     }
 
-    async fn handle_client_write_request(&mut self, _: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+    fn handle_client_write_request(&mut self, _: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
         panic!("Write requests cannot be handled by this function");
     }
 
-    async fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
+    fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
         let node = self.node.borrow();
         if node.state != ServerState::Leader {
             return Ok(ClientReadResponse::NotALeader { leader_id: node.leader_id })
