@@ -25,3 +25,10 @@ This is done via channels - the `NodeCommunicator` struct is essentially our acc
 State changes are done by the `Node::change_state` function - the various state loops constantly check they're in
 the matching state, otherwise we break out of the (Follower/Candidate/Leader) state loop, and the main Node loop
 will begin a state loop for the new state.
+
+
+## References
+
+- Overall program design is heavily based on [async-raft](https://github.com/async-raft/async-raft/)
+- [Implementing Raft](https://eli.thegreenplace.net/2020/implementing-raft-part-1-elections/)
+- The raft [specification](https://raft.github.io/raft.pdf)
