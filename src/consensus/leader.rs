@@ -122,41 +122,39 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
     {
         let node = self.node.borrow();
         let current_term = node.current_term;
-
         let transport = node.transport.clone();
 
-        // the client is definitely synchronized(and we've must've been triggered by heartbeat),
-        // so send him a heartbeat
-        if self.match_index == node.storage.last_log_index_term().index() {
-            let heartbeat = create_append_entries_for_index(&node, node.storage.len());
+        /* Note, it's possible that during an await point, a concurrent client write request will cause
+           the storage to increase, but for simplicity, we will not synchronize in call values
+           beyond that point - that will be done in the next call to `try_replication`
 
-            drop(node);
-            let res = self.send_ae(&transport, current_term, heartbeat).await?;
+           (Of course, values at or before 'last_log_index' cannot change in term or value as we're
+           the leader)
+        */
+        let last_log_index = node.storage.last_log_index_term().index();
+        drop(node);
 
-            // more entries might have been inserted to the log during the .await, but
-            // compared to the heartbeat sent, it should be a success
-            // (stale leader event is considered an error by 'send_ae' and would cause early exit)
-            assert!(res.success, "considering match_index, client must be synchronized now");
-            return Ok(())
-        }
+        let mut ran = false;
 
-        info!("Beginning to replicate data to peer id {}", self.id);
-        while self.match_index != node.storage.last_log_index_term().index() {
+        // we run at least once(in case this is a heartbeat), or as long as we are not synchronized
+        while self.match_index != last_log_index || !ran {
+            ran = true;
+            // debug!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
+            //     self.id, self.match_index, node.storage.last_log_index_term());
+
             let node = self.node.borrow();
-            debug!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
-                self.id, self.match_index, node.storage.last_log_index_term());
 
             assert!(self.next_index <= node.storage.len(), "if we're not synchronized, next_index must be valid");
             let req = create_append_entries_for_index(&node, self.next_index);
+            let is_heartbeat = req.entries.is_empty();
             assert_eq!(req.entries.len(), node.storage.len() - self.next_index);
-            let last_index = node.storage
-                .last_log_index_term()
-                .index().expect("If a peer isn't synchronized, the log must be non empty");
 
             drop(node);
             let res = self.send_ae(&transport, current_term, req).await?;
 
-            if res.success {
+            if res.success &&  !is_heartbeat {
+                let last_index = last_log_index
+                    .expect("If this wasn't a heartbeat, last_log_index shouldn't be None");
                 self.next_index = last_index + 1;
                 self.match_index = Some(last_index);
                 self.match_index_sender.send((self.id, last_index)).unwrap_or_else(|e| {
@@ -164,6 +162,10 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                 }).await;
                 info!("Successfully replicated to peer {} values up to, including, index {}",
                       self.id, last_index);
+                return Ok(())
+            }
+            else if res.success {
+                trace!("heartbeat success");
                 return Ok(())
             }
 
@@ -328,6 +330,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         }
     }
 
+    #[instrument]
     fn on_commit(&mut self, commit_entry: CommitEntry<V>)
     {
 
@@ -451,6 +454,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
     }
 
+    #[instrument]
     pub fn handle_client_write_command(&mut self, req: ClientWriteRequest<V>,
                                        tx: oneshot::Sender<Result<ClientWriteResponse, RaftError>>) {
         let mut node = self.node.borrow_mut();
