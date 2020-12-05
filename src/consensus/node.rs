@@ -180,7 +180,12 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             self.commit_sender.send(CommitEntry {
                index, term: entry.term, value: entry.value.clone()
             }).unwrap_or_else(|e| {
-                error!("No one is subscribed to commit channel, couldn't send commit notification: {:?}", e);
+                // it's likely that a random node won't have anyone listening on his commit channel,
+                // but it shouldn't happen for the leader, since he himself should be listening for
+                // commits(in order to respond to clients)
+                if self.state == ServerState::Leader {
+                    error!("I'm a leader and no one is subscribed to commit channel, couldn't send commit notification: {:?}", e);
+                }
                 0
             });
         }
