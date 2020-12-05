@@ -120,7 +120,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
             };
             let transport = self.node.transport.clone();
             let tx = tx.clone();
-            tokio::spawn(async move {
+            tokio::task::spawn_local(async move {
                 trace!("sending request to {}", node_id);
                 let res = transport.send_request_vote(node_id, req).await;
                 match &res {
@@ -143,6 +143,8 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
 
+        let ls = tokio::task::LocalSet::new();
+        ls.run_until(async move {
         // loop for multiple consecutive elections(1 or more)
         loop {
 
@@ -205,7 +207,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                     }
                 }
             }
-        }
+        }}).await
     }
 
 }
