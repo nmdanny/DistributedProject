@@ -35,9 +35,10 @@ impl <V: Value> InMemoryStorage<V> {
         return self.log.len();
     }
 
-    /// Inserts a log entry to the end of the log
-    pub fn push(&mut self, entry: LogEntry<V>) {
+    /// Inserts a log entry to the end of the log, returning the index of the inserted entry
+    pub fn push(&mut self, entry: LogEntry<V>) -> usize {
         self.log.push(entry);
+        self.log.len() - 1
     }
 
     /// Returns the last log index and term of the last entry in the log, if it exists

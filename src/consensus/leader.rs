@@ -14,6 +14,7 @@ use std::rc::Rc;
 use std::cell::{Cell, RefCell};
 use tokio::sync::watch::Ref;
 use thiserror::Error;
+use tokio::task;
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -38,6 +39,9 @@ pub struct PeerReplicationStream<V: Value, T: Transport<V>> {
 
     /// Triggered whenever there's a heartbeat or a client submits a new request
     pub tick_receiver: watch::Receiver<()>,
+
+    /// Used to notify leader of match index updates
+    pub match_index_sender: mpsc::Sender<(Id, usize)>,
 
     phantom: std::marker::PhantomData<V>
 
@@ -82,7 +86,8 @@ pub enum ReplicationLoopError {
 
 impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
     pub fn new(node: Rc<RefCell<Node<V, T>>>, id: Id,
-               tick_receiver: watch::Receiver<()>) -> Self {
+               tick_receiver: watch::Receiver<()>,
+               match_index_sender: mpsc::Sender<(Id, usize)>) -> Self {
 
 
         // at first, assume the peer is completely synchronized, so `next_index` points to one past
@@ -90,7 +95,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
         let next_index = node.borrow().storage.len();
         let match_index = None;
         PeerReplicationStream {
-            node, id, next_index, match_index, tick_receiver, phantom: Default::default()
+            node, id, next_index, match_index, tick_receiver, match_index_sender, phantom: Default::default()
         }
     }
 
@@ -135,13 +140,15 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
             return Ok(())
         }
 
-        debug!("Beginning to replicate data to peer id {}", self.id);
-        loop {
-            debug!("self.next_index before decrement is {}", self.next_index);
-            self.next_index -= 1;
+        info!("Beginning to replicate data to peer id {}", self.id);
+        while self.match_index != node.storage.last_log_index_term().index() {
             let node = self.node.borrow();
-            assert!(self.next_index < node.storage.len(), "if we're not synchronized, next_index must be valid");
+            debug!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
+                self.id, self.match_index, node.storage.last_log_index_term());
+
+            assert!(self.next_index <= node.storage.len(), "if we're not synchronized, next_index must be valid");
             let req = create_append_entries_for_index(&node, self.next_index);
+            assert_eq!(req.entries.len(), node.storage.len() - self.next_index);
             let last_index = node.storage
                 .last_log_index_term()
                 .index().expect("If a peer isn't synchronized, the log must be non empty");
@@ -150,14 +157,20 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
             let res = self.send_ae(&transport, current_term, req).await?;
 
             if res.success {
+                self.next_index = last_index + 1;
                 self.match_index = Some(last_index);
-                info!("Successfully replicated to peer {} values up to index {}",
+                self.match_index_sender.send((self.id, last_index)).unwrap_or_else(|e| {
+                    error!("Peer couldn't send match index to leader")
+                });
+                info!("Successfully replicated to peer {} values up to, including, index {}",
                       self.id, last_index);
                 return Ok(())
             }
 
             assert!(self.next_index > 0, "We could not have failed for next_index = 0");
+            self.next_index -= 1;
         }
+        Ok(())
 
     }
 
@@ -177,13 +190,28 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                           self.id, current_term, stale.newer_term);
                     stale_sender.send(stale).unwrap_or_else(|e| {
                         error!("replication stream couldn't send StaleLeader message {:?}", e)
-                    });
+                    }).await;
                     return;
                 }
             }
         }
     }
 
+}
+
+#[derive(Debug)]
+pub struct PendingWriteRequest {
+    pub responder: oneshot::Sender<Result<ClientWriteResponse, RaftError>>,
+
+    pub pending_entry_log_index: usize,
+}
+
+impl PendingWriteRequest {
+    pub fn new(pending_entry_log_index: usize,
+                         responder: oneshot::Sender<Result<ClientWriteResponse, RaftError>>) -> Self
+    {
+       PendingWriteRequest { pending_entry_log_index, responder }
+    }
 }
 
 #[derive(Debug)]
@@ -198,6 +226,12 @@ pub struct LeaderState<'a, V: Value, T: Transport<V>>{
     /// To be passed to all peer replication streams
     pub replicate_receiver: watch::Receiver<()>,
 
+    /// Used to resolve client write requests
+    pub pending_writes: BTreeMap<usize, PendingWriteRequest>,
+
+    /// Maps peer IDs to their latest match index
+    pub match_indices: BTreeMap<Id, Option<usize>>,
+
     phantom: std::marker::PhantomData<&'a ()>
 
 }
@@ -207,10 +241,17 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     /// Creates state for a node who just became a leader
     pub fn new(node: Rc<RefCell<Node<V, T>>>) -> Self {
 
+        let match_indices = node.borrow().all_other_nodes()
+            .map(|i| (i, None)).collect();
 
         let (replicate_sender, replicate_receiver) = watch::channel(());
         LeaderState {
-            node, replicate_sender, replicate_receiver, phantom: Default::default()
+            node,
+            replicate_sender,
+            replicate_receiver,
+            pending_writes: Default::default(),
+            match_indices,
+            phantom: Default::default()
         }
     }
 
@@ -233,6 +274,14 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
     }
 
+    #[instrument]
+    pub fn on_receive_match_index(&mut self, peer: Id, match_index: usize)
+    {
+        let mut entry = self.match_indices.get_mut(&peer).unwrap();
+        assert!(Some(match_index) >= *entry, "match index for a peer cannot decrease");
+
+    }
+
     async fn run_loop_inner(&mut self, receiver: &mut mpsc::UnboundedReceiver<NodeCommand<V>>) -> Result<(), anyhow::Error> {
         let mut node_ref = self.node.borrow_mut();
         node_ref.leader_id = Some(node_ref.id);
@@ -242,17 +291,19 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         info!("became leader for term {}", node_ref.current_term);
 
         let (heartbeat_sender, heartbeat_receiver) = watch::channel(());
+        let (match_index_sender, mut match_index_receiver) = mpsc::channel(node_ref.number_of_nodes);
         let (stale_sender, mut stale_receiver) = mpsc::channel(node_ref.number_of_nodes);
 
         let mut replication_streams = node_ref
             .all_other_nodes()
             .into_iter()
             .map(|id| PeerReplicationStream::new(self.node.clone(), id,
-                                                 heartbeat_receiver.clone()))
+                                                 heartbeat_receiver.clone(),
+                                                 match_index_sender.clone()))
             .collect::<Vec<_>>();
         drop(node_ref);
 
-        let cs = tokio::task::LocalSet::new();
+        let ls = task::LocalSet::new();
 
 
         // A replication loop will only be resolved if we detect we are stale, regardless,
@@ -262,11 +313,11 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
             .into_iter()
             .map(|mut stream| stream.run_replication_loop(stale_sender.clone())));
 
-        cs.spawn_local(replication_fut);
 
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
 
-        cs.run_until(async move {
+        ls.run_until(async move {
+            task::spawn_local(replication_fut);
 
         loop {
 
@@ -287,6 +338,9 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                         error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
                     });
                 },
+                Some((peer, match_index)) = match_index_receiver.next() => {
+                    self.on_receive_match_index(peer, match_index);
+                },
                 Some(StaleLeader { newer_term}) = stale_receiver.next() => {
                     let mut node = self.node.borrow_mut();
                     let _res = node.try_update_term(newer_term, None);
@@ -296,13 +350,40 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                 res = receiver.next() => {
                     // TODO can this channel close prematurely?
                     let cmd = res.unwrap();
-                    self.handle_command(cmd).await;
+                    match cmd {
+                        NodeCommand::ClientWriteRequest(req, tx) => self.handle_client_write_command(req, tx),
+                        _ => self.handle_command(cmd).await
+
+                    }
                 }
 
             }
         }
         }).await
 
+    }
+
+    pub fn handle_client_write_command(&mut self, req: ClientWriteRequest<V>,
+                                       tx: oneshot::Sender<Result<ClientWriteResponse, RaftError>>) {
+        let mut node = self.node.borrow_mut();
+        info!("Received request {:?}, ", req);
+
+        let term = node.current_term;
+        let entry_index = node.storage.push(LogEntry {
+            value: req.value,
+            term
+        });
+
+        drop(node);
+
+        let pending = PendingWriteRequest::new(entry_index, tx);
+        let _prev = self.pending_writes.insert(entry_index, pending);
+        assert!(_prev.is_none(), "can't insert multiple PendingWriteRequests to same log index");
+
+        // notify all replication streams of the newly added
+        self.replicate_sender.broadcast(()).unwrap_or_else(|e| {
+            error!("No replication stream to be notified of added entry: {:?}", e);
+        });
     }
 }
 
@@ -319,28 +400,8 @@ impl<'a, V: Value, T: Transport<V>> CommandHandler<V> for LeaderState<'a, V, T> 
         return node.on_receive_request_vote(&req);
     }
 
-    async fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
-        let mut node = self.node.borrow_mut();
-        if node.state != ServerState::Leader {
-            return Ok(ClientWriteResponse::NotALeader { leader_id: node.leader_id })
-        }
-        let (res_send, res_receive) = oneshot::channel();
-        info!("Received request {:?}, ", req);
-
-        let term = node.current_term;
-        node.storage.push(LogEntry {
-            value: req.value,
-            term
-        });
-
-        // notify all replication streams of the newly added
-        self.replicate_sender.broadcast(()).unwrap_or_else(|e| {
-            error!("No replication stream to be notified of added entry: {:?}", e);
-        });
-        drop(node);
-
-        // res_send can be closed if we become a follower and the PeerReplicationStream is dropped
-        res_receive.await.map_err(|e| RaftError::InternalError((e.into())))
+    async fn handle_client_write_request(&mut self, _: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+        panic!("Write requests cannot be handled by this function");
     }
 
     async fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
