@@ -136,8 +136,10 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         let node = Rc::new(RefCell::new(self));
 
         loop {
+            let id = node.borrow().id;
             let state = node.borrow().state;
-            info!(state = ?state, "Switching to new state");
+            info!(state = ?state, id = ?id, "@@@@@@@@ Node {} switching to state {:?} @@@@@@@",
+                  id, state);
             match state {
                 ServerState::Follower => FollowerState::new(&mut node.borrow_mut()).run_loop().await?,
                 ServerState::Candidate => CandidateState::new(&mut node.borrow_mut()).run_loop().await?,
@@ -152,6 +154,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         self.state = new_state;
     }
 
+    #[instrument]
     /// Updates the commit index, notifying subscribed clients of the new entries
     pub fn update_commit_index(&mut self, new_commit_index: Option<usize>)
     {

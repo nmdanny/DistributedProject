@@ -99,7 +99,7 @@ pub async fn main() -> Result<(), Error> {
         let posible_leaders = Uniform::from(0 .. NUM_NODES);
         let submit_delay_ms = Uniform::from(0 .. 500);
         let mut leader  = 0;
-        let mut i = 1337;
+        let mut i = 10000;
         loop {
             tokio::time::delay_for(Duration::from_millis(submit_delay_ms.sample(&mut rng))).await;
             info!(">>>>> submitting value {} to peer {}", i, leader);

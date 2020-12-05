@@ -160,7 +160,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                 self.match_index_sender.send((self.id, last_index)).unwrap_or_else(|e| {
                     error!("Peer couldn't send match index to leader")
                 }).await;
-                info!("Successfully replicated to peer {} values up to, including, index {}",
+                trace!("Successfully replicated to peer {} values up to, including, index {}",
                       self.id, last_index);
                 return Ok(())
             }
@@ -284,7 +284,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
             return;
         }
 
-        debug!("on_receive_match_index from peer {} and match_index {}", peer, match_index);
+        trace!("on_receive_match_index from peer {} and match_index {}", peer, match_index);
         {
             let mut entry = self.match_indices.get_mut(&peer).unwrap();
             assert!(Some(match_index) >= *entry, "match index for a peer cannot decrease");
@@ -310,7 +310,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
         assert!(minimal_n <= maximal_n, "index math sanity check");
 
-        debug!("match index increased, testing from {} to {}", maximal_n, minimal_n);
+        trace!("match index increased, testing from {} to {}", maximal_n, minimal_n);
 
         for n in maximal_n ..= minimal_n
         {
@@ -320,7 +320,6 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
             // check if a majority committed all entries up to 'n' (plus 1 for the leader itself)
             if self.match_indices.values().filter(|v| **v >= Some(n)).count() + 1 >= node.quorum_size()
             {
-                info!("Determined that {} is a new commit index", n);
                 node.update_commit_index(Some(n));
 
                 // note: this will indirectly trigger `on_commit` (by commit channel)
