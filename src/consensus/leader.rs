@@ -286,7 +286,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
         trace!("on_receive_match_index from peer {} and match_index {}", peer, match_index);
         {
-            let mut entry = self.match_indices.get_mut(&peer).unwrap();
+            let entry = self.match_indices.get_mut(&peer).unwrap();
             assert!(Some(match_index) >= *entry, "match index for a peer cannot decrease");
             if Some(match_index) == *entry {
                 debug!("match index did not increase");
@@ -334,9 +334,9 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     fn on_commit(&mut self, commit_entry: CommitEntry<V>)
     {
 
-        let mut node = self.node.borrow();
+        let node = self.node.borrow();
 
-        let mut committed_writes = {
+        let committed_writes = {
             // split the writes that weren't yet committed
             let mut rest_of_writes = self.pending_writes.split_off(&(commit_entry.index + 1));
 
@@ -359,28 +359,28 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     }
 
     async fn run_loop_inner(&mut self, receiver: &mut mpsc::UnboundedReceiver<NodeCommand<V>>) -> Result<(), anyhow::Error> {
-        let mut node_ref = self.node.borrow_mut();
-        node_ref.leader_id = Some(node_ref.id);
-        node_ref.voted_for = None;
+        let mut node = self.node.borrow_mut();
+        node.leader_id = Some(node.id);
+        node.voted_for = None;
 
-        let mut commit_receiver = node_ref.commit_sender.subscribe();
+        let mut commit_receiver = node.commit_sender.subscribe();
 
-        drop(node_ref);
-        let node_ref = self.node.borrow();
-        info!("became leader for term {}", node_ref.current_term);
+        drop(node);
+        let node = self.node.borrow();
+        info!("became leader for term {}", node.current_term);
 
         let (heartbeat_sender, heartbeat_receiver) = watch::channel(());
-        let (match_index_sender, mut match_index_receiver) = mpsc::channel(node_ref.number_of_nodes);
-        let (stale_sender, mut stale_receiver) = mpsc::channel(node_ref.number_of_nodes);
+        let (match_index_sender, mut match_index_receiver) = mpsc::channel(node.number_of_nodes);
+        let (stale_sender, mut stale_receiver) = mpsc::channel(node.number_of_nodes);
+        let all_other_nodes = node.all_other_nodes().collect::<Vec<_>>();
+        drop(node);
 
-        let mut replication_streams = node_ref
-            .all_other_nodes()
+        let replication_streams = all_other_nodes
             .into_iter()
             .map(|id| PeerReplicationStream::new(self.node.clone(), id,
                                                  heartbeat_receiver.clone(),
                                                  match_index_sender.clone()))
             .collect::<Vec<_>>();
-        drop(node_ref);
 
         let ls = task::LocalSet::new();
 
@@ -390,7 +390,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
         let replication_fut = futures::future::join_all(replication_streams
             .into_iter()
-            .map(|mut stream| {
+            .map(|stream| {
                 let id = stream.id;
                 stream
                     .run_replication_loop(stale_sender.clone())
