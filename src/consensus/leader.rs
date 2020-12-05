@@ -5,7 +5,7 @@ use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::stream::StreamExt;
-use futures::TryFutureExt;
+use futures::{TryFutureExt, FutureExt};
 use tracing_futures::Instrument;
 use std::collections::BTreeMap;
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ use std::cell::{Cell, RefCell};
 use tokio::sync::watch::Ref;
 use thiserror::Error;
 
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1000);
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -100,7 +100,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
     async fn send_ae(&self, transport: &T, current_term: usize, req: AppendEntries<V>) -> Result<AppendEntriesResponse, ReplicationLoopError>
     {
         let res = transport.send_append_entries(self.id, req).await;
-        debug!("send_ae, res: {:?}", res);
+        trace!("send_ae, res: {:?}", res);
         let res = res .map_err(ReplicationLoopError::NetworkError)?;
         match res.meaning(current_term) {
             AEResponseMeaning::Ok => Ok(res),
@@ -137,6 +137,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
 
         debug!("Beginning to replicate data to peer id {}", self.id);
         loop {
+            debug!("self.next_index before decrement is {}", self.next_index);
             self.next_index -= 1;
             let node = self.node.borrow();
             assert!(self.next_index < node.storage.len(), "if we're not synchronized, next_index must be valid");
@@ -162,7 +163,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
 
     #[instrument]
     /// To run concurrently as long as the leader is active.
-    pub async fn run_replication_loop(&mut self) -> Result<(), StaleLeader> {
+    pub async fn run_replication_loop(mut self, mut stale_sender: mpsc::Sender<StaleLeader>) {
         let current_term = self.node.borrow().current_term;
         while let Some(()) = self.tick_receiver.next().await {
             match self.try_replication().await {
@@ -174,11 +175,13 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                 Err(ReplicationLoopError::StaleLeaderError(stale)) => {
                     warn!("Determined I'm a stale leader via peer {}, my term is {}, newer term is {}",
                           self.id, current_term, stale.newer_term);
-                    return Err(stale)
+                    stale_sender.send(stale).unwrap_or_else(|e| {
+                        error!("replication stream couldn't send StaleLeader message {:?}", e)
+                    });
+                    return;
                 }
             }
         }
-        Ok(())
     }
 
 }
@@ -239,6 +242,8 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         info!("became leader for term {}", node_ref.current_term);
 
         let (heartbeat_sender, heartbeat_receiver) = watch::channel(());
+        let (stale_sender, mut stale_receiver) = mpsc::channel(node_ref.number_of_nodes);
+
         let mut replication_streams = node_ref
             .all_other_nodes()
             .into_iter()
@@ -247,8 +252,21 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
             .collect::<Vec<_>>();
         drop(node_ref);
 
+        let cs = tokio::task::LocalSet::new();
+
+
+        // A replication loop will only be resolved if we detect we are stale, regardless,
+        // We don't care about it much as stale notification leaders are sent via channel
+
+        let replication_fut = futures::future::join_all(replication_streams
+            .into_iter()
+            .map(|mut stream| stream.run_replication_loop(stale_sender.clone())));
+
+        cs.spawn_local(replication_fut);
+
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
 
+        cs.run_until(async move {
 
         loop {
 
@@ -257,13 +275,8 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                 return Ok(());
             }
 
-            let futs = replication_streams
-                .iter_mut()
-                .map(|mut stream| stream.run_replication_loop())
-                .collect::<Vec<_>>();
-            let drive_replications = futures::future::try_join_all(futs);
-
             tokio::select! {
+                // TODO - could this make us lose messages from receiver?
                 _ = heartbeat_interval.tick() => {
                         heartbeat_sender.broadcast(()).unwrap_or_else(|e| {
                             error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
@@ -274,13 +287,11 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                         error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
                     });
                 },
-                res = drive_replications => {
-                    if let Err(StaleLeader { newer_term }) = res {
-                        let mut node = self.node.borrow_mut();
-                        node.try_update_term(newer_term, None);
-                        assert!(node.state == ServerState::Follower);
-                        return Ok(())
-                    }
+                Some(StaleLeader { newer_term}) = stale_receiver.next() => {
+                    let mut node = self.node.borrow_mut();
+                    let _res = node.try_update_term(newer_term, None);
+                    assert!(_res);
+                    return Ok(())
                 },
                 res = receiver.next() => {
                     // TODO can this channel close prematurely?
@@ -290,6 +301,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
             }
         }
+        }).await
 
     }
 }
@@ -313,6 +325,7 @@ impl<'a, V: Value, T: Transport<V>> CommandHandler<V> for LeaderState<'a, V, T> 
             return Ok(ClientWriteResponse::NotALeader { leader_id: node.leader_id })
         }
         let (res_send, res_receive) = oneshot::channel();
+        info!("Received request {:?}, ", req);
 
         let term = node.current_term;
         node.storage.push(LogEntry {
