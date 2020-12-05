@@ -36,16 +36,17 @@ impl <V: Value> NodeCommunicator<V> {
 
     /// Creates a node object, returning it along with a communicator that can be used to interact
     /// with it after we spawn it on a task/thread.
-    pub fn create_with_node<T: Transport<V>>(id: usize,
+    pub async fn create_with_node<T: Transport<V>>(id: usize,
                             number_of_nodes: usize,
                             transport: T) -> (Node<V, T>, NodeCommunicator<V>) {
        let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
         let (commit_sender, _commit_receiver) = broadcast::channel(COMMIT_CHANNEL_SIZE);
-        let communicator = NodeCommunicator {
+        let mut communicator = NodeCommunicator {
             rpc_sender, commit_sender: commit_sender.clone()
         };
-        let node = Node::new(id, number_of_nodes, transport, rpc_receiver,
+        let mut node = Node::new(id, number_of_nodes, transport, rpc_receiver,
                              commit_sender);
+        Transport::on_node_communicator_created(&mut communicator, &mut node).await;
         (node, communicator)
     }
 

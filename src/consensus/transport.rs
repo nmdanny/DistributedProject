@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use tokio::task;
 use anyhow::Result;
 use std::fmt::Debug;
+use crate::consensus::node::Node;
+use crate::consensus::node_communicator::NodeCommunicator;
 
 /// Used for sending and receiving Raft messages
 /// Should be cheap to clone
@@ -11,6 +13,18 @@ pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
     async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse>;
 
     async fn send_request_vote(&self, to: Id, msg: RequestVote) -> Result<RequestVoteResponse>;
+
+    /// A hook that runs after a `NodeCommunicator` is created(along with a node)
+    /// but before the node is spawned.
+    async fn on_node_communicator_created(_comm: &mut NodeCommunicator<V>, _node: &mut Node<V, Self>) {
+
+    }
+
+    /// A hook that runs right before a node starts running. By this point we should've
+    /// configured all peers in the transport.
+    async fn before_node_loop(_node: &mut Node<V, Self>) {
+
+    }
 }
 
 

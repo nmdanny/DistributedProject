@@ -1,29 +1,54 @@
 use dist_lib::consensus::types::*;
-use dist_lib::consensus::node::*;
 use dist_lib::consensus::transport::Transport;
 
 #[macro_use]
 extern crate tracing;
 
+#[macro_use]
+pub extern crate derivative;
+
 use anyhow::Error;
 use std::collections::HashMap;
 use async_trait::async_trait;
+use tokio::sync::{RwLock, watch, Barrier};
 use std::sync::Arc;
 use tracing_futures::Instrument;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
 use rand::distributions::{Distribution, Uniform};
 use tokio::time::Duration;
+use dist_lib::consensus::node::Node;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use futures::StreamExt;
 
-#[derive(Debug, Clone)]
+struct ThreadTransportState<V: Value>
+{
+    senders: HashMap<Id, NodeCommunicator<V>>,
+
+    barrier: Arc<Barrier>
+
+}
+
+#[derive(Derivative, Clone)]
+#[derivative(Debug)]
 pub struct ThreadTransport<V: Value>
 {
-    senders: Arc<HashMap<Id, NodeCommunicator<V>>>
+    #[derivative(Debug="ignore")]
+    state: Arc<RwLock<ThreadTransportState<V>>>,
+
+    #[derivative(Debug="ignore")]
+    barrier: Arc<Barrier>
 }
 
 impl <V: Value> ThreadTransport<V> {
-    pub fn new() -> Self {
+    pub fn new(expected_num_nodes: usize) -> Self {
+        let barrier = Arc::new(Barrier::new(expected_num_nodes));
+        let state = ThreadTransportState {
+            senders: Default::default(), barrier: barrier.clone()
+        };
         ThreadTransport {
-            senders: Default::default()
+            state: Arc::new(RwLock::new(state)),
+            barrier
         }
     }
 }
@@ -32,16 +57,33 @@ impl <V: Value> ThreadTransport<V> {
 impl <V: Value> Transport<V> for ThreadTransport<V> {
     #[instrument]
     async fn send_append_entries(&self, to: usize, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, Error> {
-        Ok(self.senders.get(&to).unwrap().clone().append_entries(msg).await?)
+        let comm = {
+            self.state.read().await.senders.get(&to).unwrap().clone()
+        };
+        Ok(comm.append_entries(msg).await?)
     }
 
     #[instrument]
     async fn send_request_vote(&self, to: usize, msg: RequestVote) -> Result<RequestVoteResponse, Error> {
-        Ok(self.senders.get(&to).unwrap().clone().request_vote(msg).await?)
+        let comm = {
+            self.state.read().await.senders.get(&to).unwrap().clone()
+        };
+        Ok(comm.request_vote(msg).await?)
+    }
+
+    async fn on_node_communicator_created(comm: &mut NodeCommunicator<V>, node: &mut Node<V, Self>) {
+        let mut map = &mut node.transport.state.write().await.senders;
+
+        let _prev = map.insert(node.id, comm.clone());
+        assert!(_prev.is_none(), "Can't ");
+    }
+
+    async fn before_node_loop(_node: &mut Node<V, Self>) {
+        _node.transport.barrier.wait().await;
     }
 }
 
-const NUM_NODES: usize = 3;
+const NUM_NODES: usize = 30;
 
 #[tokio::main]
 pub async fn main() -> Result<(), Error> {
@@ -60,26 +102,16 @@ pub async fn main() -> Result<(), Error> {
 
 
     // initializing all nodes and their communicators
-    let mut nodes = Vec::new();
-    let mut communicators = Vec::new();
-    for i in 0 .. NUM_NODES {
-        let dummy_trans = ThreadTransport::<String>::new();
-        let (node, comm) = NodeCommunicator::create_with_node(i, NUM_NODES, dummy_trans);
-        nodes.push(node);
-        communicators.push(comm);
-    }
+    let transport = ThreadTransport::<String>::new(NUM_NODES);
+    let node_and_comms_fut = futures::future::join_all(
+        (0 .. NUM_NODES).map(|i| {
+            NodeCommunicator::create_with_node(i, NUM_NODES, transport.clone())
+        })
+    );
 
-    // setting up the real transport
-    let mut senders = HashMap::new();
-    for (node, comm) in nodes.iter().zip(communicators.iter().cloned()) {
-        senders.insert(node.id, comm.clone());
+    let (nodes, communicators): (Vec<_>, Vec<_>) = node_and_comms_fut.await
+        .into_iter().unzip();
 
-    }
-    let thread_transport = ThreadTransport { senders: Arc::new(senders) };
-
-    for node in nodes.iter_mut() {
-        node.transport = thread_transport.clone();
-    }
 
     let mut handles = Vec::new();
     let ls = tokio::task::LocalSet::new();
