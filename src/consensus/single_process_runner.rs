@@ -10,7 +10,7 @@ pub extern crate derivative;
 use anyhow::Error;
 use std::collections::HashMap;
 use async_trait::async_trait;
-use tokio::sync::{RwLock, Barrier};
+use tokio::sync::{RwLock, Barrier, broadcast, watch, mpsc};
 use std::sync::Arc;
 use tracing_futures::Instrument;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
@@ -20,6 +20,10 @@ use dist_lib::consensus::node::Node;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use dist_lib::consensus::adversarial_transport::AdversaryTransport;
+use std::collections::BTreeMap;
+use tokio::stream::StreamExt;
+use tokio::sync::broadcast::RecvError;
+use std::collections::btree_map::Entry;
 
 struct ThreadTransportState<V: Value>
 {
@@ -81,9 +85,82 @@ impl <V: Value> Transport<V> for ThreadTransport<V> {
     }
 }
 
+/// Used for testing the consistency of entries committed by multiple logs
+struct ConsistencyCheck<V: Value> {
+    notifier: mpsc::UnboundedReceiver<CommitEntry<V>>,
+    notifier_sender: mpsc::UnboundedSender<CommitEntry<V>>
+}
+
+
+
+impl <V: Value + Eq> ConsistencyCheck<V> {
+    pub fn new() -> Self {
+        let (notifier_sender, notifier) = mpsc::unbounded_channel();
+        ConsistencyCheck {
+            notifier,
+            notifier_sender
+        }
+    }
+
+    pub async fn subscribe(&mut self, id: Id, comm: &NodeCommunicator<V>) -> Result<(), RaftError>{
+        let mut chan = comm.commit_channel().await?;
+        let notifier = self.notifier_sender.clone();
+        tokio::task::spawn_local(async move {
+            let mut i = 0;
+            loop {
+                let entry = chan.recv().await;
+                match entry {
+                    Ok(e) => {
+                        if i != e.index {
+                            error!("While handling peer {}, expecting CommitEntry at Index {} - given CommitEntry has unexpected index: {:?}",
+                                   id, i, e);
+                        }
+                        notifier.send(e).unwrap();
+                        i += 1;
+                    },
+                    Err(err) => {
+                        error!("ConsistencyCheck - commit channel receiver error: {:?}", err);
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+
+
+    pub async fn spawn_vec_checks(mut self) {
+        tokio::task::spawn_local(async move {
+            let mut view = BTreeMap::<usize, LogEntry<V>>::new();
+            loop {
+                let res = self.notifier.next().await;
+                assert!(res.is_some(), "ConsistencyCheck notifier should never be closed");
+                let commit_entry = res.unwrap();
+                let entry = LogEntry { term: commit_entry.term, value: commit_entry.value.clone()};
+                    match view.entry(commit_entry.index) {
+                    Entry::Vacant(e) => {
+                        e.insert(LogEntry { value: entry.value, term: entry.term});
+                    },
+                    Entry::Occupied(o) => {
+                        let occ_entry = o.get();
+                        if &entry != occ_entry {
+                            error!("Inconsistency detected at index {}, previously seen different entry {:?}, now seen entry {:?}",
+                                   commit_entry.index, occ_entry, entry)
+                        }
+                    }
+                }
+
+
+            }
+        });
+    }
+
+}
+
 const NUM_NODES: usize = 3;
 
-#[tokio::main]
+#[tokio::main(max_threads=1)]
 pub async fn main() -> Result<(), Error> {
     // set up logging
     color_eyre::install().unwrap();
@@ -116,6 +193,9 @@ pub async fn main() -> Result<(), Error> {
     let mut handles = Vec::new();
     let ls = tokio::task::LocalSet::new();
     ls.run_until(async move {
+
+
+        // spawn all nodes
         for node in nodes.into_iter() {
             let id = node.id;
             let handle = tokio::task::spawn_local(async move {
@@ -127,6 +207,16 @@ pub async fn main() -> Result<(), Error> {
             handles.push(handle);
         }
 
+
+        // setup a task to ensure all nodes are consistent
+        let mut consistency = ConsistencyCheck::new();
+        for (id, comm) in (0..).zip(communicators.iter()) {
+            consistency.subscribe(id, comm).await.unwrap();
+        }
+        consistency.spawn_vec_checks().await;
+
+        // setup adversary and begin client messages
+        transport.set_omission_chance(0, 0.5).await;
         let mut rng = rand::thread_rng();
         let posible_leaders = Uniform::from(0 .. NUM_NODES);
         let submit_delay_ms = Uniform::from(0 .. 500);
