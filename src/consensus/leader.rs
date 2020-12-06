@@ -377,26 +377,21 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
         let node = self.node.borrow();
 
-        let committed_writes = {
-            // split the writes that weren't yet committed
-            let mut rest_of_writes = self.pending_writes.split_off(&(commit_entry.index + 1));
-
-            // now, self.pending_writes contains the committed writes, swap the above two
-            // and return the committed writes
-
-            std::mem::swap(&mut self.pending_writes, &mut rest_of_writes);
-            rest_of_writes
-        };
-
         assert!(node.commit_index.unwrap() >= commit_entry.index,
                 "commit_entry and commit_index aren't consistent");
 
+        let pending_ixes = self.pending_writes
+            .range(0 ..= commit_entry.index)
+            .map(|(&index, _entry)| index)
+            .collect::<Vec<_>>();
 
-        for (commit_index, req) in committed_writes.into_iter() {
-            req.responder.send(Ok(ClientWriteResponse::Ok { commit_index })).unwrap_or_else(|e| {
+        for ix in pending_ixes.into_iter() {
+            let req = self.pending_writes.remove(&ix).unwrap();
+            req.responder.send(Ok(ClientWriteResponse::Ok { commit_index: ix })).unwrap_or_else(|e| {
                 error!("Couldn't send client write response, client probably dropped his request: {:?}", e);
             });
         }
+        return;
     }
 
     async fn run_loop_inner(&mut self, receiver: &mut mpsc::UnboundedReceiver<NodeCommand<V>>) -> Result<(), anyhow::Error> {
