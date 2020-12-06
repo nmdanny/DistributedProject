@@ -121,18 +121,18 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
             let transport = self.node.transport.clone();
             let tx = tx.clone();
             tokio::task::spawn_local(async move {
-                trace!("sending request to {}", node_id);
+                trace!("sending vote request to {}", node_id);
                 let res = transport.send_request_vote(node_id, req).await;
                 match &res {
                     Ok(res) => {
-                        debug!("response is {:?}", res);
+                        trace!("got vote response {:?}", res);
                         tx.send(res.clone()).unwrap_or_else(|e| {
                             // TODO this isn't really an error, just the result of delays
                             error!("Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
                         });
                     }
                     Err(e) => {
-                        error!("Error when sending request {:?}: {:?}", res, e);
+                        error!("Error when sending vote request: {}: ", e);
                     }
                 }
             }.instrument(info_span!("vote request", to=node_id)));

@@ -16,7 +16,7 @@ use tokio::sync::watch::Ref;
 use thiserror::Error;
 use tokio::task;
 
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1000);
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -117,7 +117,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
 
     /// Tries to replicate all data available at this time to the peer,
     /// or sends a heartbeat if he's already synchronized.
-    #[instrument]
+    #[instrument(skip(self))]
     pub async fn try_replication(&mut self) -> Result<(), ReplicationLoopError>
     {
         let node = self.node.borrow();
@@ -139,10 +139,18 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
         // we run at least once(in case this is a heartbeat), or as long as we are not synchronized
         while self.match_index != last_log_index || !ran {
             ran = true;
-            // debug!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
-            //     self.id, self.match_index, node.storage.last_log_index_term());
-
             let node = self.node.borrow();
+            {
+                debug_span!("whileLoop",
+                peer_id=?self.id,
+                match_index=?self.match_index,
+                next_index=?self.next_index,
+                commit_index=?node.commit_index,
+                storage=?node.storage);
+                debug!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
+                       self.id, self.match_index, node.storage.last_log_index_term());
+            }
+
 
             assert!(self.next_index <= node.storage.len(), "if we're not synchronized, next_index must be valid");
             let req = create_append_entries_for_index(&node, self.next_index);
@@ -160,12 +168,12 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                 self.match_index_sender.send((self.id, last_index)).unwrap_or_else(|e| {
                     error!("Peer couldn't send match index to leader: {:?}", e);
                 }).await;
-                trace!("Successfully replicated to peer {} values up to, including, index {}",
+                debug!("Successfully replicated to peer {} values up to, including, index {}",
                       self.id, last_index);
                 return Ok(())
             }
             else if res.success {
-                trace!("heartbeat success");
+                debug!("heartbeat success");
                 return Ok(())
             }
 
@@ -184,8 +192,8 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
             match self.try_replication().await {
                 Ok(_) => {},
                 Err(ReplicationLoopError::NetworkError(e)) => {
-                    error!("Received IO error during replication stream for {}, will try again later: {:?}",
-                    self.id, e);
+                    error!("Received IO error during replication stream for {}, will try again later: {}",
+                           self.id, e);
                 },
                 Err(ReplicationLoopError::StaleLeaderError(stale)) => {
                     warn!("Determined I'm a stale leader via peer {}, my term is {}, newer term is {}",

@@ -59,31 +59,31 @@ impl <V: Value> NodeCommunicator<V> {
     pub async fn append_entries(&self, ae: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::AE(ae, tx);
-        self.rpc_sender.send(cmd).context("send command to append entries").map_err(RaftError::CommunicatorError)?;
-        rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
+        self.rpc_sender.send(cmd).context("send command to append_entries").map_err(RaftError::CommunicatorError)?;
+        rx.await.context("receive value after append_entries").map_err(RaftError::InternalError)?
     }
 
     #[instrument]
     pub async fn request_vote(&self, rv: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::RV(rv, tx);
-        self.rpc_sender.send(cmd).context("send command to request vote").map_err(RaftError::CommunicatorError)?;
-        rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
+        self.rpc_sender.send(cmd).context("send command to request_vote").map_err(RaftError::CommunicatorError)?;
+        rx.await.context("receive value after request_vote").map_err(RaftError::InternalError)?
     }
 
     #[instrument]
     pub async fn submit_value(&self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::ClientWriteRequest(req, tx);
-        self.rpc_sender.send(cmd).context("send command to submit value").map_err(RaftError::CommunicatorError)?;
+        self.rpc_sender.send(cmd).context("send command to submit_value").map_err(RaftError::CommunicatorError)?;
         rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
     }
 
     pub async fn request_values(&self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::ClientReadRequest(req, tx);
-        self.rpc_sender.send(cmd).context("send command to request values").map_err(RaftError::CommunicatorError)?;
-        rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
+        self.rpc_sender.send(cmd).context("send command to request_values").map_err(RaftError::CommunicatorError)?;
+        rx.await.context("receive value after request_values").map_err(RaftError::InternalError)?
     }
 }
 
