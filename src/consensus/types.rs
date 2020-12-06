@@ -176,12 +176,12 @@ pub enum ClientWriteResponse {
 }
 
 /// A request to read all committed entries in `[from, to)`, or `[from, commit_index)` if 'to' isn't
-/// specified.
 /// If `commit_index +1 < to` or `commit_index < from`, an error response
 /// will be given
+/// If 'from' is None, then the entire committed log will be read, and 'to' will be ignored in that case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientReadRequest {
-    pub from: usize,
+    pub from: Option<usize>,
 
     pub to: Option<usize>
 }

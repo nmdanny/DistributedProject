@@ -552,16 +552,20 @@ impl<'a, V: Value, T: Transport<V>> CommandHandler<V> for LeaderState<'a, V, T> 
 
         let commit_index = node.commit_index;
         Ok(match (req.from, req.to, node.commit_index) {
-            (from, None, Some(commit_index)) if from <= commit_index => {
+            (Some(from), None, Some(commit_index)) if from <= commit_index => {
                 ClientReadResponse::Ok {
                     range: node.storage.get_from_to(from, commit_index + 1
                     ).iter().map(|e| e.value.clone()).collect() }
             },
-            (from, Some(to), Some(commit_index))
+            (Some(from), Some(to), Some(commit_index))
             if from <= commit_index && to <= commit_index + 1 && from < to => {
                 ClientReadResponse::Ok { range: node.storage.get_from_to(
                     from, to
                 ).iter().map(|e| e.value.clone()).collect() }
+            },
+            (None, _, _) => {
+                ClientReadResponse::Ok { range: node.storage.get_all()
+                    .iter().map(|e| e.value.clone()).collect() }
             },
             _ => ClientReadResponse::BadRange { commit_index }
         })

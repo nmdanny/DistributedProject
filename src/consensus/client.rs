@@ -13,7 +13,7 @@ use color_eyre::eyre::ContextCompat;
 pub trait ClientTransport<V: Value> {
     async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError>;
 
-    async fn request_values(&mut self, node_id: usize, from: usize, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
+    async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
 }
 
 pub struct SingleProcessClientTransport<V: Value>
@@ -37,7 +37,7 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
         }).await
     }
 
-    async fn request_values(&mut self, node_id: usize, from: usize, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
+    async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
         self.communicators.get(node_id).expect("Invalid node ID").request_values(ClientReadRequest {
             from, to
         }).await
@@ -58,8 +58,8 @@ pub struct Client<T: ClientTransport<V>, V: Value> {
     /// Numbers of nodes
     num_nodes: usize,
 
-    /// The lowest possible index at which the value might occur.
-    min_commit_index: usize,
+    /// The last commit index of a value that the client has submitted
+    last_commit_index: Option<usize>,
 
     /// Maximal number of retries before giving up
     pub max_retries: usize,
@@ -77,7 +77,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
             transport,
             leader: 0,
             num_nodes,
-            min_commit_index: 0,
+            last_commit_index: None,
             max_retries: 100,
             retry_delay_ms: Uniform::new(300, 800),
             phantom: Default::default()
@@ -107,18 +107,20 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
         let mut attempt = 0;
 
         while attempt <= self.max_retries {
+
+
             let values = self.transport.request_values(self.leader,
-                                                       self.min_commit_index, None).await;
+                                                       self.last_commit_index, None).await;
 
             match values {
                 Ok(ClientReadResponse::Ok { range} ) => {
                     let val_index_in_range = range.iter().position(|val|  val == value);
-                    // now we know that 'min_commit_index' (index of range start) + range.len()
-                    // gives us the index of one element beyond the end of the committed log
-                    self.min_commit_index = self.min_commit_index + range.len() - 1;
 
                     return match val_index_in_range {
                         Some(index) => {
+                            self.last_commit_index = Some(self.last_commit_index
+                                .map(|i| i + 1)
+                                .unwrap_or(0) + index);
                             Ok(true)
                         }
                         None => {
@@ -132,11 +134,11 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                 },
                 Ok(ClientReadResponse::BadRange { commit_index }) => {
                     warn!(commit_index = ?commit_index, ">>> client read request - bad range, how is this possible?");
-                    self.min_commit_index = self.min_commit_index.max(commit_index.unwrap_or(0));
-                    return Ok(true);
+                    self.last_commit_index = None;
                 }
                 Err(e) => {
                     error!(">>> client encountered error: {}", e);
+                    self.set_leader(None);
                 }
             }
             time::delay_for(Duration::from_millis(self.retry_delay_ms.sample(
@@ -150,29 +152,28 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
     /// Submits a value, waits for it to be committed and returns the insertion index.
     /// In case of failure, it might retry up to `max_retries` before responding with an error.
     /// Moreover, in case of failure it ensures that its value wasn't already proposed
-    pub async fn submit_value(&mut self, value: V) -> Result<(), Error>
+    pub async fn submit_value(&mut self, value: V) -> Result<usize, Error>
     {
         let mut attempt = 0;
 
         while attempt <= self.max_retries {
 
             if attempt > 0 && self.is_value_already_committed(&value).await? {
-                return Ok(())
+                return Ok(self.last_commit_index.unwrap())
             }
 
             let res = self.transport.submit_value(self.leader, value.clone()).await;
             match res {
                 Ok(ClientWriteResponse::Ok { commit_index} ) => {
-                    self.min_commit_index = commit_index + 1;
-                    return Ok(());
+                    self.last_commit_index = Some(commit_index);
+                    return Ok(commit_index);
                 },
                 Ok(ClientWriteResponse::NotALeader {leader_id }) => {
-                    if let Some(leader) = leader_id {
-                        self.set_leader(leader_id);
-                    }
+                    self.set_leader(leader_id);
                 }
                 Err(e) => {
                     error!(">>> client encountered error: {}", e);
+                    self.set_leader(None);
                 }
             }
             time::delay_for(Duration::from_millis(self.retry_delay_ms.sample(

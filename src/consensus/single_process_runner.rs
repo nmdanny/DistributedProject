@@ -16,15 +16,10 @@ use tracing_futures::Instrument;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
 use dist_lib::consensus::client::{Client, SingleProcessClientTransport};
 use rand::distributions::{Distribution, Uniform};
-use tokio::time::Duration;
-use dist_lib::consensus::node::Node;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
 use tokio::stream::StreamExt;
-use tokio::sync::broadcast::RecvError;
 use std::collections::btree_map::Entry;
 
 struct ThreadTransportState<V: Value>
@@ -219,12 +214,15 @@ pub async fn main() -> Result<(), Error> {
         let mut client_transport = AdversaryClientTransport::new(
             SingleProcessClientTransport::new(communicators)
         );
-        client_transport.omission_chance = 0.5;
+
+        client_transport.request_omission_chance = 0.25;
+        client_transport.response_omission_chance = 0.25;
         let mut client = Client::new(client_transport, NUM_NODES);
 
+        // begin client
         for i in 0 .. {
             let ix = client.submit_value(format!("value {}", i)).await.expect("Submit value failed");
-            info!(">>>>>>>>>>>> client committed {}", i);
+            info!(">>>>>>>>>>>> client committed {} at index {}", i, ix);
         }
     }).await;
 

@@ -36,6 +36,10 @@ impl <V: Value> InMemoryStorage<V> {
         &self.log[from ..]
     }
 
+    pub fn get_all(&self) -> &[LogEntry<V>] {
+        &self.log[..]
+    }
+
 
     pub fn get_from_to(&self, from: usize, to_exclusive: usize) -> &[LogEntry<V>] {
         return &self.log[from .. to_exclusive]

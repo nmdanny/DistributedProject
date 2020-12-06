@@ -159,33 +159,41 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
 pub struct AdversaryClientTransport<V: Value, T: ClientTransport<V>>
 {
     transport: T,
-    pub omission_chance: f64,
+    pub request_omission_chance: f64,
+    pub response_omission_chance: f64,
     phantom: std::marker::PhantomData<V>,
 }
 
 impl <V: Value, T: ClientTransport<V>> AdversaryClientTransport<V, T> {
     pub fn new(transport: T) -> Self {
         AdversaryClientTransport {
-            transport, omission_chance: 0.0, phantom: Default::default()
+            transport,
+            request_omission_chance: 0.0,
+            response_omission_chance: 0.0,
+            phantom: Default::default()
         }
     }
 
 }
 
-async fn adversary_request_response<R>(omission_chance: f64, to: Id,
+async fn adversary_request_response<R>(req_omission_chance: f64,
+                                       res_omission_chance: f64,
+                                       to: Id,
                                        do_request: impl Future<Output = Result<R, RaftError>>) -> Result<R, RaftError>
 {
     let mut rng = rand::thread_rng();
 
-    let dist =  Bernoulli::new(omission_chance).expect("Invalid omission chance");
+    let req_ber =  Bernoulli::new(req_omission_chance).expect("Invalid omission chance");
+    let res_ber =  Bernoulli::new(res_omission_chance).expect("Invalid omission chance");
 
-    if dist.sample(&mut rng) {
+
+    if req_ber.sample(&mut rng) {
         return Err(anyhow::anyhow!("omission of client request to node {}", to))
             .map_err(RaftError::NetworkError)
     }
     let res = do_request.await;
 
-    if dist.sample(&mut rng) {
+    if res_ber.sample(&mut rng) {
         return Err(anyhow::anyhow!("omission of node {} response to client", to))
             .map_err(RaftError::NetworkError);
     }
@@ -196,13 +204,17 @@ async fn adversary_request_response<R>(omission_chance: f64, to: Id,
 #[async_trait(?Send)]
 impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTransport<V, T> {
     async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError> {
-        adversary_request_response(self.omission_chance, node_id, async move {
+        adversary_request_response(self.request_omission_chance,
+                                   self.response_omission_chance,
+                                   node_id, async move {
             self.transport.submit_value(node_id, value).await
         }).await
     }
 
-    async fn request_values(&mut self, node_id: usize, from: usize, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
-        adversary_request_response(self.omission_chance, node_id, async move {
+    async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
+        adversary_request_response(self.request_omission_chance,
+                                   self.response_omission_chance,
+                                   node_id, async move {
             self.transport.request_values(node_id, from, to).await
         }).await
     }
