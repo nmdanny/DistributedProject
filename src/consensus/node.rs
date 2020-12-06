@@ -131,7 +131,7 @@ impl <V: Value, T: Transport<V>> Node<V, T> {
 /* Following block contains logic shared with all states of a raft node */
 impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
 
-    #[instrument]
+    #[instrument(skip(self))]
     /// The main loop - this does everything, and it has ownership of the Node
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
 
@@ -143,7 +143,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         loop {
             let id = node.borrow().id;
             let state = node.borrow().state;
-            info!(state = ?state, id = ?id, "@@@@@@@@ Node {} switching to state {:?} @@@@@@@",
+            info!(state = ?state, id = ?id, log=?node.borrow().storage, "@@@@@@@@ Node {} switching to state {:?} @@@@@@@",
                   id, state);
             match state {
                 ServerState::Follower => FollowerState::new(&mut node.borrow_mut()).run_loop().await?,

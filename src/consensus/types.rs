@@ -14,7 +14,7 @@ impl <V: Eq + Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'stat
 pub type Id = usize;
 
 /// An entry in the log
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct LogEntry<V: Value> {
 
     #[serde(bound = "V: Value")]
@@ -29,6 +29,15 @@ pub struct LogEntry<V: Value> {
 impl <V: Value> LogEntry<V> {
     pub fn new(value: V, term: usize) -> Self {
         LogEntry { value, term }
+    }
+}
+
+impl <V:Value> std::fmt::Debug for LogEntry<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LogEntry")
+            .field(&self.value)
+            .field(&self.term)
+            .finish()
     }
 }
 

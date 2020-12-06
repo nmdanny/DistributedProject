@@ -140,7 +140,7 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
         Ok(ElectionState::new(self.node.quorum_size(), self.node.current_term, rx))
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
 
         let ls = tokio::task::LocalSet::new();

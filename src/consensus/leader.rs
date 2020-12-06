@@ -37,12 +37,15 @@ pub struct PeerReplicationStream<V: Value, T: Transport<V>> {
     /// The maximal index of a leader log entry known to be replicated on the peer
     pub match_index: Option<usize>,
 
+    #[derivative(Debug="ignore")]
     /// Triggered whenever there's a heartbeat or a client submits a new request
     pub tick_receiver: watch::Receiver<()>,
 
+    #[derivative(Debug="ignore")]
     /// Used to notify leader of match index updates
     pub match_index_sender: mpsc::Sender<(Id, usize)>,
 
+    #[derivative(Debug="ignore")]
     phantom: std::marker::PhantomData<V>
 
 }
@@ -117,7 +120,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
 
     /// Tries to replicate all data available at this time to the peer,
     /// or sends a heartbeat if he's already synchronized.
-    #[instrument(skip(self))]
+    #[instrument]
     pub async fn try_replication(&mut self) -> Result<(), ReplicationLoopError>
     {
         let node = self.node.borrow();
@@ -184,7 +187,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
 
     }
 
-    #[instrument]
+    #[instrument(skip(stale_sender))]
     /// To run concurrently as long as the leader is active.
     pub async fn run_replication_loop(mut self, mut stale_sender: mpsc::Sender<StaleLeader>) {
         let current_term = self.node.borrow().current_term;
@@ -224,15 +227,21 @@ impl PendingWriteRequest {
     }
 }
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct LeaderState<'a, V: Value, T: Transport<V>>{
 
+    pub term: usize,
+
+    #[derivative(Debug="ignore")]
     pub node: Rc<RefCell<Node<V, T>>>,
 
+    #[derivative(Debug="ignore")]
     /// Used to notify replication streams of a heartbeat or a
     /// newly inserted entry that came from a client
     pub replicate_sender: watch::Sender<()>,
 
+    #[derivative(Debug="ignore")]
     /// To be passed to all peer replication streams
     pub replicate_receiver: watch::Receiver<()>,
 
@@ -242,6 +251,7 @@ pub struct LeaderState<'a, V: Value, T: Transport<V>>{
     /// Maps peer IDs to their latest match index
     pub match_indices: BTreeMap<Id, Option<usize>>,
 
+    #[derivative(Debug="ignore")]
     phantom: std::marker::PhantomData<&'a ()>
 
 }
@@ -254,8 +264,10 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         let match_indices = node.borrow().all_other_nodes()
             .map(|i| (i, None)).collect();
 
+        let term = node.borrow().current_term;
         let (replicate_sender, replicate_receiver) = watch::channel(());
         LeaderState {
+            term,
             node,
             replicate_sender,
             replicate_receiver,
@@ -451,8 +463,11 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
                         error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
                     });
                 },
-                Some((peer, match_index)) = match_index_receiver.next() => {
-                    self.on_receive_match_index(peer, match_index);
+                res = match_index_receiver.recv() => {
+                    match res {
+                        Some((peer, match_index)) => self.on_receive_match_index(peer, match_index),
+                        None => error!("Match index channel - sender part has dropped")
+                    }
                 },
                 res = commit_receiver.recv() => {
                     match res {
