@@ -22,6 +22,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use dist_lib::consensus::adversarial_transport::AdversaryTransport;
 use std::collections::BTreeMap;
+use tokio::task::JoinHandle;
 use tokio::stream::StreamExt;
 use tokio::sync::broadcast::RecvError;
 use std::collections::btree_map::Entry;
@@ -103,10 +104,10 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
         }
     }
 
-    pub async fn subscribe(&mut self, id: Id, comm: &NodeCommunicator<V>) -> Result<(), RaftError>{
+    pub async fn subscribe(&mut self, id: Id, comm: &NodeCommunicator<V>) -> Result<JoinHandle<()>, RaftError>{
         let mut chan = comm.commit_channel().await?;
         let notifier = self.notifier_sender.clone();
-        tokio::task::spawn_local(async move {
+        Ok(tokio::task::spawn_local(async move {
             let mut i = 0;
             loop {
                 let entry = chan.recv().await;
@@ -125,13 +126,10 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
                     }
                 }
             }
-        });
-        Ok(())
+        }.instrument(info_span!("ConsistencyChecks_CommitChannelReader"))))
     }
 
-
-
-    pub async fn spawn_vec_checks(mut self) {
+    pub async fn spawn_vec_checks(mut self) -> JoinHandle<()> {
         tokio::task::spawn_local(async move {
             let mut view = BTreeMap::<usize, LogEntry<V>>::new();
             loop {
@@ -151,10 +149,8 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
                         }
                     }
                 }
-
-
             }
-        });
+        }.instrument(info_span!("ConsistencyChecks_LogChecker")))
     }
 
 }
@@ -211,10 +207,11 @@ pub async fn main() -> Result<(), Error> {
 
         // setup a task to ensure all nodes are consistent
         let mut consistency = ConsistencyCheck::new();
+        let mut join_handles = Vec::new();
         for (id, comm) in (0..).zip(communicators.iter()) {
-            consistency.subscribe(id, comm).await.unwrap();
+            join_handles.push(consistency.subscribe(id, comm).await.unwrap());
         }
-        consistency.spawn_vec_checks().await;
+        join_handles.push(consistency.spawn_vec_checks().await);
 
         // setup adversary and begin client messages
         transport.set_omission_chance(0, 0.5).await;
