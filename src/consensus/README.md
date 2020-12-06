@@ -64,16 +64,8 @@ the leader. If the leader isn't known, the client can simply guess a leader, and
 leader. (In fact, this is what `single_process_runner.rs` does)
 
 Clients can deal with request/response omissions by re-sending their request until getting a positive answer. There
-is a chance that their proposed value was committed but they're not aware - there are two ways to approach this:
-
-1. Before the client re-tries sending the value, he reads the latest entries and ensures his value wasn't already
-   committed
-   
-2. The server scans his log before inserting a new client value, and ensures the log doesn't contain the value
-   (e.g, if we identify each value with some random value, UUID)
-   
-There are various performance tradeoffs for each of those approaches, and for simplicity I didn't handle them - this
-is the concern 
+is a chance that their proposed value was committed but they're not aware - I handle this by sending read requests
+to read the latest portion of the log, and ensuring the value isn't there before submitting the value again.
 
 
 ## References

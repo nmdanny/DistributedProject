@@ -14,7 +14,7 @@ use tokio::sync::{RwLock, Barrier, broadcast, watch, mpsc};
 use std::sync::Arc;
 use tracing_futures::Instrument;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
-use dist_lib::consensus::client::SingleProcessClient;
+use dist_lib::consensus::client::{Client, SingleProcessClientTransport};
 use rand::distributions::{Distribution, Uniform};
 use tokio::time::Duration;
 use dist_lib::consensus::node::Node;
@@ -216,8 +216,8 @@ pub async fn main() -> Result<(), Error> {
         // setup adversary and begin client messages
         transport.set_omission_chance(0, 0.5).await;
 
-        let mut client = SingleProcessClient::new(
-            communicators
+        let mut client = Client::new(
+            SingleProcessClientTransport::new(communicators), NUM_NODES
         );
 
         for i in 0 .. {

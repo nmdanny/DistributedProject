@@ -5,17 +5,58 @@ use tokio::time;
 use rand::distributions::{Distribution, Uniform};
 use tracing::Instrument;
 use tokio::time::Duration;
+use async_trait::async_trait;
+use color_eyre::eyre::ContextCompat;
+
+/// Responsible for communicating between a client and a `NodeCommunicator`
+#[async_trait(?Send)]
+pub trait ClientTransport<V: Value> {
+    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError>;
+
+    async fn request_values(&mut self, node_id: usize, from: usize, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
+}
+
+pub struct SingleProcessClientTransport<V: Value>
+{
+    communicators: Vec<NodeCommunicator<V>>
+}
+
+impl <V: Value> SingleProcessClientTransport<V> {
+    pub fn new(communicators: Vec<NodeCommunicator<V>>) -> Self {
+        SingleProcessClientTransport {
+            communicators
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
+    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError> {
+        self.communicators.get(node_id).expect("Invalid node ID").submit_value(ClientWriteRequest {
+            value
+        }).await
+    }
+
+    async fn request_values(&mut self, node_id: usize, from: usize, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
+        self.communicators.get(node_id).expect("Invalid node ID").request_values(ClientReadRequest {
+            from, to
+        }).await
+    }
+}
 
 
-/// Implementation of a client that lives in the same process as the Raft Node and uses
-/// the `NodeCommunicator` to communicate with him
-pub struct SingleProcessClient<V: Value> {
+/// A generic client implementation that ensures it doesn't send duplicate requests when re-sending
+/// values(by using their equality definition)
+pub struct Client<T: ClientTransport<V>, V: Value> {
 
     /// Used to communicate with the Node
-    communicators: Vec<NodeCommunicator<V>>,
+    transport: T,
 
     /// Current leader
     leader: Id,
+
+    /// Numbers of nodes
+    num_nodes: usize,
 
     /// The lowest possible index at which the value might occur.
     min_commit_index: usize,
@@ -24,23 +65,27 @@ pub struct SingleProcessClient<V: Value> {
     pub max_retries: usize,
 
     /// The number of time(in ms) to wait between re-try attempts
-    pub retry_delay_ms: Uniform<u64>
+    pub retry_delay_ms: Uniform<u64>,
+
+    phantom: std::marker::PhantomData<V>
 }
 
-impl <V: Value + Eq> SingleProcessClient<V>
+impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
 {
-    pub fn new(communicators: Vec<NodeCommunicator<V>>) -> Self {
-        SingleProcessClient {
-            communicators,
+    pub fn new(transport: T, num_nodes: usize) -> Self {
+        Client {
+            transport,
             leader: 0,
+            num_nodes,
             min_commit_index: 0,
             max_retries: 100,
-            retry_delay_ms: Uniform::new(300, 800)
+            retry_delay_ms: Uniform::new(300, 800),
+            phantom: Default::default()
         }
     }
 
     fn num_nodes(&self) -> usize {
-        self.communicators.len()
+        self.num_nodes
     }
 
     /// To be called when redirected to a different leader,
@@ -62,9 +107,8 @@ impl <V: Value + Eq> SingleProcessClient<V>
         let mut attempt = 0;
 
         while attempt <= self.max_retries {
-            let values = self.communicators[self.leader].request_values(
-                ClientReadRequest { from: self.min_commit_index, to: None}
-            ).await;
+            let values = self.transport.request_values(self.leader,
+                                                       self.min_commit_index, None).await;
 
             match values {
                 Ok(ClientReadResponse::Ok { range} ) => {
@@ -116,9 +160,7 @@ impl <V: Value + Eq> SingleProcessClient<V>
                 return Ok(())
             }
 
-            let res  = self.communicators[self.leader].submit_value(
-                ClientWriteRequest { value: value.clone()}
-            ).await;
+            let res = self.transport.submit_value(self.leader, value.clone()).await;
             match res {
                 Ok(ClientWriteResponse::Ok { commit_index} ) => {
                     self.min_commit_index = commit_index + 1;
