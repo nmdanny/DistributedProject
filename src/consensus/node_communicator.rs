@@ -18,7 +18,15 @@ pub enum NodeCommand<V: Value> {
     ClientReadRequest(ClientReadRequest, oneshot::Sender<Result<ClientReadResponse<V>, RaftError>>)
 }
 
-/// This is used to communicate with a raft node once we begin the main loop
+/// Used to communicate with a raft node once we begin the main loop - note that this runs on
+/// the same process/machine/context where the Node is, and not necessarily where the client is;
+/// A client has no direct access to the `NodeCommunicator` and would usually instead use some
+/// networking mechanism(e.g, HTTP, RPC) to communicate with a `NodeCommunicator`.
+///
+/// In essence, `NodeCommunicator` is usually driven by a web server, and responds to requests
+/// made by either other Raft nodes (via the `append_entries`, `request_vote` and `commit_channel` functions)
+/// or by clients (the `submit_value`, `request_values` and `commit_channel` functions)
+///
 #[derive(Debug, Clone)]
 pub struct NodeCommunicator<V: Value> {
     // used for sending messages to the node
@@ -79,6 +87,7 @@ impl <V: Value> NodeCommunicator<V> {
         rx.await.context("receive value after submit_value").map_err(RaftError::InternalError)?
     }
 
+    #[instrument]
     pub async fn request_values(&self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::ClientReadRequest(req, tx);
