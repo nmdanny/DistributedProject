@@ -20,7 +20,7 @@ use tokio::time::Duration;
 use dist_lib::consensus::node::Node;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use dist_lib::consensus::adversarial_transport::AdversaryTransport;
+use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
 use tokio::stream::StreamExt;
@@ -216,9 +216,11 @@ pub async fn main() -> Result<(), Error> {
         // setup adversary and begin client messages
         transport.set_omission_chance(0, 0.5).await;
 
-        let mut client = Client::new(
-            SingleProcessClientTransport::new(communicators), NUM_NODES
+        let mut client_transport = AdversaryClientTransport::new(
+            SingleProcessClientTransport::new(communicators)
         );
+        client_transport.omission_chance = 0.5;
+        let mut client = Client::new(client_transport, NUM_NODES);
 
         for i in 0 .. {
             let ix = client.submit_value(format!("value {}", i)).await.expect("Submit value failed");

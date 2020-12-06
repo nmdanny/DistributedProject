@@ -31,17 +31,17 @@ Communication from/to a node is primarily done via the following:
    
 - `Transport` is used to send requests from a Raft `Node` (e.g, a candidate sending a vote request, or a leader sending an append entries request)
   to other Raft nodes.
+  
+- `ClientTransport` is used to send requests from a client(an application that uses the Raft library) to the `NodeCommunicator`
    
-A `Transport` is a trait which might can be implemented in various ways, depending how you want to send messages. On
+A `Transport`/`ClientTransport` is a trait which might can be implemented in various ways, depending how you want to send messages. On
 the other hand, `NodeCommunicator` is un-changed(it is a concrete struct) but is usually composed into some web service
 that drives the entire process. 
 
 For example, a Raft `Node` would have both a gRPC server and client - the server handler 
 invokes methods on `NodeCommunicator`, and the `Node` includes a `Transport` implementation which uses a gRPC client 
-to send messages to other servers)
-
-A client(aka, an application using the Raft consensus protocol) would use a gRPC client as well, in order to communicate
-with the gRPC server for the leader node(or at least, who the client thinks is the leader)
+to send messages to other servers). A client would also have a gRPC client in order to communicate with the leader node(which
+might change over time)
 
 
 As of now, all nodes live on a single thread(see `single_process_runner.rs`), and communication between nodes is done via
@@ -55,15 +55,9 @@ I've implemented an `AdversaryTransport`, which implements `Transport` by wrappi
 messages with a given probability. These can be changed at run-time, and we can even pause/un-pause servers by
 changing between a probability of 1 and 0.
 
-## Note regarding client omissions
+## How do clients deal with errors
 
-For simplicity, I did not simulate client omissions(client interaction isn't part of the `Transport` trait), 
-but by the implementation it is obvious that clients do not help/"cheat" in achieving consensus, as only the leader
-node responds to their write requests, and followers/candidates ignore their contents and simply forward them to 
-the leader. If the leader isn't known, the client can simply guess a leader, and eventually he'll reach the correct
-leader. (In fact, this is what `single_process_runner.rs` does)
-
-Clients can deal with request/response omissions by re-sending their request until getting a positive answer. There
+Clients can deal with request/response omissions and other errors by re-sending their request until getting a positive answer. There
 is a chance that their proposed value was committed but they're not aware - I handle this by sending read requests
 to read the latest portion of the log, and ensuring the value isn't there before submitting the value again.
 

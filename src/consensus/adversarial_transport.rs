@@ -1,4 +1,5 @@
 use crate::consensus::transport::Transport;
+use crate::consensus::client::ClientTransport;
 use crate::consensus::types::*;
 
 use tokio::sync::RwLock;
@@ -151,5 +152,58 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
 
         res
 
+    }
+}
+
+
+pub struct AdversaryClientTransport<V: Value, T: ClientTransport<V>>
+{
+    transport: T,
+    pub omission_chance: f64,
+    phantom: std::marker::PhantomData<V>,
+}
+
+impl <V: Value, T: ClientTransport<V>> AdversaryClientTransport<V, T> {
+    pub fn new(transport: T) -> Self {
+        AdversaryClientTransport {
+            transport, omission_chance: 0.0, phantom: Default::default()
+        }
+    }
+
+}
+
+async fn adversary_request_response<R>(omission_chance: f64, to: Id,
+                                       do_request: impl Future<Output = Result<R, RaftError>>) -> Result<R, RaftError>
+{
+    let mut rng = rand::thread_rng();
+
+    let dist =  Bernoulli::new(omission_chance).expect("Invalid omission chance");
+
+    if dist.sample(&mut rng) {
+        return Err(anyhow::anyhow!("omission of client request to node {}", to))
+            .map_err(RaftError::NetworkError)
+    }
+    let res = do_request.await;
+
+    if dist.sample(&mut rng) {
+        return Err(anyhow::anyhow!("omission of node {} response to client", to))
+            .map_err(RaftError::NetworkError);
+    }
+
+    res
+}
+
+#[async_trait(?Send)]
+impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTransport<V, T> {
+    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError> {
+        adversary_request_response(self.omission_chance, node_id, async move {
+            self.transport.submit_value(node_id, value).await
+        }).await
+    }
+
+    async fn request_values(&mut self, node_id: usize, from: usize, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
+        adversary_request_response(self.omission_chance, node_id, async move {
+            self.transport.request_values(node_id, from, to).await
+        }).await
     }
 }

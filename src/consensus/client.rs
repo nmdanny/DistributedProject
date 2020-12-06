@@ -50,7 +50,7 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
 pub struct Client<T: ClientTransport<V>, V: Value> {
 
     /// Used to communicate with the Node
-    transport: T,
+    pub transport: T,
 
     /// Current leader
     leader: Id,
