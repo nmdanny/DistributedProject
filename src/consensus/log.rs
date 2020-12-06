@@ -1,10 +1,20 @@
 use crate::consensus::types::*;
 use std::collections::BTreeMap;
+use std::fmt::{Formatter, Debug};
 
-#[derive(Debug)]
 pub struct InMemoryStorage<V: Value>
 {
     log: Vec<LogEntry<V>>
+}
+
+impl <V: Value> Debug for InMemoryStorage<V>
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryStorage")
+            .field("last_5_elements", &self.log.iter().rev().collect::<Vec<_>>())
+            .field("last_log_index_term", &self.last_log_index_term())
+            .finish()
+    }
 }
 
 impl <V: Value> Default for InMemoryStorage<V> {
