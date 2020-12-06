@@ -7,3 +7,4 @@ pub mod adversarial_transport;
 pub mod follower;
 pub mod candidate;
 pub mod leader;
+pub mod client;
