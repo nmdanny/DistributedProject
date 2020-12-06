@@ -83,7 +83,7 @@ impl <V: Value> InMemoryStorage<V> {
 
     /// Deletes all log entries after the given index(including)
     pub fn delete_entries(&mut self, starting_from: usize) {
-        self.log.drain(starting_from .. );
+        self.log.truncate(starting_from);
     }
 
     /// Appends the given entries to the end of the log
