@@ -285,14 +285,63 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     }
 
     #[instrument]
-    pub fn on_receive_match_index(&mut self, peer: Id, match_index: usize)
+    pub fn find_higher_commit_index(&mut self)
     {
         let mut node = self.node.borrow_mut();
+
+        let maximal_n = node.storage.len() - 1;
+
+        // (if node is committed, commit_index + 1 == storage.len(), hence why we use 'min)
+        let minimal_n = node.commit_index.map(|i| i + 1).unwrap_or(0)
+            .min(maximal_n);
+
+        assert!(minimal_n <= maximal_n, "index math sanity check");
+
+        trace!("match index increased, trying all N from {} to {}", maximal_n, minimal_n);
+
+        // find 'n' such that n > commit_index AND forall peer. match_index[peer] >= n
+        // AND log[n].term = current_term
+        // we try to be optimistic, starting with the highest 'n' and going down
+        for n in (minimal_n ..= maximal_n).rev()
+        {
+            if node.storage.get(n).unwrap().term != node.current_term  {
+                trace!("while checking N={}, found that term mismatches our own, skipping", n);
+                continue;
+            }
+
+            let match_count = self.match_indices
+                .values()
+                .filter(|v| **v >= Some(n))
+                .count();
+
+            trace!("while checking N={}, match count is {}", n, match_count);
+
+            // add 1 for the leader itself who also matches index 'n'
+            if match_count + 1 >= node.quorum_size()
+            {
+                debug!("Found that a majority quorum of size {} who committed all values up to(including) index {}",
+                       match_count + 1, n);
+                node.update_commit_index(Some(n));
+                return;
+
+                // note: this will indirectly trigger `on_commit` (by commit channel)
+                // It would've been slightly more efficient to call 'on_commit' here, but for
+                // the sake of uniformity, only the commit channel will trigger this.
+            }
+        }
+        debug!("Determined that current commit index {:?} is maximal", node.commit_index);
+    }
+
+    /// Updates
+    #[instrument]
+    pub fn on_receive_match_index(&mut self, peer: Id, match_index: usize)
+    {
+        let node = self.node.borrow();
         if node.state != ServerState::Leader {
             return;
         }
 
-        trace!("on_receive_match_index from peer {} and match_index {}", peer, match_index);
+        debug!("on_receive_match_index from peer {} and match_index {}", peer, match_index);
         {
             let entry = self.match_indices.get_mut(&peer).unwrap();
             assert!(Some(match_index) >= *entry, "match index for a peer cannot decrease");
@@ -305,37 +354,9 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
 
         assert!(node.storage.len() > 0, "if match_index increased, log is definitely not empty");
 
+        drop(node);
+        self.find_higher_commit_index();
 
-        // find 'n' such that n > commit_index AND forall peer. match_index[peer] >= n
-        // AND log[n].term = current_term
-        // we try to be optimistic, starting with the highest 'n' and going down
-
-        let maximal_n = node.storage.len() - 1;
-
-        // (if node is committed, commit_index + 1 == storage.len(), hence why we use 'min)
-        let minimal_n = node.commit_index.map(|i| i + 1).unwrap_or(0)
-            .min(maximal_n);
-
-        assert!(minimal_n <= maximal_n, "index math sanity check");
-
-        trace!("match index increased, testing from {} to {}", maximal_n, minimal_n);
-
-        for n in maximal_n ..= minimal_n
-        {
-            if node.storage.get(n).unwrap().term != node.current_term {
-                continue;
-            }
-            // check if a majority committed all entries up to 'n' (plus 1 for the leader itself)
-            if self.match_indices.values().filter(|v| **v >= Some(n)).count() + 1 >= node.quorum_size()
-            {
-                node.update_commit_index(Some(n));
-                return;
-
-                // note: this will indirectly trigger `on_commit` (by commit channel)
-                // It would've been slightly more efficient to call 'on_commit' here, but for
-                // the sake of uniformity, only the commit channel will trigger this.
-            }
-        }
     }
 
     #[instrument]
