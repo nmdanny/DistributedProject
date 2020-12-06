@@ -143,16 +143,17 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
         while self.match_index != last_log_index || !ran {
             ran = true;
             let node = self.node.borrow();
-            {
-                debug_span!("whileLoop",
-                peer_id=?self.id,
-                match_index=?self.match_index,
-                next_index=?self.next_index,
-                commit_index=?node.commit_index,
-                storage=?node.storage);
+            let span = debug_span!("whileLoopStart",
+                                    peer_id=?self.id,
+                                    match_index=?self.match_index,
+                                    next_index=?self.next_index,
+                                    commit_index=?node.commit_index,
+                                    storage=?node.storage
+            );
+            span.in_scope(|| {
                 debug!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
                        self.id, self.match_index, node.storage.last_log_index_term());
-            }
+            });
 
 
             assert!(self.next_index <= node.storage.len(), "if we're not synchronized, next_index must be valid");
@@ -162,8 +163,17 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
 
             drop(node);
             let res = self.send_ae(&transport, current_term, req).await?;
+            let node = self.node.borrow();
+            let span = info_span!("whileLoopEnd",
+                                  peer_id=?self.id,
+                                  match_index=?self.match_index,
+                                  next_index=?self.next_index,
+                                  commit_index=?node.commit_index,
+                                  recorded_last_log_index=?last_log_index,
+                                  storage=?node.storage);
+            drop(node);
 
-            if res.success &&  !is_heartbeat {
+            if res.success && !is_heartbeat {
                 let last_index = last_log_index
                     .expect("If this wasn't a heartbeat, last_log_index shouldn't be None");
                 self.next_index = last_index + 1;
@@ -171,12 +181,12 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                 self.match_index_sender.send((self.id, last_index)).unwrap_or_else(|e| {
                     error!("Peer couldn't send match index to leader: {:?}", e);
                 }).await;
-                debug!("Successfully replicated to peer {} values up to, including, index {}",
-                      self.id, last_index);
+                span.in_scope(|| {
+                    debug!("Successfully replicated to peer {} values up to, including, index {}",
+                           self.id, last_index);
+                });
                 return Ok(())
-            }
-            else if res.success {
-                debug!("heartbeat success");
+            } else if res.success {
                 return Ok(())
             }
 
