@@ -150,7 +150,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
                                     storage=?node.storage
             );
             span.in_scope(|| {
-                debug!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
+                trace!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
                        self.id, self.match_index, node.storage.last_log_index_term());
             });
 
@@ -414,7 +414,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
         let node = self.node.borrow();
         info!("became leader for term {}", node.current_term);
 
-        let (heartbeat_sender, heartbeat_receiver) = watch::channel(());
+        let (replicate_trigger, heartbeat_receiver) = watch::channel(());
         let (match_index_sender, mut match_index_receiver) = mpsc::channel(node.number_of_nodes);
         let (stale_sender, mut stale_receiver) = mpsc::channel(node.number_of_nodes);
         let all_other_nodes = node.all_other_nodes().collect::<Vec<_>>();
@@ -456,15 +456,14 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
             }
 
             tokio::select! {
-                // TODO - could this make us lose messages from receiver?
                 _ = heartbeat_interval.tick() => {
-                        heartbeat_sender.broadcast(()).unwrap_or_else(|e| {
+                        replicate_trigger.broadcast(()).unwrap_or_else(|e| {
                             error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
                         });
                 },
                 _ = self.replicate_receiver.next() => {
-                    heartbeat_sender.broadcast(()).unwrap_or_else(|e| {
-                        error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
+                    replicate_trigger.broadcast(()).unwrap_or_else(|e| {
+                        error!("Couldn't trigger replication, no peer replication streams: {:?}", e);
                     });
                 },
                 res = match_index_receiver.recv() => {
