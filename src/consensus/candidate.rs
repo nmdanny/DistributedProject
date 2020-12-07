@@ -139,16 +139,18 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
 
         let ls = tokio::task::LocalSet::new();
         ls.run_until(async move {
+            let mut elections_in_a_row = 0;
         // loop for multiple consecutive elections(1 or more)
         loop {
 
+            elections_in_a_row += 1;
             // start an election, updating node state and sending vote requests
             let mut election_state = self.start_election().await?;
             let mut _lost = false;
 
             let duration = generate_election_length();
             let election_end = tokio::time::Instant::now() + duration;
-            warn!("elections started, duration: {:?}", duration);
+            warn!("elections started({} elections in a row), duration: {:?}", elections_in_a_row, duration);
 
             // loop for a single election
             loop {
@@ -161,6 +163,8 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                 tokio::select! {
                     _ = election_end_fut => {
                         // election timed out, start another one
+                        warn!("elections timed out(got: {} yes, {} no), starting more elections",
+                               election_state.yes, election_state.no);
                         break;
                     },
                     Some(vote) = election_state.vote_receiver.next() => {
