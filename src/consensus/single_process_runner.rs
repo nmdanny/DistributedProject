@@ -10,12 +10,11 @@ pub extern crate derivative;
 use anyhow::Error;
 use std::collections::HashMap;
 use async_trait::async_trait;
-use tokio::sync::{RwLock, Barrier, broadcast, watch, mpsc};
+use tokio::sync::{RwLock, Barrier, mpsc};
 use std::sync::Arc;
 use tracing_futures::Instrument;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
 use dist_lib::consensus::client::{Client, SingleProcessClientTransport};
-use rand::distributions::{Distribution, Uniform};
 use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
@@ -152,6 +151,10 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
 
 const NUM_NODES: usize = 3;
 
+const CLIENTS: &[&str] = &[
+    "Banana", "Blueberry", "Falafel"
+];
+
 #[tokio::main(max_threads=1)]
 pub async fn main() -> Result<(), Error> {
     // set up logging
@@ -162,6 +165,7 @@ pub async fn main() -> Result<(), Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
             .add_directive("raft=info".parse()?)
             .add_directive("dist_lib=info".parse()?)
+            .add_directive("dist_lib[{vote_granted_too_late}]=off".parse()?)
             .add_directive("dist_lib[{net_err}]=off".parse()?)
         )
     .finish();
@@ -209,22 +213,37 @@ pub async fn main() -> Result<(), Error> {
         }
         join_handles.push(consistency.spawn_vec_checks().await);
 
-        // setup adversary and begin client messages
-        transport.set_omission_chance(0, 0.5).await;
+        // setup adversary for nodes
+        transport.set_omission_chance(0, 0.2).await;
+        transport.afflict_delays(NUM_NODES, 10 .. 150).await;
 
-        let mut client_transport = AdversaryClientTransport::new(
-            SingleProcessClientTransport::new(communicators)
-        );
+        // setup clients along with client adversaries
 
-        client_transport.request_omission_chance = 0.25;
-        client_transport.response_omission_chance = 0.25;
-        let mut client = Client::new(client_transport, NUM_NODES);
+        let mut client_handles = Vec::new();
+        for client_name in CLIENTS {
+            let communicators = communicators.clone();
+            let handle = tokio::task::spawn_local(async move {
+                let mut client_transport = AdversaryClientTransport::new(
+                    SingleProcessClientTransport::new(communicators)
+                );
 
-        // begin client
-        for i in 0 .. {
-            let ix = client.submit_value(format!("value {}", i)).await.expect("Submit value failed");
-            info!(">>>>>>>>>>>> client committed {} at index {}", i, ix);
+                client_transport.request_omission_chance = 0.25;
+                client_transport.response_omission_chance = 0.25;
+                let mut client = Client::new(client_name.to_string(),
+                                             client_transport, NUM_NODES);
+
+                // begin client
+                for i in 0 .. {
+                    let value = format!("{} value {}", client_name, i);
+                    let ix = client.submit_value(value).await.expect("Submit value failed");
+                    info!(">>>>>>>>>>>> client \"{}\" committed {} at index {}", client_name, i, ix);
+                }
+            }.instrument(info_span!("Client {}", client_name)));
+            client_handles.push(handle);
         }
+
+        futures::future::join_all(client_handles).await;
+
     }).await;
 
 

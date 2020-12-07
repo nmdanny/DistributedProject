@@ -52,6 +52,9 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
 /// values(by using their equality definition)
 pub struct Client<T: ClientTransport<V>, V: Value> {
 
+    /// Used to identify the client, for debugging purposes
+    pub client_name: String,
+
     #[derivative(Debug="ignore")]
     /// Used to communicate with the Node
     pub transport: T,
@@ -80,8 +83,9 @@ pub struct Client<T: ClientTransport<V>, V: Value> {
 
 impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
 {
-    pub fn new(transport: T, num_nodes: usize) -> Self {
+    pub fn new(client_name: String, transport: T, num_nodes: usize) -> Self {
         Client {
+            client_name,
             transport,
             leader: 0,
             num_nodes,

@@ -87,7 +87,26 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
         state.omission_chance.insert(id, chance);
     }
 
+    pub async fn afflict_omission_nodes(&self, count: usize, chance: f64)
+    {
+        use rand::seq::SliceRandom;
+        let mut candidates = (0 .. self.node_count).collect::<Vec<_>>();
+        candidates.shuffle(&mut rand::thread_rng());
+        for i in 0 .. count {
+            self.set_omission_chance(i, chance).await;
+        }
+    }
 
+    pub async fn afflict_delays(&self, count: usize, range: std::ops::Range<u64>) {
+        use rand::seq::SliceRandom;
+        let mut candidates = (0 .. self.node_count).collect::<Vec<_>>();
+        candidates.shuffle(&mut rand::thread_rng());
+        let mut state = self.state.write().await;
+        for i in 0 .. count {
+            state.delay_dist.insert(i, Uniform::from(range.clone()));
+        }
+
+    }
 }
 
 
