@@ -55,7 +55,7 @@ impl <V: Value> ThreadTransport<V> {
 #[async_trait(?Send)]
 impl <V: Value> Transport<V> for ThreadTransport<V> {
     #[instrument]
-    async fn send_append_entries(&self, to: usize, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, Error> {
+    async fn send_append_entries(&self, to: usize, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         let comm = {
             self.state.read().await.senders.get(&to).unwrap().clone()
         };
@@ -63,7 +63,7 @@ impl <V: Value> Transport<V> for ThreadTransport<V> {
     }
 
     #[instrument]
-    async fn send_request_vote(&self, to: usize, msg: RequestVote) -> Result<RequestVoteResponse, Error> {
+    async fn send_request_vote(&self, to: usize, msg: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         let comm = {
             self.state.read().await.senders.get(&to).unwrap().clone()
         };
@@ -160,8 +160,9 @@ pub async fn main() -> Result<(), Error> {
     let subscriber = FmtSubscriber::builder()
         .pretty()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("dist_lib=debug".parse()?)
-            .add_directive("raft=debug".parse()?)
+            .add_directive("raft=info".parse()?)
+            .add_directive("dist_lib=info".parse()?)
+            .add_directive("dist_lib[{net_err}]=off".parse()?)
         )
     .finish();
     tracing::subscriber::set_global_default(subscriber)

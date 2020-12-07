@@ -119,11 +119,14 @@ impl <'a, V: Value, T: Transport<V>> CandidateState<'a, V, T> {
                         trace!("got vote response {:?}", res);
                         tx.send(res.clone()).unwrap_or_else(|e| {
                             // TODO this isn't really an error, just the result of delays
-                            error!("Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
+                            error!(vote_granted_too_late=true, "Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
                         });
-                    }
+                    },
+                    Err(RaftError::NetworkError(e)) => {
+                        error!(net_err=true, "Network error when sending vote request: {}", e);
+                    },
                     Err(e) => {
-                        error!("Error when sending vote request: {}: ", e);
+                        error!("Misc Raft error when sending vote request: {}", e);
                     }
                 }
             }.instrument(info_span!("vote request", to=node_id)));

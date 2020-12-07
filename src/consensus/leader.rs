@@ -82,8 +82,8 @@ pub enum ReplicationLoopError {
     #[error("Stale leader error")]
     StaleLeaderError(StaleLeader),
 
-    #[error("Network error: {0}")]
-    NetworkError(anyhow::Error),
+    #[error("Peer error: {0}")]
+    PeerError(RaftError),
 }
 
 impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
@@ -108,7 +108,7 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
     {
         let res = transport.send_append_entries(self.id, req).await;
         trace!("send_ae, res: {:?}", res);
-        let res = res .map_err(ReplicationLoopError::NetworkError)?;
+        let res = res .map_err(ReplicationLoopError::PeerError)?;
         match res.meaning(current_term) {
             AEResponseMeaning::Ok => Ok(res),
             AEResponseMeaning::Conflict => Ok(res),
@@ -203,8 +203,8 @@ impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
         while let Some(()) = self.tick_receiver.next().await {
             match self.try_replication().await {
                 Ok(_) => {},
-                Err(ReplicationLoopError::NetworkError(e)) => {
-                    error!("Received IO error during replication stream for {}, will try again later: {}",
+                Err(ReplicationLoopError::PeerError(e)) => {
+                    error!(net_err=true, "Received IO error during replication stream for {}, will try again later: {}",
                            self.id, e);
                 },
                 Err(ReplicationLoopError::StaleLeaderError(stale)) => {

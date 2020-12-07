@@ -10,7 +10,7 @@ use crate::consensus::node_communicator::NodeCommunicator;
 use anyhow::Error;
 use rand::distributions::{Uniform, Bernoulli, Distribution};
 use async_trait::async_trait;
-use futures::Future;
+use futures::{Future, TryFutureExt};
 use std::boxed::Box;
 use tokio::time::Duration;
 use rand::distributions::uniform::UniformFloat;
@@ -96,13 +96,13 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
 
 #[async_trait(?Send)]
 impl <V: Value, T: Transport<V>> Transport<V> for AdversaryTransport<V, T> {
-    async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, Error> {
+    async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         self.adversary_request_response(msg.leader_id, to, async move {
             self.transport.send_append_entries(to, msg).await
         }).await
     }
 
-    async fn send_request_vote(&self, to: Id, msg: RequestVote) -> Result<RequestVoteResponse, Error> {
+    async fn send_request_vote(&self, to: Id, msg: RequestVote) -> Result<RequestVoteResponse, RaftError> {
         self.adversary_request_response(msg.candidate_id, to, async move {
             self.transport.send_request_vote(to, msg).await
         }).await
@@ -121,7 +121,7 @@ impl <V: Value, T: Transport<V>> Transport<V> for AdversaryTransport<V, T> {
 
 impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
     async fn adversary_request_response<R>(&self, from: Id, to: Id,
-                                           do_request: impl Future<Output = Result<R, Error>>) -> Result<R, Error>
+                                           do_request: impl Future<Output = Result<R, RaftError>>) -> Result<R, RaftError>
     {
         let mut rng = rand::thread_rng();
         let state = self.state.read().await;
@@ -137,7 +137,8 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
             .expect("omission chance must be in [0,1]")
             .sample(&mut rng)
         ).unwrap_or(false) {
-            return Err(anyhow::anyhow!("omission of request from peer {} to peer {}", from, to));
+            return Err(RaftError::NetworkError(
+                anyhow::anyhow!("omission of request from peer {} to peer {}", from, to)));
         }
         let res = do_request.await;
 
@@ -147,7 +148,8 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
             .expect("omission chance must be in [0,1]")
             .sample(&mut rng)
         ).unwrap_or(false) {
-            return Err(anyhow::anyhow!("omission of response from peer {} to peer {}", to, from));
+            return Err(RaftError::NetworkError(
+                anyhow::anyhow!("omission of response from peer {} to peer {}", to, from)));
         }
 
         res

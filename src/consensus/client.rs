@@ -8,6 +8,7 @@ use tokio::time::Duration;
 use async_trait::async_trait;
 use color_eyre::eyre::ContextCompat;
 use crate::consensus::timing::CLIENT_RETRY_DELAY_RANGE;
+use derivative;
 
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait(?Send)]
@@ -45,29 +46,35 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
     }
 }
 
-
+#[derive(Derivative)]
+#[derivative(Debug)]
 /// A generic client implementation that ensures it doesn't send duplicate requests when re-sending
 /// values(by using their equality definition)
 pub struct Client<T: ClientTransport<V>, V: Value> {
 
+    #[derivative(Debug="ignore")]
     /// Used to communicate with the Node
     pub transport: T,
 
     /// Current leader
     leader: Id,
 
+    #[derivative(Debug="ignore")]
     /// Numbers of nodes
     num_nodes: usize,
 
     /// The last commit index of a value that the client has submitted
     last_commit_index: Option<usize>,
 
+    #[derivative(Debug="ignore")]
     /// Maximal number of retries before giving up
     pub max_retries: usize,
 
+    #[derivative(Debug="ignore")]
     /// The number of time(in ms) to wait between re-try attempts
     pub retry_delay_ms: Uniform<u64>,
 
+    #[derivative(Debug="ignore")]
     phantom: std::marker::PhantomData<V>
 }
 
@@ -102,7 +109,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
     }
 
     /// Ensures that a given value is not committed
-    #[instrument(skip(self))]
+    #[instrument]
     async fn is_value_already_committed(&mut self, value: &V) -> Result<bool, Error> {
 
         let mut attempt = 0;
@@ -137,8 +144,14 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     warn!(commit_index = ?commit_index, ">>> client read request - bad range, how is this possible?");
                     self.last_commit_index = None;
                 }
-                Err(e) => {
-                    error!(">>> client encountered error: {}", e);
+                Err(RaftError::NetworkError(e)) => {
+                    error!(net_err=true, ">>> client encountered networking error: {}", e);
+                    self.set_leader(None);
+                }
+                Err(e) =>
+                {
+                    error!(">>> Client has determined that {} has an error: {}",
+                           self.leader, e);
                     self.set_leader(None);
                 }
             }
@@ -149,7 +162,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
         Err(anyhow::anyhow!("Couldn't ensure value is not committed after maximal number of retries"))
     }
 
-    #[instrument(skip(self))]
+    #[instrument]
     /// Submits a value, waits for it to be committed and returns the insertion index.
     /// In case of failure, it might retry up to `max_retries` before responding with an error.
     /// Moreover, in case of failure it ensures that its value wasn't already proposed
@@ -172,8 +185,12 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                 Ok(ClientWriteResponse::NotALeader {leader_id }) => {
                     self.set_leader(leader_id);
                 }
+                Err(RaftError::NetworkError(e)) => {
+                    error!(net_err=true, ">>> client encountered network error: {}", e);
+                    self.set_leader(None);
+                },
                 Err(e) => {
-                    error!(">>> client encountered error: {}", e);
+                    error!(">>> client received error: {}", e);
                     self.set_leader(None);
                 }
             }
