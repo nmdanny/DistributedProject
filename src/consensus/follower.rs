@@ -76,8 +76,11 @@ impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, 
         }
 
         if self.node.leader_id != Some(req.leader_id) {
-            assert!(req.term > self.node.current_term,
-                "If there's a mismatch between leaders, the term must have changed(increased)");
+            // It is impossible to have two different leaders at the same term,
+            // Because that would imply each of them got a majority of votes for said term,
+            // But a node cannot vote for two different leaders at the same term
+            assert_ne!(req.term, self.node.current_term,
+                       "If there's a mismatch between leaders, the term must have changed(increased)");
         }
         self.node.leader_id = Some(req.leader_id);
 
