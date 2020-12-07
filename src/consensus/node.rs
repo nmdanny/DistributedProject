@@ -220,7 +220,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
     pub fn on_receive_request_vote(&mut self, req: &RequestVote) -> Result<RequestVoteResponse, RaftError> {
         // 1. Our term is more updated
         if self.current_term > req.term {
-            info!(cur_term=self.current_term, vote_term=req.term,
+            debug!(cur_term=self.current_term, vote_term=req.term,
                    "My term is more up-to-date, ignoring vote request");
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
@@ -230,7 +230,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
         self.try_update_term(req.term, None);
 
         if self.voted_for.is_some() && self.voted_for != Some(req.candidate_id) {
-            info!(cur_vote=self.voted_for.unwrap(),
+            debug!(cur_vote=self.voted_for.unwrap(),
                   "I already voted for someone else, ignoring vote request",
                  );
             return Ok(RequestVoteResponse::vote_no(self.current_term));
@@ -243,7 +243,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
 
-        info!("I voted for {}", req.candidate_id);
+        debug!("I voted for {}", req.candidate_id);
         self.voted_for = Some(req.candidate_id);
         return Ok(RequestVoteResponse::vote_yes(self.current_term));
     }
