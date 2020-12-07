@@ -8,7 +8,7 @@ use core::option::Option::{None, Some};
 use core::result::Result::Ok;
 use async_trait::async_trait;
 use tokio::stream::StreamExt;
-use crate::consensus::candidate::generate_election_length;
+use crate::consensus::timing::generate_election_length;
 
 /// State used by a follower
 #[derive(Debug)]

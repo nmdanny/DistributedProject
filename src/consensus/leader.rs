@@ -15,8 +15,7 @@ use std::cell::{Cell, RefCell};
 use tokio::sync::watch::Ref;
 use thiserror::Error;
 use tokio::task;
-
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1000);
+use crate::consensus::timing::HEARTBEAT_INTERVAL;
 
 #[derive(Derivative)]
 #[derivative(Debug)]

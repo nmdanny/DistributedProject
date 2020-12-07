@@ -7,6 +7,7 @@ use tracing::Instrument;
 use tokio::time::Duration;
 use async_trait::async_trait;
 use color_eyre::eyre::ContextCompat;
+use crate::consensus::timing::CLIENT_RETRY_DELAY_RANGE;
 
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait(?Send)]
@@ -79,7 +80,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
             num_nodes,
             last_commit_index: None,
             max_retries: 100,
-            retry_delay_ms: Uniform::new(300, 800),
+            retry_delay_ms: Uniform::from(CLIENT_RETRY_DELAY_RANGE),
             phantom: Default::default()
         }
     }

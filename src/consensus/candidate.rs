@@ -9,16 +9,7 @@ use crate::consensus::node_communicator::CommandHandler;
 use tracing_futures::Instrument;
 use async_trait::async_trait;
 use anyhow::Error;
-
-pub const MIN_ELECTION_TIMEOUT_MS: u64 = 1500;
-pub const MAX_ELECTION_TIMEOUT_MS: u64 = 3000;
-
-pub fn generate_election_length() -> Duration {
-    use rand::distributions::{Distribution, Uniform};
-    let between = Uniform::from(MIN_ELECTION_TIMEOUT_MS .. MAX_ELECTION_TIMEOUT_MS);
-    let mut rng = rand::thread_rng();
-    Duration::from_millis(between.sample(&mut rng))
-}
+use crate::consensus::timing::generate_election_length;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ElectionResult {

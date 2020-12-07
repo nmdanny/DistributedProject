@@ -8,3 +8,4 @@ pub mod follower;
 pub mod candidate;
 pub mod leader;
 pub mod client;
+pub mod timing;
