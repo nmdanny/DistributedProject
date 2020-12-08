@@ -151,9 +151,62 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
 
 const NUM_NODES: usize = 3;
 
-const CLIENTS: &[&str] = &[
-    "Banana", "Blueberry", "Falafel"
-];
+
+/// A single threaded instance of many nodes and clients
+pub struct Scenario<V: Value> {
+    pub communicators: Vec<NodeCommunicator<V>>,
+    pub server_transport: AdversaryTransport<V, ThreadTransport<V>>,
+    pub clients: Vec<Client<AdversaryClientTransport<V, SingleProcessClientTransport<V>>, V>>,
+    pub consistency_join_handle: JoinHandle<()>
+}
+
+impl <V: Value> Scenario<V> {
+    pub async fn setup(num_nodes: usize, num_clients: usize) -> Self
+    {
+        let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
+        let (nodes, communicators) = futures::future::join_all(
+            (0 .. num_nodes).map(|i|
+                NodeCommunicator::create_with_node(i,
+                                                   num_nodes,
+                                                   server_transport.clone()))
+            )
+            .await.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
+        let mut clients = Vec::new();
+        for i in 0 .. num_clients {
+            let client_transport = AdversaryClientTransport::new(
+                SingleProcessClientTransport::new(communicators.clone()));
+            let client = Client::new(format!("Client {}", i), client_transport, num_nodes);
+            clients.push(client);
+        }
+
+        // spawn all consistency checkers
+        // setup a task to ensure all nodes are consistent
+        let mut consistency = ConsistencyCheck::new();
+        for (id, comm) in (0..).zip(communicators.clone()) {
+            consistency.subscribe(id, &comm).await.unwrap();
+        }
+
+        let consistency_join_handle = consistency.spawn_vec_checks().await;
+
+        // spawn all nodes
+        for node in nodes.into_iter() {
+            let id = node.id;
+            tokio::task::spawn_local(async move {
+                node.run_loop()
+                    .instrument(tracing::info_span!("node-loop", node.id = id))
+                    .await
+                    .unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
+            });
+        }
+
+        Scenario {
+            communicators,
+            server_transport,
+            clients,
+            consistency_join_handle
+        }
+    }
+}
 
 #[tokio::main(max_threads=1)]
 pub async fn main() -> Result<(), Error> {
@@ -172,80 +225,39 @@ pub async fn main() -> Result<(), Error> {
     tracing::subscriber::set_global_default(subscriber)
         .expect("Couldn't set up default tracing subscriber");
 
-
-    // initializing all nodes and their communicators
-    let transport = AdversaryTransport::new(
-        ThreadTransport::<String>::new(NUM_NODES),
-        NUM_NODES);
-    let node_and_comms_fut = futures::future::join_all(
-        (0 .. NUM_NODES).map(|i| {
-            NodeCommunicator::create_with_node(i, NUM_NODES, transport.clone())
-        })
-    );
-
-    let (nodes, communicators): (Vec<_>, Vec<_>) = node_and_comms_fut.await
-        .into_iter().unzip();
-
-
-    let mut handles = Vec::new();
     let ls = tokio::task::LocalSet::new();
     ls.run_until(async move {
+        let setup = Scenario::setup(NUM_NODES, 5).await;
+        setup.server_transport.set_omission_chance(0, 0.2).await;
+        setup.server_transport.afflict_delays(NUM_NODES, 10 .. 150).await;
 
-
-        // spawn all nodes
-        for node in nodes.into_iter() {
-            let id = node.id;
-            let handle = tokio::task::spawn_local(async move {
-                node.run_loop()
-                    .instrument(tracing::info_span!("node-loop", node.id = id))
-                    .await
-                    .unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
-            });
-            handles.push(handle);
-        }
-
-
-        // setup a task to ensure all nodes are consistent
-        let mut consistency = ConsistencyCheck::new();
-        let mut join_handles = Vec::new();
-        for (id, comm) in (0..).zip(communicators.iter()) {
-            join_handles.push(consistency.subscribe(id, comm).await.unwrap());
-        }
-        join_handles.push(consistency.spawn_vec_checks().await);
-
-        // setup adversary for nodes
-        transport.set_omission_chance(0, 0.2).await;
-        transport.afflict_delays(NUM_NODES, 10 .. 150).await;
-
-        // setup clients along with client adversaries
-
+        // spawn clients
         let mut client_handles = Vec::new();
-        for client_name in CLIENTS {
-            let communicators = communicators.clone();
+        for mut client in setup.clients {
+            let name = client.client_name.clone();
             let handle = tokio::task::spawn_local(async move {
-                let mut client_transport = AdversaryClientTransport::new(
-                    SingleProcessClientTransport::new(communicators)
-                );
 
-                client_transport.request_omission_chance = 0.25;
-                client_transport.response_omission_chance = 0.25;
-                let mut client = Client::new(client_name.to_string(),
-                                             client_transport, NUM_NODES);
+                client.transport.request_omission_chance = 0.25;
+                client.transport.response_omission_chance = 0.25;
 
                 // begin client
                 for i in 0 .. {
-                    let value = format!("{} value {}", client_name, i);
+                    let value = format!("{} value {}", client.client_name, i);
                     let ix = client.submit_value(value).await.expect("Submit value failed");
-                    info!(">>>>>>>>>>>> client \"{}\" committed {} at index {}", client_name, i, ix);
+                    info!(">>>>>>>>>>>> client \"{}\" committed {} at index {}", client.client_name, i, ix);
                 }
-            }.instrument(info_span!("Client {}", client_name)));
+            }.instrument(info_span!("Client-loop", name=?name)));
             client_handles.push(handle);
         }
+        let clients_finish = futures::future::join_all(client_handles);
+        tokio::select! {
+            _ = clients_finish => {
+            },
+            _ = setup.consistency_join_handle => {
 
-        futures::future::join_all(client_handles).await;
-
+            }
+        }
     }).await;
-
 
     Ok(())
 }
