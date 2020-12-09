@@ -8,6 +8,7 @@ use core::option::Option::{None, Some};
 use core::result::Result::Ok;
 use async_trait::async_trait;
 use tokio::stream::StreamExt;
+use tokio::sync::watch;
 use crate::consensus::timing::generate_election_length;
 
 /// State used by a follower
@@ -15,9 +16,9 @@ use crate::consensus::timing::generate_election_length;
 pub struct FollowerState<'a, V: Value, T: Transport<V>> {
     pub node: &'a mut Node<V, T>,
 
-    /// The last time since we granted a vote or got a heartbeat from the leader
-    /// If more time passed than the election timeout, convert to a candidate. (§5.2)
-    pub time_since_last_heartbeat_or_grant_vote: Instant
+    /// Used to notify main loop that that a heartbeat was received/vote granted
+    pub heartbeat_or_grant_vote_watch: Option<watch::Sender<()>>,
+
 }
 
 impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
@@ -25,17 +26,23 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
     pub fn new(node: &'a mut Node<V, T>) -> Self {
         FollowerState {
             node,
-            time_since_last_heartbeat_or_grant_vote: Instant::now()
+            heartbeat_or_grant_vote_watch: None
         }
     }
 
+    fn update_timer(&mut self) {
+        self.heartbeat_or_grant_vote_watch.as_ref().unwrap().broadcast(()).unwrap();
+    }
 
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
         self.node.voted_for = None;
 
-
+        // setup timer
+        let (tx, mut rx) = watch::channel(());
+        self.heartbeat_or_grant_vote_watch = Some(tx);
         let timeout_duration = generate_election_length();
+        let mut delay_fut = tokio::time::delay_for(timeout_duration);
         info!("Became follower, timeout duration(no heartbeats/vote) is {:?}", timeout_duration);
 
         loop {
@@ -44,18 +51,17 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
                 return Ok(())
             }
 
-            // create a single timer for a heartbeat
-            let deadline = self.time_since_last_heartbeat_or_grant_vote + timeout_duration;
-            let delay = tokio::time::delay_until(tokio::time::Instant::from_std(deadline));
             tokio::select! {
-                _ = delay => {
-                        warn!("haven't received a heartbeat in too long, becoming candidate");
-                        self.node.change_state(ServerState::Candidate);
+                _ = &mut delay_fut => {
+                    warn!("haven't received a heartbeat/voted too long, becoming candidate");
+                    self.node.change_state(ServerState::Candidate);
                 },
                 res = self.node.receiver.as_mut().expect("follower - Node::receiver was None").next() => {
-                    // TODO can this channel close prematurely?
                     let cmd = res.unwrap();
                     self.handle_command(cmd);
+                },
+                Some(()) = rx.recv() => {
+                    delay_fut.reset(tokio::time::Instant::from_std(Instant::now() + timeout_duration));
                 }
             }
         }
@@ -85,7 +91,7 @@ impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, 
         self.node.leader_id = Some(req.leader_id);
 
         // update heartbeat to prevent switch to candidate
-        self.time_since_last_heartbeat_or_grant_vote = Instant::now();
+        self.update_timer();
 
         // continue with the default handling of append entry
         return self.node.on_receive_append_entry(req);
@@ -98,7 +104,7 @@ impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, 
         match res.as_ref() {
             Ok(res) if res.vote_granted => {
                 // if we granted a vote, delay switch to candidate
-                self.time_since_last_heartbeat_or_grant_vote = Instant::now();
+                self.update_timer();
             }
             _ => {}
         }
