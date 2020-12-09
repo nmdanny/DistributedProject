@@ -152,9 +152,11 @@ pub enum RaftError {
     #[error("Internal Error: {0}")]
     InternalError(anyhow::Error),
 
-    /// An error
     #[error("Communicator Error: {0}")]
-    CommunicatorError(anyhow::Error)
+    CommunicatorError(anyhow::Error),
+
+    #[error("Timeout error: {0}")]
+    TimeoutError(anyhow::Error)
 }
 
 pub type RaftResult<T> = Result<T, RaftError>;

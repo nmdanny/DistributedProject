@@ -7,8 +7,10 @@ use tracing::Instrument;
 use tokio::time::Duration;
 use async_trait::async_trait;
 use color_eyre::eyre::ContextCompat;
-use crate::consensus::timing::CLIENT_RETRY_DELAY_RANGE;
+use crate::consensus::timing::{CLIENT_RETRY_DELAY_RANGE, CLIENT_TIMEOUT};
+use tokio::time::timeout;
 use derivative;
+use futures::TryFutureExt;
 
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait(?Send)]
@@ -20,13 +22,15 @@ pub trait ClientTransport<V: Value> {
 
 pub struct SingleProcessClientTransport<V: Value>
 {
-    communicators: Vec<NodeCommunicator<V>>
+    communicators: Vec<NodeCommunicator<V>>,
+    timeout_duration: Duration
 }
 
 impl <V: Value> SingleProcessClientTransport<V> {
     pub fn new(communicators: Vec<NodeCommunicator<V>>) -> Self {
         SingleProcessClientTransport {
-            communicators
+            communicators,
+            timeout_duration: CLIENT_TIMEOUT
         }
     }
 }
@@ -34,15 +38,22 @@ impl <V: Value> SingleProcessClientTransport<V> {
 #[async_trait(?Send)]
 impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
     async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError> {
-        self.communicators.get(node_id).expect("Invalid node ID").submit_value(ClientWriteRequest {
+        let fut = self.communicators.get(node_id).expect("Invalid node ID").submit_value(ClientWriteRequest {
             value
-        }).await
+        });
+        timeout(self.timeout_duration, fut).map_err(|e| RaftError::TimeoutError(
+            anyhow::anyhow!("client did not receive response to submit_value in enough time")
+        )).await?
     }
 
     async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
-        self.communicators.get(node_id).expect("Invalid node ID").request_values(ClientReadRequest {
+        let fut = self.communicators.get(node_id).expect("Invalid node ID").request_values(ClientReadRequest {
             from, to
-        }).await
+        });
+        timeout(self.timeout_duration, fut).map_err(|e| RaftError::TimeoutError(
+            anyhow::anyhow!("client did not receive response to request_values in enough time")
+        )).await?
+
     }
 }
 
