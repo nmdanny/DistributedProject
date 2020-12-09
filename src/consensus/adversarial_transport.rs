@@ -64,6 +64,7 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
     #[instrument]
     pub async fn set_omission_chance(&self, id: Id, chance: f64) -> bool
     {
+        assert!(chance >= 0.0 && chance <= 1.0, "invalid chance");
         let mut state = self.state.write().await;
         let f = state.omission_chance.len();
         let n = self.node_count;
@@ -83,12 +84,14 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
     /// Sets the omission chance for given node ID, even if that would break
     pub async fn force_set_omission_chance(&self, id: Id, chance: f64)
     {
+        assert!(chance >= 0.0 && chance <= 1.0, "invalid chance");
         let mut state = self.state.write().await;
         state.omission_chance.insert(id, chance);
     }
 
     pub async fn afflict_omission_nodes(&self, count: usize, chance: f64)
     {
+        assert!(chance >= 0.0 && chance <= 1.0, "invalid chance");
         use rand::seq::SliceRandom;
         let mut candidates = (0 .. self.node_count).collect::<Vec<_>>();
         candidates.shuffle(&mut rand::thread_rng());
@@ -144,18 +147,19 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
     {
         let mut rng = rand::thread_rng();
         let state = self.state.read().await;
-        let req_omission = state.omission_chance.get(&from).copied();
+        let req_omission = state.omission_chance.get(&from).copied().unwrap_or(0.0);
         let req_delay =  state.delay_dist.get(&from).unwrap().sample(&mut rng);
-        let res_omission = state.omission_chance.get(&to).copied();
+        let res_omission = state.omission_chance.get(&to).copied().unwrap_or(0.0);
         let res_delay =  state.delay_dist.get(&to).unwrap().sample(&mut rng);
         std::mem::drop(state);
 
+
+        let requester_omission = Bernoulli::new(req_omission).expect("omission chance must be in [0,1]");
+        let responder_omission = Bernoulli::new(res_omission).expect("omission chance must be in [0,1]");
+
         tokio::time::delay_for(Duration::from_millis(req_delay)).await;
 
-        if req_omission.map(|p| Bernoulli::new(p)
-            .expect("omission chance must be in [0,1]")
-            .sample(&mut rng)
-        ).unwrap_or(false) {
+        if requester_omission.sample(&mut rng) || responder_omission.sample(&mut rng) {
             return Err(RaftError::NetworkError(
                 anyhow::anyhow!("omission of request from peer {} to peer {}", from, to)));
         }
@@ -163,10 +167,7 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
 
         tokio::time::delay_for(Duration::from_millis(res_delay)).await;
 
-        if res_omission.map(|p| Bernoulli::new(p)
-            .expect("omission chance must be in [0,1]")
-            .sample(&mut rng)
-        ).unwrap_or(false) {
+        if responder_omission.sample(&mut rng) || responder_omission.sample(&mut rng) {
             return Err(RaftError::NetworkError(
                 anyhow::anyhow!("omission of response from peer {} to peer {}", to, from)));
         }
