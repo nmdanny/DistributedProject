@@ -142,8 +142,8 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     return match val_index_in_range {
                         Some(index) => {
                             self.last_commit_index = Some(self.last_commit_index
-                                .map(|i| i + 1)
-                                .unwrap_or(0) + index);
+                                .map(|i| i + index)
+                                .unwrap_or(index));
                             Ok(true)
                         }
                         None => {
