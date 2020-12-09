@@ -3,42 +3,6 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/target/debug/build/practical_ex1-1e1e1c676b3c993e/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/anyhow-3b0d4dd9c31c59f1/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/pin-project-internal-8a73054ccf0b2033/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/syn-5c41ea06062f3809/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/proc-macro2-42e64f4ebf03a755/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/libc-0b7a02b532051c67/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/winapi-8f2d17c598e77f4f/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/log-69378fdff41a40b7/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/bitflags-8b602a8e6a84c38e/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/kernel32-sys-d246ecef3e8e232a/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/ws2_32-sys-2440fd2b52a5cea7/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/memchr-7ec2d4c23eb16d3a/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/proc-macro-hack-459d0e8d7529fd0a/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/proc-macro-nested-6c689eca2b36fc17/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/getrandom-b31007c67c0875de/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/prost-build-e8c020e6eb45fe6e/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/indexmap-70e5e8bd5ae0caca/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/proc-macro-error-e4bafe3f8f338458/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/proc-macro-error-attr-c71be04bcf9905a5/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/httparse-f32720d17668a2c1/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/tokio-172445ffcb6e251d/out" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/target/debug/build/practical_ex1-7d83a62416d7f51d/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/syn-ea622b4609eb9bba/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/winapi-566002eafbbb2de5/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/serde-ca7439b1abc92d66/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/serde_derive-7575d68c6eeb2047/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/serde_json-f8b121ee3b3f010e/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/ryu-27ce48e043ea4f1f/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/num-traits-ac84da2bc8155e03/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/num-integer-1b1acd34a68a98bc/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/byteorder-014daa6a1313f91a/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/crossbeam-utils-fdbeb848dc65e4bf/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/const_fn-c27b0b5cb8dc1e71/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/memoffset-f5c8fb63db3c06c8/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/eyre-11a50ef4b7df6ee0/out" isTestSource="false" />
-      <sourceFolder url="file://$USER_HOME$/University/dist/practical_ex1/target/debug/build/miniz_oxide-14205c2692b4e3bf/out" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
