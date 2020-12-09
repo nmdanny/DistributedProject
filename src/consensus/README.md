@@ -62,8 +62,95 @@ is a chance that their proposed value was committed but they're not aware - I ha
 to read the latest portion of the log, and ensuring the value isn't there before submitting the value again.
 
 
+# Demo
+
+## Simple Crash
+
+See `single_process_runner.rs` test `simple_crash`
+
+## Random omission of clients and server
+
+Run the executable (`single_process_runner.rs`) - there is a background task which tests
+consistency (every entry which is committed, was committed to all logs, and there are no holes between committed entries)
+
+Each client is trying to send his own values(labelled with the client name, beginning from 0): a client waits for a
+response from the leader to confirm his value was committed before proceeding to the next one, and in case of an error
+(e.g, timeout, or leader redirect) he will try another node(the leader, in case of a redirect, otherwise he will randomly
+guess)
+
+## Minimal configuration
+
+Consider the following scenario, we have 3 nodes and various clients, at first, node 0 is a leader, nodes 1,2 are followers.
+
+Suppose a client wants to commit a value 'X', the following is the minimal amount of messages in the system:
+
+```
+Client -> ClientWriteRequest('X') -> Node 0
+Node 0 -> AppendEntries(entries: ['X'], prev_log_index_term: None, term: 0, leader_id: 0, leader_commit: None) -> Node 1 or 2 (w.l.o.g 0)
+Node 1 -> AppendEntriesResponse(success: true, term: 0) -> Node 0
+```
+
+At this point, node 0 sees that a majority accepted his AE request - himself, and node 1, and so he considers the entry
+committed, and responds to the client appropriately. The adversary cannot influence the commit decision, consider the following cases:
+
+1. If he omits the response to the client(a client omission), the client will re-try. By my implementation of the client,
+  the client will ensure the value he's proposing wasn't already committed, so, if he queries node 0 successfully, node 0
+  will tell him his value was already committed at index 0.
+  
+  Further omissions of messages between the client and node 0 will cause him to switch to a different node, but as long as
+  leader 0 is a leader, the other nodes will simply redirect him back to node 0. So safety isn't broken.
+  
+2. Suppose node 0 crashes now(and node 2 didn't see the `AppendEntries` request yet)
+   After a short period of inactivity, one of the nodes will start an election:
+   
+   1. if node 1 starts the election and sends a `VoteRequest(term: 1, candidate: 1, last_log_index_term: (0, 0))` to node 2,
+      then his vote will be accepted by node 2, since his log is more up-to-date (his log is longer).
+      As a result, node 2 will become the leader, he'll send a heartbeat to node 1, and replicate to him his log(the value ['X']),
+      via a similar flow: 
+      ```
+      Node 1: AppendEntries(entries: ['X'], prev_log_index_term: None, term: 1, leader_id: 1, leader_commit: None)` -> Node 2
+      Node 2 -> AppendEntriesResponse(success: true, term: 1) -> Node 1
+      ```
+      
+      By the same logic as before, Node 1 now considers `['X']` committed.
+  
+   2. If node 2 starts the election and sends a `VoteRequest(term: 1, candidate: 2, last_log_index_term: None)` to node 1,
+      his vote will be rejected since node 1's log is more updated. When node 1 sends him a vote, node 2 rejects it because
+      every candidate only votes for himself in a given term. Since both of nodes 1 and 2 can't get any votes, they will eventually restart the election.
+      
+      Supposedly, we might have a deadlock issue, but this is solved by randomness - each node generates a random timeout
+      until re-election, so eventually Node 1 will start an election of higher term and send a vote to node 2 who is in an older term,
+      and thus node 2 will be forced to accept his vote. The rest of the proof is as the previous case
+    
+So, this is a short explanation why value 'X' was committed. To show that this is minimal committed configuration, consider 
+the scenario where the message `AppendEntriesResponse` is omitted, then the following message flow can cause a different
+value to be committed:
+
+```
+Node 1 -> RequestVote(term: 1, candidate: 1, last_log_index_term: (0, 0)) -> Node 2
+Node 2 -> RequestVoteResponse(term: 1, granted: true) -> Node 1
+Node 1 -> AppendEntries(entries: [], prev_log_index_term: None, term: 1, leader_id: 1, leader_commit: None) -> Node 2
+Node 2 -> AppendEntriesResponse(success: True, term: 1) -> Node 1
+Client -> ClientWriteRequest('Y') -> Node 1
+Node 1 -> AppendEntries(entries: ['Y'], prev_log_index_term: None, term: 1, leader_id: 1, leader_commit: None) -> Node 2
+Node 2 -> AppendEntriesResponse(success: True, term: 1) -> Node 1
+Node 1 -> ClientWriteResponse(WriteOk { commit_index: 0 }) -> Client
+```
+  
+In this scenario, node 0 became partitioned after receiving 'X' in his log, and no other node became aware of 'X'
+Eventually, an election starts, w.l.o.g node 1 wins the election, and by similar flow to what was explained before, he
+receives a different client request 'Y' and commits a different value.
+
+Another possible scenario is one in which node 1 received the `AppendEntries` request, has sent out an `AppendRentriesResponse`,
+but node 0 crashed before receiving that response. Either way, both node 1 and node 2's views are identical to what I explained
+in `2`, therefore the value 'X' will be committed, because even if a client makes a different request `Y` - he must wait
+for someone to be elected leader, and the leader will have necessarily seen `X` first.
+
+To conclude, we've seen that if the `AppendEntriesResponse` message is omitted, there are two possible deciding configurations
+afterwards, which implies that the flow I described at the beginning is the minimal committed configuration.
+
 ## References
 
-- Overall program design is heavily based on [async-raft](https://github.com/async-raft/async-raft/)
+- Overall program design is inspired by [async-raft](https://github.com/async-raft/async-raft/)
 - [Implementing Raft](https://eli.thegreenplace.net/2020/implementing-raft-part-1-elections/)
 - The raft [specification](https://raft.github.io/raft.pdf)
