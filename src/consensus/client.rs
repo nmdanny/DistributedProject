@@ -156,8 +156,9 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     self.set_leader(leader_id);
                 },
                 Ok(ClientReadResponse::BadRange { commit_index }) => {
-                    warn!(commit_index = ?commit_index, ">>> client read request - bad range, how is this possible?");
-                    self.last_commit_index = None;
+                    // warn!(commit_index = ?commit_index, last_commit_index = ?self.last_commit_index,
+                    //       ">>> client read request - bad range, how is this possible?");
+                    self.last_commit_index = None.max(commit_index);
                 }
                 Err(RaftError::NetworkError(e)) => {
                     error!(net_err=true, ">>> client encountered networking error: {}", e);
