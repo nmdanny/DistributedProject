@@ -14,7 +14,7 @@ use tokio::sync::{RwLock, Barrier, mpsc};
 use std::sync::Arc;
 use tracing_futures::Instrument;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
-use dist_lib::consensus::client::{Client, SingleProcessClientTransport};
+use dist_lib::consensus::client::{Client, SingleProcessClientTransport, ClientTransport};
 use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
@@ -123,17 +123,23 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
         }.instrument(info_span!("ConsistencyChecks_CommitChannelReader"))))
     }
 
-    pub async fn spawn_vec_checks(mut self) -> JoinHandle<()> {
-        tokio::task::spawn_local(async move {
+    pub async fn spawn_vec_checks(mut self) -> (JoinHandle<()>, mpsc::UnboundedReceiver<LogEntry<V>>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::task::spawn_local(async move {
             let mut view = BTreeMap::<usize, LogEntry<V>>::new();
             loop {
                 let res = self.notifier.next().await;
                 assert!(res.is_some(), "ConsistencyCheck notifier should never be closed");
                 let commit_entry = res.unwrap();
                 let entry = LogEntry { term: commit_entry.term, value: commit_entry.value.clone()};
-                    match view.entry(commit_entry.index) {
+                assert!(commit_entry.index == 0 || view.contains_key(&(commit_entry.index - 1)),
+                        "Cannot have commit holes");
+                match view.entry(commit_entry.index) {
                     Entry::Vacant(e) => {
-                        e.insert(LogEntry { value: entry.value, term: entry.term});
+                        let entry = LogEntry { value: entry.value, term: entry.term};
+                        e.insert(entry.clone());
+                        let _ = tx.send(entry);
+
                     },
                     Entry::Occupied(o) => {
                         let occ_entry = o.get();
@@ -144,12 +150,14 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
                     }
                 }
             }
-        }.instrument(info_span!("ConsistencyChecks_LogChecker")))
+        }.instrument(info_span!("ConsistencyChecks_LogChecker")));
+        return (handle, rx)
     }
 
 }
 
 const NUM_NODES: usize = 3;
+const NUM_CLIENTS: usize = 2;
 
 
 /// A single threaded instance of many nodes and clients
@@ -161,7 +169,7 @@ pub struct Scenario<V: Value> {
 }
 
 impl <V: Value> Scenario<V> {
-    pub async fn setup(num_nodes: usize, num_clients: usize) -> Self
+    pub async fn setup(num_nodes: usize, num_clients: usize) -> (Self, mpsc::UnboundedReceiver<LogEntry<V>>)
     {
         let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
         let (nodes, communicators) = futures::future::join_all(
@@ -186,7 +194,7 @@ impl <V: Value> Scenario<V> {
             consistency.subscribe(id, &comm).await.unwrap();
         }
 
-        let consistency_join_handle = consistency.spawn_vec_checks().await;
+        let (consistency_join_handle, rx) = consistency.spawn_vec_checks().await;
 
         // spawn all nodes
         for node in nodes.into_iter() {
@@ -199,18 +207,26 @@ impl <V: Value> Scenario<V> {
             });
         }
 
-        Scenario {
+        (Scenario {
             communicators,
             server_transport,
             clients,
             consistency_join_handle
-        }
+        }, rx)
     }
 }
 
-#[tokio::main(max_threads=1)]
-pub async fn main() -> Result<(), Error> {
-    // set up logging
+
+/// A simple scenario where each client sends strings 0, 1, 2 and so on
+async fn client_message_loop<T: ClientTransport<String>>(client: &mut Client<T, String>) {
+    for i in 0 .. {
+        let value = format!("{} value {}", client.client_name, i);
+        let ix = client.submit_value(value).await.expect("Submit value failed");
+        info!(">>>>>>>>>>>> client \"{}\" committed {} at index {}", client.client_name, i, ix);
+    }
+}
+
+pub fn setup_logging() -> Result<(), Error> {
     color_eyre::install().unwrap();
     use tracing_subscriber::FmtSubscriber;
     let subscriber = FmtSubscriber::builder()
@@ -221,15 +237,31 @@ pub async fn main() -> Result<(), Error> {
             .add_directive("dist_lib[{vote_granted_too_late}]=off".parse()?)
             .add_directive("dist_lib[{net_err}]=off".parse()?)
         )
-    .finish();
+        .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("Couldn't set up default tracing subscriber");
+    Ok(())
+}
+
+
+/// This tests the 'Random omission of clients and server' scenario
+#[tokio::main(max_threads=1)]
+pub async fn main() -> Result<(), Error> {
+    setup_logging()?;
+
 
     let ls = tokio::task::LocalSet::new();
     ls.run_until(async move {
-        let setup = Scenario::setup(NUM_NODES, 5).await;
-        setup.server_transport.set_omission_chance(0, 0.2).await;
-        setup.server_transport.afflict_delays(NUM_NODES, 10 .. 150).await;
+        let (setup, _) = Scenario::setup(NUM_NODES, NUM_CLIENTS).await;
+        /* note, a 0.5 fail probability includes both failures on the request side or response side
+           of the afflicted node/client
+           By inclusion/exclusion principle:
+           0.5 = P(fail) = P(request fail) + P(response fail) - P(request fail)*P(response faiL)
+           Suppose P(request fail) = P(response fail) for simplicity, so the answer is
+           P(request fail) = P(response fail) = 0.292
+         */
+        setup.server_transport.set_omission_chance(0, 0.292).await;
+        // setup.server_transport.afflict_delays(NUM_NODES, 10 .. 150).await;
 
         // spawn clients
         let mut client_handles = Vec::new();
@@ -237,15 +269,10 @@ pub async fn main() -> Result<(), Error> {
             let name = client.client_name.clone();
             let handle = tokio::task::spawn_local(async move {
 
-                client.transport.request_omission_chance = 0.25;
-                client.transport.response_omission_chance = 0.25;
+                client.transport.request_omission_chance = 0.292;
+                client.transport.response_omission_chance = 0.292;
 
-                // begin client
-                for i in 0 .. {
-                    let value = format!("{} value {}", client.client_name, i);
-                    let ix = client.submit_value(value).await.expect("Submit value failed");
-                    info!(">>>>>>>>>>>> client \"{}\" committed {} at index {}", client.client_name, i, ix);
-                }
+                client_message_loop(&mut client).await;
             }.instrument(info_span!("Client-loop", name=?name)));
             client_handles.push(handle);
         }
@@ -262,5 +289,40 @@ pub async fn main() -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::task;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    pub async fn simple_crash() {
+        let ls = task::LocalSet::new();
+        setup_logging().unwrap();
+        ls.run_until(async move {
+            let (scenario, rx) = Scenario::<u32>::setup(3, 1).await;
+            let Scenario { mut clients, server_transport, ..} = scenario;
+            
+            let client_jh = task::spawn_local(async move {
+                // submit first value
+                clients[0].submit_value(100).await.unwrap();
+
+                // "crash" server 0 by preventing it from sending/receiving messages to other nodes
+                server_transport.set_omission_chance(0, 1.0).await;
+
+                // submit second value
+                clients[0].submit_value(200).await.unwrap();
+
+            });
+
+            let res = rx.take(2).map(|e| e.value).collect::<Vec<_>>().await;
+            assert_eq!(res, vec![100, 200]);
+
+            client_jh.await.unwrap();
+
+        }).await;
+        
 
 
+    }
+}
