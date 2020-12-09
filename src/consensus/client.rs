@@ -41,7 +41,7 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
         let fut = self.communicators.get(node_id).expect("Invalid node ID").submit_value(ClientWriteRequest {
             value
         });
-        timeout(self.timeout_duration, fut).map_err(|e| RaftError::TimeoutError(
+        timeout(self.timeout_duration, fut).map_err(|_| RaftError::TimeoutError(
             anyhow::anyhow!("client did not receive response to submit_value in enough time")
         )).await?
     }
@@ -50,7 +50,7 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
         let fut = self.communicators.get(node_id).expect("Invalid node ID").request_values(ClientReadRequest {
             from, to
         });
-        timeout(self.timeout_duration, fut).map_err(|e| RaftError::TimeoutError(
+        timeout(self.timeout_duration, fut).map_err(|_| RaftError::TimeoutError(
             anyhow::anyhow!("client did not receive response to request_values in enough time")
         )).await?
 
