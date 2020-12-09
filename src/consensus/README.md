@@ -1,16 +1,22 @@
 # Exercise 2 - Synchronous consensus, n > 2f
 
-I decided to implement the Raft protocol, despite the fact we've not learnt it in class, it turns out to be simpler to
-implement:
+I decided to implement the Raft protocol, which turns to be easier to implement than Paxos:
 
 - It has a [clear specification](https://raft.github.io/raft.pdf) including pseudo-code, in contrast to Multi-Paxos
-  which has many wildly varying implementations
+  which has many different implementations
   
 - It is simpler to implement and reason about: the data flows from the leader to the followers, and uses a request-response
-  model with only 1 phase: Once a leader is elected, he merely sends append requests, and upon receiving enough responses
-  can consider the data a majority
+  model with only 1 phase: Only the leader can send append requests to affect a node's log, and upon receiving enough responses
+  can consider the data as committed. Unlike Multi-Paxos, we don't need a catch-up mechanism, as by the way leader election
+  works, any node who is elected leader must have all committed entries in his log.
   
-## Design/Implementation
+There are various pros and cons to using Raft versus Multi-Paxos, for example, Raft is chattier in the case of failure/leader
+election, but in the stable case its performance is as good as Paxos. There are more optimizations and features in the paper
+(like log compaction and dynamic membership) which I did not implement, but the fact they're all outlined in the paper is another
+advantage of Raft.
+
+  
+# Design/Implementation
 
 The `Node` struct contains all state used by a server in any state
 There are several state objects that borrow `Node`: `FollowerState`, `CandidateState`, `LeaderState`
@@ -149,7 +155,7 @@ for someone to be elected leader, and the leader will have necessarily seen `X` 
 To conclude, we've seen that if the `AppendEntriesResponse` message is omitted, there are two possible deciding configurations
 afterwards, which implies that the flow I described at the beginning is the minimal committed configuration.
 
-## References
+# References
 
 - Overall program design is inspired by [async-raft](https://github.com/async-raft/async-raft/)
 - [Implementing Raft](https://eli.thegreenplace.net/2020/implementing-raft-part-1-elections/)
