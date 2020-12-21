@@ -8,3 +8,4 @@ pub extern crate derivative;
 
 pub mod consensus;
 
+pub mod anonymity;
