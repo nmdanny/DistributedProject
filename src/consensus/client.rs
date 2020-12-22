@@ -179,17 +179,18 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
     }
 
     #[instrument]
-    /// Submits a value, waits for it to be committed and returns the insertion index.
+    /// Submits a value, waits for it to be applied to the state machine and returns the insertion index along with the machine result
+    /// (In case the value was already applied before, None is returned instead of a result)
     /// In case of failure, it might retry up to `max_retries` before responding with an error.
     /// Moreover, in case of failure it ensures that its value wasn't already proposed
-    pub async fn submit_value(&mut self, value: V) -> Result<usize, Error>
+    pub async fn submit_value(&mut self, value: V) -> Result<(usize, Option<V::Result>), Error>
     {
         let mut attempt = 0;
 
         while attempt <= self.max_retries {
 
             if attempt > 0 && self.is_value_already_committed(&value).await? {
-                return Ok(self.last_commit_index.unwrap())
+                return Ok((self.last_commit_index.unwrap(), None))
             }
 
             let res = self.transport.submit_value(self.leader, value.clone()).await;
@@ -197,7 +198,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                 Ok(ClientWriteResponse::Ok { commit_index, sm_output} ) => {
                     // TODO return value maybe
                     self.last_commit_index = Some(commit_index);
-                    return Ok(commit_index);
+                    return Ok((commit_index, Some(sm_output)));
                 },
                 Ok(ClientWriteResponse::NotALeader {leader_id }) => {
                     self.set_leader(leader_id);

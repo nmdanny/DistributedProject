@@ -221,7 +221,7 @@ impl <V: Value> Scenario<V> {
 async fn client_message_loop<T: ClientTransport<String>>(client: &mut Client<T, String>) {
     for i in 0 .. {
         let value = format!("{} value {}", client.client_name, i);
-        let ix = client.submit_value(value).await.expect("Submit value failed");
+        let (ix, _) = client.submit_value(value).await.expect("Submit value failed");
         info!(">>>>>>>>>>>> client \"{}\" committed {} at index {}", client.client_name, i, ix);
     }
 }
