@@ -32,8 +32,8 @@ pub struct NodeCommunicator<V: Value> {
     // used for sending messages to the node
     rpc_sender: mpsc::UnboundedSender<NodeCommand<V>>,
 
-    // only used to subscribe new clients
-    commit_sender: broadcast::Sender<CommitEntry<V>>,
+    // used to subscribe clients to new committed entries
+    commit_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
 }
 
 /// Size of commit notification channel. Note that in case of lagging receivers(clients), they will never block
@@ -48,18 +48,16 @@ impl <V: Value> NodeCommunicator<V> {
                             number_of_nodes: usize,
                             transport: T) -> (Node<V, T>, NodeCommunicator<V>) {
        let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
-        let (commit_sender, _commit_receiver) = broadcast::channel(COMMIT_CHANNEL_SIZE);
+        let mut node = Node::new(id, number_of_nodes, transport, rpc_receiver);
         let mut communicator = NodeCommunicator {
-            rpc_sender, commit_sender: commit_sender.clone()
+            rpc_sender, commit_sender: node.sm_result_sender.clone()
         };
-        let mut node = Node::new(id, number_of_nodes, transport, rpc_receiver,
-                             commit_sender);
         node.transport.on_node_communicator_created(id, &mut communicator).await;
         (node, communicator)
     }
 
     /// Allows one to be notified of entries that were committed AFTER this function is called.
-    pub async fn commit_channel(&self) -> Result<broadcast::Receiver<CommitEntry<V>>, RaftError> {
+    pub async fn commit_channel(&self) -> Result<broadcast::Receiver<(CommitEntry<V>, V::Result)>, RaftError> {
         Ok(self.commit_sender.subscribe())
     }
 

@@ -381,8 +381,10 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
 
     }
 
+    /// Executed whenever the state machine applies a committed entry, notifies
+    /// the client which is responsible for that commit
     #[instrument]
-    fn on_commit(&mut self, commit_entry: CommitEntry<V>)
+    fn on_commit_apply(&mut self, commit_entry: &CommitEntry<V>, result: V::Result)
     {
 
         let node = self.node.borrow();
@@ -390,14 +392,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
         assert!(node.commit_index.unwrap() >= commit_entry.index,
                 "commit_entry and commit_index aren't consistent");
 
-        let pending_ixes = self.pending_writes
-            .range(0 ..= commit_entry.index)
-            .map(|(&index, _entry)| index)
-            .collect::<Vec<_>>();
 
-        for ix in pending_ixes.into_iter() {
-            let req = self.pending_writes.remove(&ix).unwrap();
-            req.responder.send(Ok(ClientWriteResponse::Ok { commit_index: ix })).unwrap_or_else(|e| {
+        if let Some(req) = self.pending_writes.remove(&commit_entry.index) {
+            req.responder.send(Ok(ClientWriteResponse::Ok { commit_index: commit_entry.index, sm_output: result.clone() })).unwrap_or_else(|e| {
                 error!("Couldn't send client write response, client probably dropped his request: {:?}", e);
             });
         }
@@ -409,7 +406,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
         node.leader_id = Some(node.id);
         node.voted_for = None;
 
-        let mut commit_receiver = node.commit_sender.subscribe();
+        let mut sm_result_recv = node.sm_result_sender.subscribe();
 
         drop(node);
         let node = self.node.borrow();
@@ -473,9 +470,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
                         None => error!("Match index channel - sender part has dropped")
                     }
                 },
-                res = commit_receiver.recv() => {
+                res = sm_result_recv.recv() => {
                     match res {
-                        Ok(commit) => self.on_commit(commit),
+                        Ok(res) => self.on_commit_apply(&res.0, res.1),
                         Err(broadcast::RecvError::Lagged(s)) => error!("Leader lagged for {} commits, how is this possible", s) ,
                         _ => {}
                     }

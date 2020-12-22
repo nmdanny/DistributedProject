@@ -106,7 +106,7 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
             loop {
                 let entry = chan.recv().await;
                 match entry {
-                    Ok(e) => {
+                    Ok((e, _)) => {
                         if i != e.index {
                             error!("While handling peer {}, expecting CommitEntry at Index {} - given CommitEntry has unexpected index: {:?}",
                                    id, i, e);

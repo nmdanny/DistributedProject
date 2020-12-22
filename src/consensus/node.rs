@@ -52,11 +52,6 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T> = NoopStateMach
     /// It is the `LeaderState` job to ensure this receiver is `Some` before he finishes.
     pub receiver: Option<mpsc::UnboundedReceiver<NodeCommand<V>>>,
 
-    #[derivative(Debug="ignore")]
-    /// Used for notifying subscribed clients of committed entries
-    /// Note that sending will often fail if no clients have subscribed, this is OK.
-    pub commit_sender: broadcast::Sender<CommitEntry<V>>,
-
     /// Node ID
     pub id: Id,
 
@@ -91,24 +86,30 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T> = NoopStateMach
     pub commit_index: Option<usize>,
 
     /* related to state machine */
-    pub entry_tx: mpsc::UnboundedSender<V>,
+
+    #[derivative(Debug="ignore")]
+    /// Used for notifying SM of committed entries
+    pub commit_sender: mpsc::UnboundedSender<CommitEntry<V>>,
+
     pub state_machine: tokio::task::JoinHandle<()>,
-    pub broadcast_recv: broadcast::Receiver<(usize, S::Output)>
+
+    /// Leader can subscribe in order to be notified of commits
+    pub sm_result_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
+
+    sm_phantom: std::marker::PhantomData<S>
 }
 
 impl <V: Value, T: Transport<V>, S: StateMachine<V, T> + Default> Node<V, T, S> {
     pub fn new(id: usize,
                number_of_nodes: usize,
                transport: T,
-               cmd_receiver: mpsc::UnboundedReceiver<NodeCommand<V>>,
-               commit_sender: broadcast::Sender<CommitEntry<V>>) -> Self {
+               cmd_receiver: mpsc::UnboundedReceiver<NodeCommand<V>>) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
-        let (entry_tx, entry_rx) = mpsc::unbounded_channel();
-        let (jh, broadcast_recv) = S::default().spawn(entry_rx);
+        let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
+        let (jh, sm_result_sender) = S::default().spawn(commit_receiver);
         Node {
             transport,
             receiver: Some(cmd_receiver),
-            commit_sender,
             id,
             leader_id: Some(0),
             other_nodes: (0 .. number_of_nodes).filter(|&cur_id| cur_id != id).collect(),
@@ -118,9 +119,10 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T> + Default> Node<V, T, S> 
             current_term: 0,
             voted_for: None,
             commit_index: None,
-            entry_tx,
+            commit_sender,
             state_machine: jh,
-            broadcast_recv
+            sm_result_sender,
+            sm_phantom: Default::default()
         }
     }
 
@@ -196,16 +198,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
             self.commit_sender.send(CommitEntry {
                index, term: entry.term, value: entry.value.clone()
             }).unwrap_or_else(|e| {
-                // it's likely that a random node won't have anyone listening on his commit channel,
-                // but it shouldn't happen for the leader, since he himself should be listening for
-                // commits(in order to respond to clients)
-                if self.state == ServerState::Leader {
-                    error!("I'm a leader and no one is subscribed to commit channel, couldn't send commit notification: {:?}", e);
-                }
-                0
-            });
-            self.entry_tx.send(entry.value.clone()).unwrap_or_else(|e| {
-                error!("Couldn't notify state machine of new entry to apply: {:?}", e);
+                panic!("Couldn't notify SM of commited entry, did the SM thread panic?");
             });
         }
 
@@ -333,8 +326,7 @@ mod tests {
     #[tokio::test]
     async fn node_initialization_and_getters() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let (tx2, _rx2) = broadcast::channel(1);
-        let node = Node::<String, _>::new(2, 5, NoopTransport(), rx, tx2);
+        let node = Node::<String, _>::new(2, 5, NoopTransport(), rx);
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
         assert_eq!(node.state, ServerState::Follower);
@@ -357,8 +349,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let (tx2, _rx2) = broadcast::channel(1);
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
 
         let req1 = AppendEntries {
             term: 0,
@@ -422,8 +413,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_ae_clipping() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let (tx2, _rx2) = broadcast::channel(1);
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
         node.current_term = 2;
 
 
@@ -484,8 +474,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_mismatching_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let (tx2, _rx2) = broadcast::channel(1);
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);
+        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
         node.current_term = 2;
 
         // first request is just to initialize the node
