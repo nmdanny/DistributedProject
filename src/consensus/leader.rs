@@ -1,4 +1,5 @@
 use crate::consensus::types::*;
+use crate::consensus::state_machine::StateMachine;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::{Node, ServerState};
 use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
@@ -21,11 +22,11 @@ use crate::consensus::timing::HEARTBEAT_INTERVAL;
 #[derivative(Debug)]
 /// Contains state used to replicate the leader's data to a peer.
 /// Note, this is re-initialized every time a node becomes a leader
-pub struct PeerReplicationStream<V: Value, T: Transport<V>> {
+pub struct PeerReplicationStream<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
 
     #[derivative(Debug="ignore")]
     /// Reference to node
-    pub node: Rc<RefCell<Node<V, T>>>,
+    pub node: Rc<RefCell<Node<V, T, S>>>,
 
     /// Peer ID
     pub id: Id,
@@ -56,7 +57,7 @@ pub struct StaleLeader { pub newer_term: usize }
 /// Creates an AppendEntries request containing `log[index ..]`, using `index-1` as the previous log
 /// index(or an empty IndexTerm if `index = 0`)
 /// In case `index == log.len`, this will be treated as a heartbeat request.
-fn create_append_entries_for_index<V: Value, T: Transport<V>>(node: &Node<V, T>, index: usize) -> AppendEntries<V> {
+fn create_append_entries_for_index<V: Value, T: Transport<V>, S: StateMachine<V,T>>(node: &Node<V, T, S>, index: usize) -> AppendEntries<V> {
     assert!(index <= node.storage.len(), "invalid index");
     let leader_id = node.id;
     let term = node.current_term;
@@ -86,8 +87,8 @@ pub enum ReplicationLoopError {
     PeerError(RaftError),
 }
 
-impl <V: Value, T: Transport<V>> PeerReplicationStream<V, T> {
-    pub fn new(node: Rc<RefCell<Node<V, T>>>, id: Id,
+impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V, T, S> {
+    pub fn new(node: Rc<RefCell<Node<V, T, S>>>, id: Id,
                tick_receiver: watch::Receiver<()>,
                match_index_sender: mpsc::Sender<(Id, usize)>) -> Self {
 
@@ -238,12 +239,12 @@ impl PendingWriteRequest {
 
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct LeaderState<'a, V: Value, T: Transport<V>>{
+pub struct LeaderState<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>>{
 
     pub term: usize,
 
     #[derivative(Debug="ignore")]
-    pub node: Rc<RefCell<Node<V, T>>>,
+    pub node: Rc<RefCell<Node<V, T, S>>>,
 
     #[derivative(Debug="ignore")]
     /// Used to notify replication streams of a heartbeat or a
@@ -266,9 +267,9 @@ pub struct LeaderState<'a, V: Value, T: Transport<V>>{
 }
 
 
-impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
+impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T, S> {
     /// Creates state for a node who just became a leader
-    pub fn new(node: Rc<RefCell<Node<V, T>>>) -> Self {
+    pub fn new(node: Rc<RefCell<Node<V, T, S>>>) -> Self {
 
         let match_indices = node.borrow().all_other_nodes()
             .map(|i| (i, None)).collect();
@@ -526,7 +527,7 @@ impl<'a, V: Value, T: Transport<V>> LeaderState<'a, V, T> {
     }
 }
 
-impl<'a, V: Value, T: Transport<V>> CommandHandler<V> for LeaderState<'a, V, T> {
+impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> for LeaderState<'a, V, T, S> {
     fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         let mut node = self.node.borrow_mut();
         return node.on_receive_append_entry(req);

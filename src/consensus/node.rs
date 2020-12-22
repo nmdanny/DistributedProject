@@ -5,6 +5,7 @@ use crate::consensus::node_communicator::{NodeCommand, CommandHandler};
 use crate::consensus::follower::FollowerState;
 use crate::consensus::candidate::CandidateState;
 use crate::consensus::leader::LeaderState;
+use crate::consensus::state_machine::{StateMachine, NoopStateMachine};
 use std::collections::BTreeMap;
 use tracing::instrument;
 use tokio::task;
@@ -23,7 +24,6 @@ use std::cell::RefCell;
 
 
 
-
 /// In which state is the server currently at
 #[derive(Debug, Clone, Eq, PartialEq, Copy)]
 pub enum ServerState {
@@ -35,7 +35,7 @@ pub enum ServerState {
 /// Contains all state used by any node
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct Node<V: Value, T: Transport<V>> {
+pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T> = NoopStateMachine> {
 
     /* related to async & message sending */
 
@@ -90,16 +90,21 @@ pub struct Node<V: Value, T: Transport<V>> {
     /// Index of highest log entry known to be committed (replicated to a majority quorum)
     pub commit_index: Option<usize>,
 
-    // TODO, maybe add last_applied
+    /* related to state machine */
+    pub entry_tx: mpsc::UnboundedSender<V>,
+    pub state_machine: tokio::task::JoinHandle<()>,
+    pub broadcast_recv: broadcast::Receiver<(usize, S::Output)>
 }
 
-impl <V: Value, T: Transport<V>> Node<V, T> {
+impl <V: Value, T: Transport<V>, S: StateMachine<V, T> + Default> Node<V, T, S> {
     pub fn new(id: usize,
                number_of_nodes: usize,
                transport: T,
                cmd_receiver: mpsc::UnboundedReceiver<NodeCommand<V>>,
                commit_sender: broadcast::Sender<CommitEntry<V>>) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
+        let (entry_tx, entry_rx) = mpsc::unbounded_channel();
+        let (jh, broadcast_recv) = S::default().spawn(entry_rx);
         Node {
             transport,
             receiver: Some(cmd_receiver),
@@ -113,6 +118,9 @@ impl <V: Value, T: Transport<V>> Node<V, T> {
             current_term: 0,
             voted_for: None,
             commit_index: None,
+            entry_tx,
+            state_machine: jh,
+            broadcast_recv
         }
     }
 
@@ -129,7 +137,7 @@ impl <V: Value, T: Transport<V>> Node<V, T> {
 
 
 /* Following block contains logic shared with all states of a raft node */
-impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
+impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
 
     #[instrument(skip(self))]
     /// The main loop - this does everything, and it has ownership of the Node
@@ -195,6 +203,9 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>> Node<V, T> {
                     error!("I'm a leader and no one is subscribed to commit channel, couldn't send commit notification: {:?}", e);
                 }
                 0
+            });
+            self.entry_tx.send(entry.value.clone()).unwrap_or_else(|e| {
+                error!("Couldn't notify state machine of new entry to apply: {:?}", e);
             });
         }
 
@@ -319,8 +330,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
 
-    #[test]
-    fn node_initialization_and_getters() {
+    #[tokio::test]
+    async fn node_initialization_and_getters() {
         let (_tx, rx) = mpsc::unbounded_channel();
         let (tx2, _rx2) = broadcast::channel(1);
         let node = Node::<String, _>::new(2, 5, NoopTransport(), rx, tx2);
@@ -331,8 +342,8 @@ mod tests {
     }
 
     // just sanity checks on Ord
-    #[test]
-    fn ord_on_option() {
+    #[tokio::test]
+    async fn ord_on_option() {
         assert_eq!(None.min(Some(0)), None);
         assert_eq!(None.max(Some(0)), Some(0));
         assert_eq!(Some(0).min(None), None);
@@ -343,8 +354,8 @@ mod tests {
         assert!(None < Some(0) && Some(0) < Some(1) && Some(0) > None);
     }
 
-    #[test]
-    fn node_on_receive_ae() {
+    #[tokio::test]
+    async fn node_on_receive_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
         let (tx2, _rx2) = broadcast::channel(1);
         let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);
@@ -408,8 +419,8 @@ mod tests {
         assert_eq!(node.commit_index, None);
     }
 
-    #[test]
-    fn node_on_receive_ae_clipping() {
+    #[tokio::test]
+    async fn node_on_receive_ae_clipping() {
         let (_tx, rx) = mpsc::unbounded_channel();
         let (tx2, _rx2) = broadcast::channel(1);
         let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);
@@ -470,8 +481,8 @@ mod tests {
         ]);
     }
 
-    #[test]
-    fn node_on_receive_mismatching_ae() {
+    #[tokio::test]
+    async fn node_on_receive_mismatching_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
         let (tx2, _rx2) = broadcast::channel(1);
         let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx, tx2);

@@ -1,6 +1,7 @@
 use crate::consensus::types::{Value, AppendEntries, AppendEntriesResponse, RaftError, RequestVote, RequestVoteResponse, ClientWriteRequest, ClientWriteResponse, ClientReadRequest, ClientReadResponse};
 use crate::consensus::transport::Transport;
 use crate::consensus::node::{Node, ServerState};
+use crate::consensus::state_machine::StateMachine;
 use crate::consensus::node_communicator::CommandHandler;
 use std::time::Instant;
 use core::result::Result;
@@ -13,17 +14,17 @@ use crate::consensus::timing::generate_election_length;
 
 /// State used by a follower
 #[derive(Debug)]
-pub struct FollowerState<'a, V: Value, T: Transport<V>> {
-    pub node: &'a mut Node<V, T>,
+pub struct FollowerState<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> {
+    pub node: &'a mut Node<V, T, S>,
 
     /// Used to notify main loop that that a heartbeat was received/vote granted
     pub heartbeat_or_grant_vote_watch: Option<watch::Sender<()>>,
 
 }
 
-impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
+impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> FollowerState<'a, V, T, S> {
     /// Creates state used for a node who has just become a follower
-    pub fn new(node: &'a mut Node<V, T>) -> Self {
+    pub fn new(node: &'a mut Node<V, T, S>) -> Self {
         FollowerState {
             node,
             heartbeat_or_grant_vote_watch: None
@@ -68,7 +69,7 @@ impl <'a, V: Value, T: Transport<V>> FollowerState<'a, V, T> {
     }
 }
 
-impl <'a, V: Value, T: Transport<V>> CommandHandler<V> for FollowerState<'a, V, T> {
+impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> for FollowerState<'a, V, T, S> {
     #[instrument]
     fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         if req.term < self.node.current_term {
