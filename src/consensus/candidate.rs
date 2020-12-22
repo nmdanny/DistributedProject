@@ -225,7 +225,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> fo
         return res;
     }
 
-    fn handle_client_write_request(&mut self, _req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+    fn handle_client_write_request(&mut self, _req: ClientWriteRequest<V>) -> Result<ClientWriteResponse<V>, RaftError> {
         Ok(ClientWriteResponse::NotALeader { leader_id: self.node.leader_id })
     }
 

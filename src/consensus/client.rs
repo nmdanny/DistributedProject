@@ -15,7 +15,7 @@ use futures::TryFutureExt;
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait(?Send)]
 pub trait ClientTransport<V: Value> {
-    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError>;
+    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError>;
 
     async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
 }
@@ -37,7 +37,7 @@ impl <V: Value> SingleProcessClientTransport<V> {
 
 #[async_trait(?Send)]
 impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
-    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError> {
+    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError> {
         let fut = self.communicators.get(node_id).expect("Invalid node ID").submit_value(ClientWriteRequest {
             value
         });
@@ -194,7 +194,8 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
 
             let res = self.transport.submit_value(self.leader, value.clone()).await;
             match res {
-                Ok(ClientWriteResponse::Ok { commit_index} ) => {
+                Ok(ClientWriteResponse::Ok { commit_index, sm_output} ) => {
+                    // TODO return value maybe
                     self.last_commit_index = Some(commit_index);
                     return Ok(commit_index);
                 },

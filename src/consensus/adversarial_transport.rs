@@ -225,7 +225,7 @@ async fn adversary_request_response<R>(req_omission_chance: f64,
 
 #[async_trait(?Send)]
 impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTransport<V, T> {
-    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse, RaftError> {
+    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>, RaftError> {
         adversary_request_response(self.request_omission_chance,
                                    self.response_omission_chance,
                                    node_id, async move {

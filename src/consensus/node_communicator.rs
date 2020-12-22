@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 pub enum NodeCommand<V: Value> {
     AE(AppendEntries<V>, oneshot::Sender<Result<AppendEntriesResponse, RaftError>>),
     RV(RequestVote, oneshot::Sender<Result<RequestVoteResponse, RaftError>>),
-    ClientWriteRequest(ClientWriteRequest<V>, oneshot::Sender<Result<ClientWriteResponse, RaftError>>),
+    ClientWriteRequest(ClientWriteRequest<V>, oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>),
     ClientReadRequest(ClientReadRequest, oneshot::Sender<Result<ClientReadResponse<V>, RaftError>>)
 }
 
@@ -80,7 +80,7 @@ impl <V: Value> NodeCommunicator<V> {
     }
 
     #[instrument]
-    pub async fn submit_value(&self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+    pub async fn submit_value(&self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse<V>,RaftError> {
         let (tx, rx) = oneshot::channel();
         let cmd = NodeCommand::ClientWriteRequest(req, tx);
         self.rpc_sender.send(cmd).context("send command to submit_value").map_err(RaftError::CommunicatorError)?;
@@ -112,7 +112,7 @@ pub(in crate::consensus) trait CommandHandler<V: Value> {
     fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError>;
 
     /// Should not be used by leader, see note above
-    fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError>;
+    fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse<V>, RaftError>;
     fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError>;
 
     /// Handles a command sent from `NodeCommunicator`

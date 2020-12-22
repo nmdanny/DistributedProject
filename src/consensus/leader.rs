@@ -223,15 +223,15 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
 }
 
 #[derive(Debug)]
-pub struct PendingWriteRequest {
-    pub responder: oneshot::Sender<Result<ClientWriteResponse, RaftError>>,
+pub struct PendingWriteRequest<V: Value> {
+    pub responder: oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>,
 
     pub pending_entry_log_index: usize,
 }
 
-impl PendingWriteRequest {
+impl <V: Value> PendingWriteRequest<V> {
     pub fn new(pending_entry_log_index: usize,
-                         responder: oneshot::Sender<Result<ClientWriteResponse, RaftError>>) -> Self
+                         responder: oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>) -> Self
     {
        PendingWriteRequest { pending_entry_log_index, responder }
     }
@@ -256,7 +256,7 @@ pub struct LeaderState<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>>{
     pub replicate_receiver: watch::Receiver<()>,
 
     /// Used to resolve client write requests
-    pub pending_writes: BTreeMap<usize, PendingWriteRequest>,
+    pub pending_writes: BTreeMap<usize, PendingWriteRequest<V>>,
 
     /// Maps peer IDs to their latest match index
     pub match_indices: BTreeMap<Id, Option<usize>>,
@@ -504,7 +504,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
 
     #[instrument]
     pub fn handle_client_write_command(&mut self, req: ClientWriteRequest<V>,
-                                       tx: oneshot::Sender<Result<ClientWriteResponse, RaftError>>) {
+                                       tx: oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>) {
         let mut node = self.node.borrow_mut();
         info!("Received request {:?}, ", req);
 
@@ -539,7 +539,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> for
         return node.on_receive_request_vote(&req);
     }
 
-    fn handle_client_write_request(&mut self, _: ClientWriteRequest<V>) -> Result<ClientWriteResponse, RaftError> {
+    fn handle_client_write_request(&mut self, _: ClientWriteRequest<V>) -> Result<ClientWriteResponse<V>,RaftError> {
         panic!("Write requests cannot be handled by this function");
     }
 

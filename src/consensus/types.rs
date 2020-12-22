@@ -3,11 +3,18 @@ use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 use thiserror::Error;
 
+/// A value that can be returned from a state machine operation
+pub trait OutputType: Eq + Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {}
+
+impl <O: Eq + Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static> OutputType for O {}
+
 /// A value that can be stored in a log entry, must be (de)serializable, owned
-pub trait Value: Eq + Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {}
+pub trait Value: Eq + Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static {
+    type Result: OutputType;
+}
 
 impl <V: Eq + Clone + Debug + Send + Sync + Serialize + DeserializeOwned + 'static> Value for V {
-
+    type Result = ();
 }
 
 /// Identifier for nodes, needed in order to communicate with them via the transport
@@ -172,8 +179,11 @@ pub struct ClientWriteRequest<V: Value> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ClientWriteResponse {
-    Ok { commit_index: usize },
+pub enum ClientWriteResponse<V: Value> {
+    Ok { 
+        commit_index: usize,
+        sm_output: V::Result
+     },
     NotALeader { leader_id: Option<Id> }
 }
 
