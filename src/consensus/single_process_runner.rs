@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use tokio::sync::{RwLock, Barrier, mpsc};
 use std::sync::Arc;
 use tracing_futures::Instrument;
+use dist_lib::consensus::state_machine::NoopStateMachine;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
 use dist_lib::consensus::client::{Client, SingleProcessClientTransport, ClientTransport};
 use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
@@ -168,13 +169,13 @@ pub struct Scenario<V: Value> {
     pub consistency_join_handle: JoinHandle<()>
 }
 
-impl <V: Value> Scenario<V> {
+impl <V: Value> Scenario<V> where V::Result: Default{
     pub async fn setup(num_nodes: usize, num_clients: usize) -> (Self, mpsc::UnboundedReceiver<LogEntry<V>>)
     {
         let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
         let (nodes, communicators) = futures::future::join_all(
             (0 .. num_nodes).map(|i|
-                NodeCommunicator::create_with_node(i,
+                NodeCommunicator::create_with_node::<_, NoopStateMachine>(i,
                                                    num_nodes,
                                                    server_transport.clone()))
             )

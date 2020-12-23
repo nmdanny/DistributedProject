@@ -23,7 +23,7 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Default + Debug + 'static + S
 
     /// Spawns the state machine loop, setting up communication
     fn spawn(mut self, mut entry_rx: mpsc::UnboundedReceiver<CommitEntry<V>>) -> (JoinHandle<()>, broadcast::Sender<(CommitEntry<V>, V::Result)>) {
-        let (res_tx, res_rx) = broadcast::channel(BROADCAST_CHAN_SIZE); 
+        let (res_tx, _res_rx) = broadcast::channel(BROADCAST_CHAN_SIZE); 
         let res_tx2 = res_tx.clone();
         let jh = tokio::spawn(async move {
             let mut last_applied: Option<usize> = None;
@@ -49,9 +49,9 @@ pub struct NoopStateMachine();
 
 
 #[async_trait]
-impl <V: Value, T: Transport<V>> StateMachine<V, T> for NoopStateMachine  {
-    async fn apply(&mut self, _entry: &V) -> V::Result  {
-        unimplemented!();
+impl <V: Value, T: Transport<V>> StateMachine<V, T> for NoopStateMachine  where V::Result : Default {
+    async fn apply(&mut self, _entry: &V) -> V::Result {
+       Default::default() 
     }
 }
 

@@ -35,7 +35,7 @@ pub enum ServerState {
 /// Contains all state used by any node
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T> = NoopStateMachine> {
+pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
 
     /* related to async & message sending */
 
@@ -197,7 +197,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         for (entry, index) in new_entries.iter().zip(new_entries_from ..= new_entries_to_inc) {
             self.commit_sender.send(CommitEntry {
                index, term: entry.term, value: entry.value.clone()
-            }).unwrap_or_else(|e| {
+            }).unwrap_or_else(|_e| {
                 panic!("Couldn't notify SM of commited entry, did the SM thread panic?");
             });
         }
@@ -326,7 +326,7 @@ mod tests {
     #[tokio::test]
     async fn node_initialization_and_getters() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let node = Node::<String, _>::new(2, 5, NoopTransport(), rx);
+        let node = Node::<String, _, NoopStateMachine>::new(2, 5, NoopTransport(), rx);
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
         assert_eq!(node.state, ServerState::Follower);
@@ -349,7 +349,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+        let mut node = Node::<i32, _, NoopStateMachine>::new(2, 5, NoopTransport(), rx);
 
         let req1 = AppendEntries {
             term: 0,
@@ -413,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_ae_clipping() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+        let mut node = Node::<i32, _, NoopStateMachine>::new(2, 5, NoopTransport(), rx);
         node.current_term = 2;
 
 
@@ -474,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_mismatching_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _>::new(2, 5, NoopTransport(), rx);
+        let mut node = Node::<i32, _, NoopStateMachine>::new(2, 5, NoopTransport(), rx);
         node.current_term = 2;
 
         // first request is just to initialize the node

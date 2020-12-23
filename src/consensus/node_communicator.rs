@@ -1,5 +1,6 @@
 use crate::consensus::types::*;
 use tokio::sync::{oneshot, mpsc};
+use crate::consensus::state_machine::StateMachine;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
 use async_trait::async_trait;
@@ -44,9 +45,10 @@ impl <V: Value> NodeCommunicator<V> {
 
     /// Creates a node object, returning it along with a communicator that can be used to interact
     /// with it after we spawn it on a task/thread.
-    pub async fn create_with_node<T: Transport<V>>(id: usize,
+    pub async fn create_with_node<T: Transport<V>, S: StateMachine<V, T>>(
+                            id: usize,
                             number_of_nodes: usize,
-                            transport: T) -> (Node<V, T>, NodeCommunicator<V>) {
+                            transport: T) -> (Node<V, T, S>, NodeCommunicator<V>) {
        let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
         let mut node = Node::new(id, number_of_nodes, transport, rpc_receiver);
         let mut communicator = NodeCommunicator {
