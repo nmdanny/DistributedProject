@@ -23,6 +23,9 @@ use futures::TryFutureExt;
 use std::cell::RefCell;
 
 
+/// Size of applied commit notification channel. Note that in case of lagging receivers(clients), they will never block
+/// the node from sending values, but they might lose some commit notifications - see https://docs.rs/tokio/0.3.5/tokio/sync/broadcast/index.html#lagging
+const BROADCAST_CHAN_SIZE: usize = 1024;
 
 /// In which state is the server currently at
 #[derive(Debug, Clone, Eq, PartialEq, Copy)]
@@ -52,6 +55,7 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
     ///    on the receiver(use it mutably), yet it also wraps a `Node` in a `Rc<RefCell<..>>`, and we 
     ///    must never hold a mutable shared borrow across await points.
     ///    (He will move the receiver back into the node before finishing)
+    #[derivative(Debug="ignore")]
     pub receiver: Option<mpsc::UnboundedReceiver<NodeCommand<V>>>,
 
     /// Node ID
@@ -89,31 +93,34 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
 
     /* related to state machine */
 
-    #[derivative(Debug="ignore")]
-    /// Used for notifying SM of committed entries
-    pub commit_sender: mpsc::UnboundedSender<CommitEntry<V>>,
 
     /// Until the state machine is spawned, allows access to the machine(and a receiver
     /// needed to spawn it)
+    #[derivative(Debug="ignore")]
     pub state_machine: Option<(S, mpsc::UnboundedReceiver<CommitEntry<V>>,
                                   mpsc::UnboundedReceiver<ForceApply<V>>)>,
 
     /// Leader can subscribe in order to be notified of commits
+    #[derivative(Debug="ignore")]
     pub sm_result_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
 
-    pub force_apply_sender: mpsc::UnboundedSender<ForceApply<V>>,
+    // Used to notify SM of newly committed entries
+    #[derivative(Debug="ignore")]
+    pub commit_sender: Option<mpsc::UnboundedSender<CommitEntry<V>>>,
 
+    // Used to force SM to apply a value without committing it
+    #[derivative(Debug="ignore")]
+    pub force_apply_sender: Option<mpsc::UnboundedSender<ForceApply<V>>>,
+
+    #[derivative(Debug="ignore")]
     sm_phantom: std::marker::PhantomData<S>
 }
 
 impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
     pub fn new(id: usize,
                number_of_nodes: usize,
-               transport: T,
-               machine: S) -> Self {
+               transport: T) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
-        let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
-        let (force_apply_sender, force_apply_recv) = mpsc::unbounded_channel();
         let (sm_result_sender, _) = broadcast::channel(1024);
         Node {
             transport,
@@ -127,12 +134,22 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
             current_term: 0,
             voted_for: None,
             commit_index: None,
-            commit_sender,
-            state_machine: Some((machine, commit_receiver, force_apply_recv)),
+            state_machine: None,
             sm_result_sender,
-            force_apply_sender,
+            commit_sender: None,
+            force_apply_sender: None,
             sm_phantom: Default::default()
         }
+    }
+
+    pub fn attach_state_machine(&mut self, machine: S) {
+        let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
+        let (force_apply_sender, force_apply_recv) = mpsc::unbounded_channel();
+        
+        self.commit_sender = Some(commit_sender);
+        self.force_apply_sender = Some(force_apply_sender);
+        self.state_machine = Some((machine, commit_receiver, force_apply_recv));
+
     }
 
     /// Size of a majority quorum (the minimal amount of valid nodes)
@@ -213,11 +230,14 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
               old_commit_index, self.commit_index, new_entries);
 
         for (entry, index) in new_entries.iter().zip(new_entries_from ..= new_entries_to_inc) {
-            self.commit_sender.send(CommitEntry {
-               index, term: entry.term, value: entry.value.clone()
-            }).unwrap_or_else(|_e| {
-                panic!("Couldn't notify SM of commited entry, did the SM thread panic?");
-            });
+            self.commit_sender
+                .as_ref()
+                .expect("SM wasn't initialized, no commit_sender")
+                .send(CommitEntry {
+                    index, term: entry.term, value: entry.value.clone()
+                }).unwrap_or_else(|_e| {
+                    panic!("Couldn't notify SM of commited entry, did the SM thread panic?");
+                });
         }
 
 
@@ -335,9 +355,12 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
     }
 
     pub fn on_receive_client_force_apply(&mut self, force_apply: ForceApply<V>) {
-        self.force_apply_sender.send(force_apply).unwrap_or_else(|_e| {
-            error!("Couldn't send force-apply request+responder to state machine task");
-        });
+        self.force_apply_sender
+            .as_ref()
+            .expect("SM wasn't initialized, no force_apply_sender")
+            .send(force_apply).unwrap_or_else(|_e| {
+                error!("Couldn't send force-apply request+responder to state machine task");
+            });
     }
 
 }
@@ -349,11 +372,11 @@ mod tests {
 
     #[tokio::test]
     async fn node_initialization_and_getters() {
-        let node = Node::<String, _, _>::new(
+        let mut node = Node::<String, _, _>::new(
             2, 
             5, 
-            NoopTransport(), 
-        NoopStateMachine::default());
+            NoopTransport());
+        node.attach_state_machine(NoopStateMachine::default());
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
         assert_eq!(node.state, ServerState::Follower);
@@ -375,7 +398,8 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_ae() {
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), NoopStateMachine::default());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport());
+        node.attach_state_machine(NoopStateMachine::default());
 
         let req1 = AppendEntries {
             term: 0,
@@ -438,7 +462,8 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_ae_clipping() {
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), NoopStateMachine::default());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport());
+        node.attach_state_machine(NoopStateMachine::default());
         node.current_term = 2;
 
 
@@ -498,7 +523,8 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_mismatching_ae() {
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), NoopStateMachine::default());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport());
+        node.attach_state_machine(NoopStateMachine::default());
         node.current_term = 2;
 
         // first request is just to initialize the node

@@ -51,8 +51,9 @@ impl <V: Value> NodeCommunicator<V> {
                             number_of_nodes: usize,
                             transport: T,
                             machine: S) -> (Node<V, T, S>, NodeCommunicator<V>) {
-        let mut node = Node::new(id, number_of_nodes, transport, machine);
+        let mut node = Node::new(id, number_of_nodes, transport);
         let communicator = NodeCommunicator::from_node(&mut node).await;
+        node.attach_state_machine(machine);
         (node, communicator)
     }
 

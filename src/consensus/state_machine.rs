@@ -11,9 +11,6 @@ use async_trait::async_trait;
 use std::fmt::Debug;
 use tracing_futures::{Instrument};
 
-/// Size of applied commit notification channel. Note that in case of lagging receivers(clients), they will never block
-/// the node from sending values, but they might lose some commit notifications - see https://docs.rs/tokio/0.3.5/tokio/sync/broadcast/index.html#lagging
-const BROADCAST_CHAN_SIZE: usize = 1024;
 
 pub type ForceApply<V> = (ClientForceApplyRequest<V>, oneshot::Sender<Result<ClientForceApplyResponse<V>, RaftError>>);
 
