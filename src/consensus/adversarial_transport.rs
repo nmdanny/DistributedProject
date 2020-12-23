@@ -225,7 +225,7 @@ async fn adversary_request_response<R>(req_omission_chance: f64,
 
 #[async_trait(?Send)]
 impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTransport<V, T> {
-    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>, RaftError> {
+    async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>, RaftError> {
         adversary_request_response(self.request_omission_chance,
                                    self.response_omission_chance,
                                    node_id, async move {
@@ -233,7 +233,7 @@ impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTra
         }).await
     }
 
-    async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
+    async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
         adversary_request_response(self.request_omission_chance,
                                    self.response_omission_chance,
                                    node_id, async move {
@@ -241,7 +241,7 @@ impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTra
         }).await
     }
 
-    async fn force_apply(&mut self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
+    async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
         adversary_request_response(self.request_omission_chance,
                                    self.response_omission_chance,
                                    node_id, async move {

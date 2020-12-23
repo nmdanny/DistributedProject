@@ -14,12 +14,12 @@ use futures::TryFutureExt;
 
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait(?Send)]
-pub trait ClientTransport<V: Value> {
-    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError>;
+pub trait ClientTransport<V: Value> : 'static {
+    async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError>;
 
-    async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
+    async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
 
-    async fn force_apply(&mut self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError>;
+    async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError>;
 }
 
 pub struct SingleProcessClientTransport<V: Value>
@@ -39,7 +39,7 @@ impl <V: Value> SingleProcessClientTransport<V> {
 
 #[async_trait(?Send)]
 impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
-    async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError> {
+    async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError> {
         let fut = self.communicators.get(node_id).expect("Invalid node ID").submit_value(ClientWriteRequest {
             value
         });
@@ -48,7 +48,7 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
         )).await?
     }
 
-    async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
+    async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
         let fut = self.communicators.get(node_id).expect("Invalid node ID").request_values(ClientReadRequest {
             from, to
         });
@@ -58,7 +58,7 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
 
     }
 
-    async fn force_apply(&mut self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
+    async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
         let fut = self.communicators.get(node_id).expect("Invalid node ID").force_apply(ClientForceApplyRequest {
             value
         });
@@ -228,5 +228,28 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
             attempt += 1;
         }
         Err(anyhow::anyhow!("Couldn't submit value after maximal number of retries"))
+    }
+
+    pub async fn submit_without_commit(&self, node_id: usize, value: V) -> Result<V::Result, Error> {
+        let mut attempt = 0;
+        while attempt <= self.max_retries {
+            let res = self.transport.force_apply(node_id, value.clone()).await;
+            match res {
+                Err(RaftError::NetworkError(e)) => {
+                    error!(net_err=true, ">>> client encountered network error: {}", e);
+                },
+                Err(e) => {
+                    error!(">>> client received error: {}, giving up request.", e);
+                    return Err(e.into());
+                },
+                Ok(res) => {
+                    return Ok(res.result)
+                }
+            }
+            time::delay_for(Duration::from_millis(self.retry_delay_ms.sample(
+                &mut rand::thread_rng()))).await;
+            attempt += 1;
+        }
+        Err(anyhow::anyhow!("Couldn't apply value after maximal number of retries"))
     }
 }
