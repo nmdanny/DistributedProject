@@ -119,4 +119,8 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> fo
     fn handle_client_read_request(&mut self, _req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError> {
         Ok(ClientReadResponse::NotALeader { leader_id: self.node.leader_id })
     }
+
+    fn handle_force_apply(&mut self, force_apply: super::state_machine::ForceApply<V>) {
+        self.node.on_receive_client_force_apply(force_apply);
+    }
 }

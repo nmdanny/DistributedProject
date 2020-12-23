@@ -1,6 +1,6 @@
 use crate::consensus::types::*;
 use tokio::sync::{oneshot, mpsc};
-use crate::consensus::state_machine::StateMachine;
+use crate::consensus::state_machine::{StateMachine, ForceApply};
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
 use async_trait::async_trait;
@@ -16,7 +16,8 @@ pub enum NodeCommand<V: Value> {
     AE(AppendEntries<V>, oneshot::Sender<Result<AppendEntriesResponse, RaftError>>),
     RV(RequestVote, oneshot::Sender<Result<RequestVoteResponse, RaftError>>),
     ClientWriteRequest(ClientWriteRequest<V>, oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>),
-    ClientReadRequest(ClientReadRequest, oneshot::Sender<Result<ClientReadResponse<V>, RaftError>>)
+    ClientReadRequest(ClientReadRequest, oneshot::Sender<Result<ClientReadResponse<V>, RaftError>>),
+    ClientForceApplyRequest(ClientForceApplyRequest<V>, oneshot::Sender<Result<ClientForceApplyResponse<V>, RaftError>>)
 }
 
 /// Used to communicate with a raft node once we begin the main loop - note that this runs on
@@ -94,6 +95,15 @@ impl <V: Value> NodeCommunicator<V> {
         self.rpc_sender.send(cmd).context("send command to request_values").map_err(RaftError::CommunicatorError)?;
         rx.await.context("receive value after request_values").map_err(RaftError::InternalError)?
     }
+
+    #[instrument]
+    pub async fn force_apply(&self, req: ClientForceApplyRequest<V>) -> Result<ClientForceApplyResponse<V>, RaftError> {
+        let (tx, rx) = oneshot::channel();
+        let cmd = NodeCommand::ClientForceApplyRequest(req, tx);
+        self.rpc_sender.send(cmd).context("send command to force_apply").map_err(RaftError::CommunicatorError)?;
+        rx.await.context("receive value after force_apply").map_err(RaftError::InternalError)?
+
+    }
 }
 
 /// Handles commands sent from a `NodeCommunicator`
@@ -111,9 +121,13 @@ pub(in crate::consensus) trait CommandHandler<V: Value> {
     fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError>;
     fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError>;
 
+
     /// Should not be used by leader, see note above
     fn handle_client_write_request(&mut self, req: ClientWriteRequest<V>) -> Result<ClientWriteResponse<V>, RaftError>;
     fn handle_client_read_request(&mut self, req: ClientReadRequest) -> Result<ClientReadResponse<V>, RaftError>;
+
+    // this is handled asynchronously, passed to the state machine task
+    fn handle_force_apply(&mut self, force_apply: ForceApply<V>);
 
     /// Handles a command sent from `NodeCommunicator`
     fn handle_command(&mut self, cmd: NodeCommand<V>) {
@@ -137,6 +151,9 @@ pub(in crate::consensus) trait CommandHandler<V: Value> {
                 res.send(self.handle_client_read_request(req)).unwrap_or_else(|e| {
                     error!("Couldn't send response: {:?}", e);
                 });
+            }
+            NodeCommand::ClientForceApplyRequest(req, res) => {
+                self.handle_force_apply((req, res));
             }
         }
 

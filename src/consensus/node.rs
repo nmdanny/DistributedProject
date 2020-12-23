@@ -5,7 +5,7 @@ use crate::consensus::node_communicator::{NodeCommand, CommandHandler};
 use crate::consensus::follower::FollowerState;
 use crate::consensus::candidate::CandidateState;
 use crate::consensus::leader::LeaderState;
-use crate::consensus::state_machine::{StateMachine, NoopStateMachine};
+use crate::consensus::state_machine::{StateMachine, NoopStateMachine, ForceApply};
 use std::collections::BTreeMap;
 use tracing::instrument;
 use tokio::task;
@@ -96,6 +96,8 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
     /// Leader can subscribe in order to be notified of commits
     pub sm_result_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
 
+    pub force_apply_sender: mpsc::UnboundedSender<ForceApply<V>>,
+
     sm_phantom: std::marker::PhantomData<S>
 }
 
@@ -106,7 +108,8 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T> + Default> Node<V, T, S> 
                cmd_receiver: mpsc::UnboundedReceiver<NodeCommand<V>>) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
         let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
-        let (jh, sm_result_sender) = S::default().spawn(commit_receiver);
+        let (force_apply_sender, force_apply_recv) = mpsc::unbounded_channel();
+        let (jh, sm_result_sender) = S::default().spawn(commit_receiver, force_apply_recv);
         Node {
             transport,
             receiver: Some(cmd_receiver),
@@ -122,6 +125,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T> + Default> Node<V, T, S> 
             commit_sender,
             state_machine: jh,
             sm_result_sender,
+            force_apply_sender,
             sm_phantom: Default::default()
         }
     }
@@ -314,6 +318,12 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         }
 
         Ok(AppendEntriesResponse::success(self.current_term))
+    }
+
+    pub fn on_receive_client_force_apply(&mut self, force_apply: ForceApply<V>) {
+        self.force_apply_sender.send(force_apply).unwrap_or_else(|_e| {
+            error!("Couldn't send force-apply request+responder to state machine task");
+        });
     }
 
 }

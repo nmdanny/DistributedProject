@@ -566,4 +566,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> for
             _ => ClientReadResponse::BadRange { commit_index }
         })
     }
+
+    fn handle_force_apply(&mut self, force_apply: super::state_machine::ForceApply<V>) {
+        let mut node = self.node.borrow_mut();
+        node.on_receive_client_force_apply(force_apply);
+    }
 }

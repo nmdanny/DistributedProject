@@ -169,8 +169,6 @@ pub enum RaftError {
 pub type RaftResult<T> = Result<T, RaftError>;
 
 
-// Client requests are serviced by the leader,
-// Other nodes will
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientWriteRequest<V: Value> {
@@ -185,6 +183,21 @@ pub enum ClientWriteResponse<V: Value> {
         sm_output: V::Result
      },
     NotALeader { leader_id: Option<Id> }
+}
+
+
+/// Sends a value to be applied on the node's state machine, without
+/// being replicated to other nodes, and without requiring the node to be a leader.
+/// In essence, this completely skips the consensus mechanism (used for secret sharing, for example)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientForceApplyRequest<V: Value> {
+    #[serde(bound = "V: Value")]
+    pub value: V
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientForceApplyResponse<V: Value> {
+    pub result: V::Result
 }
 
 /// A request to read all committed entries in `[from, to)`, or `[from, commit_index)` if 'to' isn't
