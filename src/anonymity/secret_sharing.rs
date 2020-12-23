@@ -6,7 +6,8 @@ use num_traits::*;
 use gridiron::fp_256::Fp256;
 use rand::seq::SliceRandom;
 use serde::{Serialize, Deserialize};
-use serde::de::DeserializeOwned;
+use serde::ser::{Serializer, SerializeStruct};
+use serde::de::{self, DeserializeOwned, Deserializer, Visitor, SeqAccess, MapAccess};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hasher, Hash};
 use std::convert::TryFrom;
@@ -14,10 +15,18 @@ use std::convert::TryFrom;
 // A finite field with 256 bits
 pub type FP = Fp256;
 
+
 /// A secret share
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Share {
     x: FP,
     p_x: FP
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareBytes {
+    x: [u8; gridiron::fp_256::PRIMEBYTES],
+    p_x: [u8; gridiron::fp_256::PRIMEBYTES],
 }
 
 impl Share {
@@ -26,6 +35,24 @@ impl Share {
         Share {
             x: x.into(),
             p_x: 0u32.into()
+        }
+    }
+
+    pub fn to_bytes(&self) -> ShareBytes {
+        let x = self.x.to_bytes_array();
+        let p_x = self.p_x.to_bytes_array();
+        ShareBytes {
+            x, p_x
+        }
+    }
+}
+
+
+impl ShareBytes {
+    pub fn to_share(&self) -> Share {
+        Share {
+            x: self.x.into(),
+            p_x: self.p_x.into()
         }
     }
 }
@@ -266,5 +293,16 @@ mod tests {
 
         let server_chan_b_decoded_val = decode_secret::<String>(reconstruct_secret(server_chan_b_shares.as_slice(), 2)).unwrap();
         assert_eq!(server_chan_b_decoded_val, None, "channel B should have no value");
+    }
+
+    #[test]
+    fn share_bytes_conversion_works() {
+        let share = Share {
+            x: 1337u32.into(),
+            p_x: 35125135u32.into()
+        };
+        let bytes = share.to_bytes();
+        let share2 = bytes.to_share();
+        assert_eq!(share, share2); 
     }
 }
