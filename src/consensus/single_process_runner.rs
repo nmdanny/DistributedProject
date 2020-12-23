@@ -4,6 +4,7 @@ extern crate tracing;
 use anyhow::Error;
 use tokio::sync::mpsc;
 use tracing_futures::Instrument;
+use dist_lib::consensus::logging::setup_logging;
 use dist_lib::consensus::types::*;
 use dist_lib::consensus::state_machine::NoopStateMachine;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
@@ -158,23 +159,6 @@ async fn client_message_loop<T: ClientTransport<String>>(client: &mut Client<T, 
         let (ix, _) = client.submit_value(value).await.expect("Submit value failed");
         info!(">>>>>>>>>>>> client \"{}\" committed {} at index {}", client.client_name, i, ix);
     }
-}
-
-pub fn setup_logging() -> Result<(), Error> {
-    color_eyre::install().unwrap();
-    use tracing_subscriber::FmtSubscriber;
-    let subscriber = FmtSubscriber::builder()
-        .pretty()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("raft=info".parse()?)
-            .add_directive("dist_lib=info".parse()?)
-            .add_directive("dist_lib[{vote_granted_too_late}]=off".parse()?)
-            .add_directive("dist_lib[{net_err}]=off".parse()?)
-        )
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Couldn't set up default tracing subscriber");
-    Ok(())
 }
 
 
