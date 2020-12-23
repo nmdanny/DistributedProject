@@ -35,7 +35,7 @@ pub struct NodeCommunicator<V: Value> {
     rpc_sender: mpsc::UnboundedSender<NodeCommand<V>>,
 
     // used to subscribe clients to new committed entries
-    commit_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
+    commit_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>
 }
 
 /// Size of commit notification channel. Note that in case of lagging receivers(clients), they will never block
@@ -51,13 +51,20 @@ impl <V: Value> NodeCommunicator<V> {
                             number_of_nodes: usize,
                             transport: T,
                             machine: S) -> (Node<V, T, S>, NodeCommunicator<V>) {
-       let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
-        let mut node = Node::new(id, number_of_nodes, transport, rpc_receiver, machine);
+        let mut node = Node::new(id, number_of_nodes, transport, machine);
+        let communicator = NodeCommunicator::from_node(&mut node).await;
+        (node, communicator)
+    }
+
+    /// Creates a NodeCommunicator for a node that wasn't spawned yet
+    pub async fn from_node<T: Transport<V>, S: StateMachine<V, T>>(node: &mut Node<V, T, S>) -> NodeCommunicator<V> {
+        let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
         let mut communicator = NodeCommunicator {
             rpc_sender, commit_sender: node.sm_result_sender.clone()
         };
-        node.transport.on_node_communicator_created(id, &mut communicator).await;
-        (node, communicator)
+        node.receiver = Some(rpc_receiver);
+        node.transport.on_node_communicator_created(node.id, &mut communicator).await;
+        communicator
     }
 
     /// Allows one to be notified of entries that were committed AFTER this function is called.

@@ -46,10 +46,12 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
     #[derivative(Debug="ignore")]
     /// Used for receiving request RPCs (reactive)
     ///
-    /// Note, this is `Option` just so the `LeaderState` can move it out, as it needs
-    /// to await on this receiver(use it mutably), yet it also wraps `Node` in a `Rc<RefCell<..>>`, and we
-    /// must never hold a mutable shared borrow across await points.
-    /// It is the `LeaderState` job to ensure this receiver is `Some` before he finishes.
+    /// Note, this can be None in two cases:
+    /// 1. At initialization, before hooking a node communicator
+    /// 2. LeaderState will move out the receiver, since it needs to have mutable access to await
+    ///    on the receiver(use it mutably), yet it also wraps a `Node` in a `Rc<RefCell<..>>`, and we 
+    ///    must never hold a mutable shared borrow across await points.
+    ///    (He will move the receiver back into the node before finishing)
     pub receiver: Option<mpsc::UnboundedReceiver<NodeCommand<V>>>,
 
     /// Node ID
@@ -108,7 +110,6 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
     pub fn new(id: usize,
                number_of_nodes: usize,
                transport: T,
-               cmd_receiver: mpsc::UnboundedReceiver<NodeCommand<V>>,
                machine: S) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
         let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
@@ -116,7 +117,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
         let (sm_result_sender, _) = broadcast::channel(1024);
         Node {
             transport,
-            receiver: Some(cmd_receiver),
+            receiver: None,
             id,
             leader_id: Some(0),
             other_nodes: (0 .. number_of_nodes).filter(|&cur_id| cur_id != id).collect(),
@@ -348,12 +349,10 @@ mod tests {
 
     #[tokio::test]
     async fn node_initialization_and_getters() {
-        let (_tx, rx) = mpsc::unbounded_channel();
         let node = Node::<String, _, _>::new(
             2, 
             5, 
             NoopTransport(), 
-            rx,
         NoopStateMachine::default());
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
@@ -376,8 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_ae() {
-        let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), rx, NoopStateMachine::default());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), NoopStateMachine::default());
 
         let req1 = AppendEntries {
             term: 0,
@@ -440,8 +438,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_ae_clipping() {
-        let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), rx, NoopStateMachine::default());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), NoopStateMachine::default());
         node.current_term = 2;
 
 
@@ -501,8 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_mismatching_ae() {
-        let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), rx, NoopStateMachine::default());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), NoopStateMachine::default());
         node.current_term = 2;
 
         // first request is just to initialize the node
