@@ -91,7 +91,10 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
     /// Used for notifying SM of committed entries
     pub commit_sender: mpsc::UnboundedSender<CommitEntry<V>>,
 
-    pub state_machine: tokio::task::JoinHandle<()>,
+    /// Until the state machine is spawned, allows access to the machine(and a receiver
+    /// needed to spawn it)
+    pub state_machine: Option<(S, mpsc::UnboundedReceiver<CommitEntry<V>>,
+                                  mpsc::UnboundedReceiver<ForceApply<V>>)>,
 
     /// Leader can subscribe in order to be notified of commits
     pub sm_result_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
@@ -101,15 +104,16 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
     sm_phantom: std::marker::PhantomData<S>
 }
 
-impl <V: Value, T: Transport<V>, S: StateMachine<V, T> + Default> Node<V, T, S> {
+impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
     pub fn new(id: usize,
                number_of_nodes: usize,
                transport: T,
-               cmd_receiver: mpsc::UnboundedReceiver<NodeCommand<V>>) -> Self {
+               cmd_receiver: mpsc::UnboundedReceiver<NodeCommand<V>>,
+               machine: S) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
         let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
         let (force_apply_sender, force_apply_recv) = mpsc::unbounded_channel();
-        let (jh, sm_result_sender) = S::default().spawn(commit_receiver, force_apply_recv);
+        let (sm_result_sender, _) = broadcast::channel(1024);
         Node {
             transport,
             receiver: Some(cmd_receiver),
@@ -123,7 +127,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T> + Default> Node<V, T, S> 
             voted_for: None,
             commit_index: None,
             commit_sender,
-            state_machine: jh,
+            state_machine: Some((machine, commit_receiver, force_apply_recv)),
             sm_result_sender,
             force_apply_sender,
             sm_phantom: Default::default()
@@ -152,19 +156,28 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         let id = self.id;
         self.transport.before_node_loop(id).await;
 
-        let node = Rc::new(RefCell::new(self));
+        let task_set = task::LocalSet::new();
 
-        loop {
-            let id = node.borrow().id;
-            let state = node.borrow().state;
-            info!(state = ?state, id = ?id, log=?node.borrow().storage, "@@@@@@@@ Node {} switching to state {:?} @@@@@@@",
-                  id, state);
-            match state {
-                ServerState::Follower => FollowerState::new(&mut node.borrow_mut()).run_loop().await?,
-                ServerState::Candidate => CandidateState::new(&mut node.borrow_mut()).run_loop().await?,
-                ServerState::Leader => LeaderState::new(node.clone()).run_loop().await?
+        task_set.run_until(async move {
+        
+            let (sm, commit_recv, fe_recv) = self.state_machine.take().expect("State machine was deleted");
+            let sender = self.sm_result_sender.clone();
+            let jh = sm.spawn(commit_recv, fe_recv, sender);
+
+            let node = Rc::new(RefCell::new(self));
+
+            loop {
+                let id = node.borrow().id;
+                let state = node.borrow().state;
+                info!(state = ?state, id = ?id, log=?node.borrow().storage, "@@@@@@@@ Node {} switching to state {:?} @@@@@@@",
+                    id, state);
+                match state {
+                    ServerState::Follower => FollowerState::new(&mut node.borrow_mut()).run_loop().await?,
+                    ServerState::Candidate => CandidateState::new(&mut node.borrow_mut()).run_loop().await?,
+                    ServerState::Leader => LeaderState::new(node.clone()).run_loop().await?
+                }
             }
-        }
+        }).await
     }
 
     /// Changes the state of the node
@@ -336,7 +349,12 @@ mod tests {
     #[tokio::test]
     async fn node_initialization_and_getters() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let node = Node::<String, _, NoopStateMachine>::new(2, 5, NoopTransport(), rx);
+        let node = Node::<String, _, _>::new(
+            2, 
+            5, 
+            NoopTransport(), 
+            rx,
+        NoopStateMachine::default());
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
         assert_eq!(node.state, ServerState::Follower);
@@ -359,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _, NoopStateMachine>::new(2, 5, NoopTransport(), rx);
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), rx, NoopStateMachine::default());
 
         let req1 = AppendEntries {
             term: 0,
@@ -423,7 +441,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_ae_clipping() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _, NoopStateMachine>::new(2, 5, NoopTransport(), rx);
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), rx, NoopStateMachine::default());
         node.current_term = 2;
 
 
@@ -484,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn node_on_receive_mismatching_ae() {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut node = Node::<i32, _, NoopStateMachine>::new(2, 5, NoopTransport(), rx);
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), rx, NoopStateMachine::default());
         node.current_term = 2;
 
         // first request is just to initialize the node

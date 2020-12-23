@@ -49,9 +49,10 @@ impl <V: Value> NodeCommunicator<V> {
     pub async fn create_with_node<T: Transport<V>, S: StateMachine<V, T>>(
                             id: usize,
                             number_of_nodes: usize,
-                            transport: T) -> (Node<V, T, S>, NodeCommunicator<V>) {
+                            transport: T,
+                            machine: S) -> (Node<V, T, S>, NodeCommunicator<V>) {
        let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
-        let mut node = Node::new(id, number_of_nodes, transport, rpc_receiver);
+        let mut node = Node::new(id, number_of_nodes, transport, rpc_receiver, machine);
         let mut communicator = NodeCommunicator {
             rpc_sender, commit_sender: node.sm_result_sender.clone()
         };

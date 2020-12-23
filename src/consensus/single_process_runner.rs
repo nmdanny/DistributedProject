@@ -175,9 +175,9 @@ impl <V: Value> Scenario<V> where V::Result: Default{
         let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
         let (nodes, communicators) = futures::future::join_all(
             (0 .. num_nodes).map(|i|
-                NodeCommunicator::create_with_node::<_, NoopStateMachine>(i,
+                NodeCommunicator::create_with_node(i,
                                                    num_nodes,
-                                                   server_transport.clone()))
+                                                   server_transport.clone(), NoopStateMachine::default()))
             )
             .await.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
         let mut clients = Vec::new();

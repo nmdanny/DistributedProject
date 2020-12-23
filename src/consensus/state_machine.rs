@@ -17,18 +17,17 @@ const BROADCAST_CHAN_SIZE: usize = 1024;
 
 pub type ForceApply<V> = (ClientForceApplyRequest<V>, oneshot::Sender<Result<ClientForceApplyResponse<V>, RaftError>>);
 
-#[async_trait]
-pub trait StateMachine<V: Value, T: Transport<V>>: Default + Debug + 'static + Send {
-    /// Updates the state machine state, done asynchronously
+#[async_trait(?Send)]
+pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
+    /// Updates the state machine state
     async fn apply(&mut self, entry: &V) -> V::Result;
 
 
-    /// Spawns the state machine loop, setting up communication
+    // Spawns the state machine loop, setting up communication
     fn spawn(mut self, mut entry_rx: mpsc::UnboundedReceiver<CommitEntry<V>>,
-             mut force_apply_rx: mpsc::UnboundedReceiver<ForceApply<V>>) -> (JoinHandle<()>, broadcast::Sender<(CommitEntry<V>, V::Result)>) {
-        let (res_tx, _res_rx) = broadcast::channel(BROADCAST_CHAN_SIZE); 
-        let res_tx2 = res_tx.clone();
-        let jh = tokio::spawn(async move {
+             mut force_apply_rx: mpsc::UnboundedReceiver<ForceApply<V>>,
+             res_tx: broadcast::Sender<(CommitEntry<V>, V::Result)>) -> JoinHandle<()> {
+        let jh = task::spawn_local(async move {
             let mut last_applied: Option<usize> = None;
             loop {
                 tokio::select! {
@@ -52,7 +51,7 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Default + Debug + 'static + S
                 }
             }
         }.instrument(info_span!("state machine")).instrument(info_span!("state machine")));
-        (jh, res_tx2)
+        jh
     }
 }
 
@@ -61,7 +60,7 @@ pub struct NoopStateMachine();
 
 
 
-#[async_trait]
+#[async_trait(?Send)]
 impl <V: Value, T: Transport<V>> StateMachine<V, T> for NoopStateMachine  where V::Result : Default {
     async fn apply(&mut self, _entry: &V) -> V::Result {
        Default::default() 
