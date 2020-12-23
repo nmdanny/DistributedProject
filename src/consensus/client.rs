@@ -18,6 +18,8 @@ pub trait ClientTransport<V: Value> {
     async fn submit_value(&mut self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError>;
 
     async fn request_values(&mut self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
+
+    async fn force_apply(&mut self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError>;
 }
 
 pub struct SingleProcessClientTransport<V: Value>
@@ -54,6 +56,15 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
             anyhow::anyhow!("client did not receive response to request_values in enough time")
         )).await?
 
+    }
+
+    async fn force_apply(&mut self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
+        let fut = self.communicators.get(node_id).expect("Invalid node ID").force_apply(ClientForceApplyRequest {
+            value
+        });
+        timeout(self.timeout_duration, fut).map_err(|_| RaftError::TimeoutError(
+            anyhow::anyhow!("client did not receive response to force_apply in enough time")
+        )).await?
     }
 }
 

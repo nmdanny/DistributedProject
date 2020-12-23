@@ -240,4 +240,12 @@ impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTra
             self.transport.request_values(node_id, from, to).await
         }).await
     }
+
+    async fn force_apply(&mut self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
+        adversary_request_response(self.request_omission_chance,
+                                   self.response_omission_chance,
+                                   node_id, async move {
+            self.transport.force_apply(node_id, value).await
+        }).await
+    }
 }
