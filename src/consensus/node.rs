@@ -163,7 +163,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         
             let (sm, commit_recv, fe_recv) = self.state_machine.take().expect("State machine was deleted");
             let sender = self.sm_result_sender.clone();
-            let jh = sm.spawn(commit_recv, fe_recv, sender);
+            let _jh = sm.spawn(commit_recv, fe_recv, sender);
 
             let node = Rc::new(RefCell::new(self));
 

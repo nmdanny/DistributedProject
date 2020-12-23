@@ -1,86 +1,19 @@
-use dist_lib::consensus::types::*;
-use dist_lib::consensus::transport::Transport;
-
 #[macro_use]
 extern crate tracing;
 
-#[macro_use]
-pub extern crate derivative;
-
 use anyhow::Error;
-use std::collections::HashMap;
-use async_trait::async_trait;
-use tokio::sync::{RwLock, Barrier, mpsc};
-use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing_futures::Instrument;
+use dist_lib::consensus::types::*;
 use dist_lib::consensus::state_machine::NoopStateMachine;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
+use dist_lib::consensus::transport::ThreadTransport;
 use dist_lib::consensus::client::{Client, SingleProcessClientTransport, ClientTransport};
 use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
 use tokio::stream::StreamExt;
 use std::collections::btree_map::Entry;
-
-struct ThreadTransportState<V: Value>
-{
-    senders: HashMap<Id, NodeCommunicator<V>>,
-
-}
-
-#[derive(Derivative, Clone)]
-#[derivative(Debug)]
-pub struct ThreadTransport<V: Value>
-{
-    #[derivative(Debug="ignore")]
-    state: Arc<RwLock<ThreadTransportState<V>>>,
-
-    #[derivative(Debug="ignore")]
-    barrier: Arc<Barrier>
-}
-
-impl <V: Value> ThreadTransport<V> {
-    pub fn new(expected_num_nodes: usize) -> Self {
-        let barrier = Arc::new(Barrier::new(expected_num_nodes));
-        let state = ThreadTransportState {
-            senders: Default::default()
-        };
-        ThreadTransport {
-            state: Arc::new(RwLock::new(state)),
-            barrier
-        }
-    }
-}
-
-#[async_trait(?Send)]
-impl <V: Value> Transport<V> for ThreadTransport<V> {
-    #[instrument]
-    async fn send_append_entries(&self, to: usize, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
-        let comm = {
-            self.state.read().await.senders.get(&to).unwrap().clone()
-        };
-        Ok(comm.append_entries(msg).await?)
-    }
-
-    #[instrument]
-    async fn send_request_vote(&self, to: usize, msg: RequestVote) -> Result<RequestVoteResponse, RaftError> {
-        let comm = {
-            self.state.read().await.senders.get(&to).unwrap().clone()
-        };
-        Ok(comm.request_vote(msg).await?)
-    }
-
-    async fn on_node_communicator_created(&mut self, id: Id, comm: &mut NodeCommunicator<V>) {
-        let mut state = self.state.write().await;
-
-        let _prev = state.senders.insert(id, comm.clone());
-        assert!(_prev.is_none(), "Can't insert same node twice");
-    }
-
-    async fn before_node_loop(&mut self, _id: Id) {
-        self.barrier.wait().await;
-    }
-}
 
 /// Used for testing the consistency of entries committed by multiple logs
 struct ConsistencyCheck<V: Value> {
