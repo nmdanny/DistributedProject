@@ -19,8 +19,8 @@ pub type FP = Fp256;
 /// A secret share
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Share {
-    x: FP,
-    p_x: FP
+    pub x: FP,
+    pub p_x: FP
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

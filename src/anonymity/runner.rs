@@ -1,3 +1,4 @@
+use crate::consensus::logging::setup_logging;
 use crate::consensus::types::*;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
@@ -86,8 +87,11 @@ mod tests {
     async fn simple_scenario() {
         let ls = tokio::task::LocalSet::new();
         ls.run_until(async move {
+
+            setup_logging().unwrap();
+
             let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
-                num_nodes: 3,
+                num_nodes: 2,
                 num_clients: 2,
                 threshold: 2,
                 num_channels: 3,
@@ -98,16 +102,16 @@ mod tests {
             let mut client_a = scenario.clients.pop().unwrap();
             let mut client_b = scenario.clients.pop().unwrap();
             let handle_a = task::spawn_local(async move {
-                let res = client_a.send_anonymously(1337u64).await;
+                let _res = client_a.send_anonymously(1337u64).await;
                 println!("Client A sent all shares");
             });
 
             let handle_b = task::spawn_local(async move {
-                let res = client_b.send_anonymously(1337u64).await;
+                let _res = client_b.send_anonymously(9881u64).await;
                 println!("Client B sent all shares");
             });
 
-            join(handle_a, handle_b).await;
+            let _ = join(handle_a, handle_b).await;
         }).await;
         println!("simple_scenario done");
     }

@@ -5,24 +5,36 @@ use crate::consensus::types::*;
 use std::{hash::Hash, rc::Rc};
 use rand::distributions::{Distribution, Uniform};
 use tracing_futures::Instrument;
+use derivative;
 
-
+#[derive(Derivative)]
+#[derivative(Debug)]
 /// Handles logic of sending a value anonymously
 pub struct AnonymousClient<V: Value + Hash, CT: ClientTransport<AnonymityMessage>> {
+    #[derivative(Debug="ignore")]
     client: Rc<Client<CT, AnonymityMessage>>,
+
+    #[derivative(Debug="ignore")]
     config: Rc<Config>,
-    phantom: std::marker::PhantomData<V>
+
+    #[derivative(Debug="ignore")]
+    phantom: std::marker::PhantomData<V>,
+
+    client_name: String
+
 }
 
 impl <CT: ClientTransport<AnonymityMessage>, V: Value + Hash> AnonymousClient<V, CT> {
     pub fn new(client_transport: CT, config: Rc<Config>, client_name: String) -> Self {
         AnonymousClient {
-            client: Rc::new(Client::new(client_name, client_transport, config.num_nodes)),
+            client: Rc::new(Client::new(client_name.clone(), client_transport, config.num_nodes)),
             config,
-            phantom: Default::default()
+            phantom: Default::default(),
+            client_name
         }
     }
 
+    #[instrument]
     pub async fn send_anonymously(&mut self, value: V) -> Result<(), anyhow::Error> {
         // note that thread_rng is crypto-secure
         let val_channel = Uniform::new(0, self.config.num_channels).sample(&mut rand::thread_rng());
@@ -50,7 +62,7 @@ impl <CT: ClientTransport<AnonymityMessage>, V: Value + Hash> AnonymousClient<V,
             async move {
                 client.submit_without_commit(node_id, AnonymityMessage::ClientShare {
                     channel_shares: batch
-                }).await
+                }).await.map_err(|e| e.context(format!("while sending to server ID {}", node_id)))
             }
         });
 

@@ -17,6 +17,7 @@ pub type ForceApply<V> = (ClientForceApplyRequest<V>, oneshot::Sender<Result<Cli
 #[async_trait(?Send)]
 pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
     /// Updates the state machine state
+    /// Note, while this is async, you really don't want to block here for long
     async fn apply(&mut self, entry: &V) -> V::Result;
 
 
@@ -28,7 +29,9 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
             let mut last_applied: Option<usize> = None;
             loop {
                 tokio::select! {
+                    // TODO: don't await in body, you dense motherfucker
                     Some(entry) = entry_rx.recv() => {
+                        info!("handling SM change {:?}", entry);
                         let new_last_applied = last_applied.map(|i| i + 1).unwrap_or(0);
                         assert_eq!(new_last_applied, entry.index, "Commit entry index should equal new last applied");
                         let out = self.apply(&entry.value).await;
