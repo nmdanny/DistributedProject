@@ -224,16 +224,25 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
 
 #[derive(Debug)]
 pub struct PendingWriteRequest<V: Value> {
-    pub responder: oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>,
+    pub responder: Option<oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>>,
 
     pub pending_entry_log_index: usize,
+}
+
+impl <V: Value> std::ops::Drop for PendingWriteRequest<V> {
+    fn drop(&mut self) {
+        let responder = self.responder.take();
+        if let Some(responder) = responder {
+            let _ = responder.send(Err(RaftError::NoLongerLeader()));
+        }
+    }
 }
 
 impl <V: Value> PendingWriteRequest<V> {
     pub fn new(pending_entry_log_index: usize,
                          responder: oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>) -> Self
     {
-       PendingWriteRequest { pending_entry_log_index, responder }
+       PendingWriteRequest { pending_entry_log_index, responder: Some(responder) }
     }
 }
 
@@ -393,8 +402,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
                 "commit_entry and commit_index aren't consistent");
 
 
-        if let Some(req) = self.pending_writes.remove(&commit_entry.index) {
-            req.responder.send(Ok(ClientWriteResponse::Ok { commit_index: commit_entry.index, sm_output: result.clone() })).unwrap_or_else(|e| {
+        if let Some(mut req) = self.pending_writes.remove(&commit_entry.index) {
+            let responder = req.responder.take().expect("Couldn'PendingWriteRequest was already dropped, impossible");
+            responder.send(Ok(ClientWriteResponse::Ok { commit_index: commit_entry.index, sm_output: result.clone() })).unwrap_or_else(|e| {
                 error!("Couldn't send client write response, client probably dropped his request: {:?}", e);
             });
         }

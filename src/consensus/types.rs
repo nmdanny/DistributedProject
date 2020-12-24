@@ -163,7 +163,10 @@ pub enum RaftError {
     CommunicatorError(anyhow::Error),
 
     #[error("Timeout error: {0}")]
-    TimeoutError(anyhow::Error)
+    TimeoutError(anyhow::Error),
+
+    #[error("No longer a leader")]
+    NoLongerLeader()
 }
 
 pub type RaftResult<T> = Result<T, RaftError>;
