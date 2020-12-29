@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::time;
 use async_trait::async_trait;
 use derivative;
+use tracing_futures::Instrument;
 
 #[derive(Debug, Clone)]
 /// Configuration used for anonymous message sharing
@@ -36,20 +37,34 @@ pub enum Phase {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AnonymityMessage {
-    ClientShare { channel_shares: Vec<ShareBytes> } ,
-    ServerReconstruct { channel_shares: Vec<ShareBytes>, node_id: Id }
+    ClientShare { 
+        // A client must always send 'num_channels` shares to a particular server
+        channel_shares: Vec<ShareBytes> 
+    },
+    ServerReconstruct { 
+        channel_shares: Vec<ShareBytes>, 
+        node_id: Id 
+    }
 }
 
 
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage>> {
+
     pub committed_messages: Vec<V>,
+
     #[derivative(Debug="ignore")]
     pub client: Client<CT, AnonymityMessage>,
+
     pub id: Id,
+    
+    #[derivative(Debug="ignore")]
     pub config: Rc<Config>,
+
     pub state: Phase,
+
+    #[derivative(Debug="ignore")]
     pub shares: Vec<Vec<Share>>
 }
 
@@ -67,7 +82,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
         
     }
 
-    pub async fn handle_client_share(&mut self, batch: &[ShareBytes]) {
+    pub fn handle_client_share(&mut self, batch: &[ShareBytes]) {
         match &mut self.state {
             Phase::Reconstructing { .. } => error!("Got client share while in reconstruct phase"),
             Phase::ClientSharing { last_share_at, num_shares_seen } => {
@@ -76,7 +91,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
                 *num_shares_seen += batch.len();
                 assert!(*num_shares_seen <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
 
-                info!("Got client shares: {:?}", batch);
+                debug!("Got client shares: {:?}", batch);
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64).into(), "Got wrong share, bug within client");
                     if self.shares[chan].is_empty() {
@@ -91,25 +106,61 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
                 *last_share_at = Instant::now();
 
                 if *num_shares_seen == self.config.num_channels * self.config.num_clients {
-                    self.begin_reconstructing().await;
+                    self.begin_reconstructing();
                 }
 
             }
         }
     }
 
-    #[instrument]
-    pub async fn on_receive_reconstruct_share(&mut self, batch: &[ShareBytes], from_node: Id) {
-        info!("Got request to reconstruct share");
+    pub fn on_receive_reconstruct_share(&mut self, batch: &[ShareBytes], from_node: Id) {
+        if self.id == from_node {
+            return;
+        }
+        assert_eq!(batch.len(), self.config.num_channels, "batch size mismatch on receive_reconstruct_share");
+
+        // first, if we're not in re-construct stage yet, begin reconstruct
+        if let Phase::ClientSharing { .. } = &self.state {
+            info!("Got reconstruct share while still on ClientSharing phase");
+            self.begin_reconstructing();
+        }
+
+        // add all shares for every channel. 
+        for chan_num in 0 .. self.config.num_channels {
+            let chan_new_share = batch[chan_num].to_share();
+            assert!(chan_new_share.x != ((self.id + 1) as u64).into(), 
+                "impossible, a ServerReconstruct share message can only contain shares of a different ID");
+            self.shares[chan_num].push(chan_new_share);
+
+            // try decoding a value once we passed the threshold
+            if self.shares[chan_num].len() >= self.config.threshold {
+                self.reconstruct_channel(chan_num);
+            }
+        }
     }
 
-    #[instrument]
-    pub async fn on_fully_reconstruct(&mut self, chan: usize, val: &V) {
-
+    pub fn reconstruct_channel(&mut self, chan: usize) {
+        let shares = &self.shares[chan];
+        let val = reconstruct_secret(shares, self.config.threshold as u32);
+        let decoded = decode_secret(val);
+        match decoded {
+            Ok(None) => {
+                trace!("Got nothing on channel {}", chan);
+            },
+            Ok(Some(decoded)) => {
+                info!("Decoded value {:?} on channel {}", decoded, chan);
+                self.commit_decoded_secret(decoded);
+            }
+            Err(e) => {
+                error!("Error while decoding channel {}: {:?}", chan, e);
+            }
+        }
     }
 
-    #[instrument]
-    pub async fn begin_reconstructing(&mut self) {
+    pub fn commit_decoded_secret(&mut self, val: V) {
+    }
+
+    pub fn begin_reconstructing(&mut self) {
         match self.state {
             Phase::ClientSharing { ..  } => { 
                 self.state = Phase::Reconstructing {};
@@ -117,18 +168,22 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
                 let shares = self.shares.iter().flatten().map(|s| s.to_bytes()).collect::<Vec<_>>();
                 let id = self.id;
                 
-                // This must be done in another task, because as part of submit value, we will also submit a value to
-                // our own node, whose state machine is busy handling this one, therefore, never getting an answer
-                let _ = self.client.submit_value(
-                    AnonymityMessage::ServerReconstruct {
-                        channel_shares: shares,
-                        node_id: id
+                // This must be done in another task, otherwise we will get a deadlock
+                // (see explanation in `state_machine` trait)
+                let mut client = self.client.clone();
+                tokio::task::spawn_local(async move {
+                    let res = client.submit_value(
+                        AnonymityMessage::ServerReconstruct {
+                            channel_shares: shares,
+                            node_id: id
+                        }
+                    ).await;
+                    match res {
+                        Ok(_) => trace!("Sent all my shares successfully"),
+                        Err(e) => error!("There was an error sending my shares: {:?}", e)
                     }
-                ).await.map_err(|e| {
-                    error!("Error submitting my shares: {:?}", e);
-                }).map(|(res, _)| {
-                    trace!("Share submitted and committed at {}", res);
-                });
+
+                }.instrument(info_span!("begin_reconstructing", id=?self.id)));
                 
             },
             Phase::Reconstructing => { 
@@ -155,8 +210,8 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
 impl <V: Value + Hash, T: Transport<AnonymityMessage>, C: ClientTransport<AnonymityMessage>> StateMachine<AnonymityMessage, T> for AnonymousLogSM<V, C> {
     async fn apply(&mut self, entry: &AnonymityMessage) -> () {
         match entry {
-            AnonymityMessage::ClientShare { channel_shares } => { self.handle_client_share(channel_shares.as_slice()).await },
-            AnonymityMessage::ServerReconstruct { channel_shares, node_id } => {  self.on_receive_reconstruct_share(channel_shares.as_slice(), *node_id).await }
+            AnonymityMessage::ClientShare { channel_shares } => { self.handle_client_share(channel_shares.as_slice()) },
+            AnonymityMessage::ServerReconstruct { channel_shares, node_id } => {  self.on_receive_reconstruct_share(channel_shares.as_slice(), *node_id) }
         }
     }
 }
