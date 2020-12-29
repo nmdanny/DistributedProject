@@ -16,6 +16,8 @@ use tokio::time::Duration;
 use rand::distributions::uniform::UniformFloat;
 use tracing::Instrument;
 use std::collections::btree_map::Entry;
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct AdversaryState {
@@ -177,12 +179,12 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
     }
 }
 
-
+#[derive(Clone)]
 pub struct AdversaryClientTransport<V: Value, T: ClientTransport<V>>
 {
     transport: T,
-    pub request_omission_chance: f64,
-    pub response_omission_chance: f64,
+    pub request_omission_chance: Rc<Cell<f64>>,
+    pub response_omission_chance: Rc<Cell<f64>>,
     phantom: std::marker::PhantomData<V>,
 }
 
@@ -190,8 +192,8 @@ impl <V: Value, T: ClientTransport<V>> AdversaryClientTransport<V, T> {
     pub fn new(transport: T) -> Self {
         AdversaryClientTransport {
             transport,
-            request_omission_chance: 0.0,
-            response_omission_chance: 0.0,
+            request_omission_chance: Rc::new(Cell::new(0.0)),
+            response_omission_chance: Rc::new(Cell::new(0.0)),
             phantom: Default::default()
         }
     }
@@ -226,24 +228,24 @@ async fn adversary_request_response<R>(req_omission_chance: f64,
 #[async_trait(?Send)]
 impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTransport<V, T> {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>, RaftError> {
-        adversary_request_response(self.request_omission_chance,
-                                   self.response_omission_chance,
+        adversary_request_response(self.request_omission_chance.get(),
+                                   self.response_omission_chance.get(),
                                    node_id, async move {
             self.transport.submit_value(node_id, value).await
         }).await
     }
 
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
-        adversary_request_response(self.request_omission_chance,
-                                   self.response_omission_chance,
+        adversary_request_response(self.request_omission_chance.get(),
+                                   self.response_omission_chance.get(),
                                    node_id, async move {
             self.transport.request_values(node_id, from, to).await
         }).await
     }
 
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
-        adversary_request_response(self.request_omission_chance,
-                                   self.response_omission_chance,
+        adversary_request_response(self.request_omission_chance.get(),
+                                   self.response_omission_chance.get(),
                                    node_id, async move {
             self.transport.force_apply(node_id, value).await
         }).await

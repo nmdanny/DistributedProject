@@ -8,7 +8,7 @@ use tracing_futures::Instrument;
 use derivative;
 
 #[derive(Derivative)]
-#[derivative(Debug)]
+#[derivative(Debug, Clone)]
 /// Handles logic of sending a value anonymously
 pub struct AnonymousClient<V: Value + Hash, CT: ClientTransport<AnonymityMessage>> {
     #[derivative(Debug="ignore")]

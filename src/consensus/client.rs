@@ -11,10 +11,11 @@ use crate::consensus::timing::{CLIENT_RETRY_DELAY_RANGE, CLIENT_TIMEOUT};
 use tokio::time::timeout;
 use derivative;
 use futures::TryFutureExt;
+use std::rc::Rc;
 
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait(?Send)]
-pub trait ClientTransport<V: Value> : 'static {
+pub trait ClientTransport<V: Value> : 'static + Clone {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError>;
 
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
@@ -22,16 +23,17 @@ pub trait ClientTransport<V: Value> : 'static {
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError>;
 }
 
+#[derive(Clone)]
 pub struct SingleProcessClientTransport<V: Value>
 {
-    communicators: Vec<NodeCommunicator<V>>,
+    communicators: Rc<Vec<NodeCommunicator<V>>>,
     timeout_duration: Duration
 }
 
 impl <V: Value> SingleProcessClientTransport<V> {
     pub fn new(communicators: Vec<NodeCommunicator<V>>) -> Self {
         SingleProcessClientTransport {
-            communicators,
+            communicators: Rc::new(communicators),
             timeout_duration: CLIENT_TIMEOUT
         }
     }
@@ -68,7 +70,7 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
     }
 }
 
-#[derive(Derivative)]
+#[derive(Derivative, Clone)]
 #[derivative(Debug)]
 /// A generic client implementation that ensures it doesn't send duplicate requests when re-sending
 /// values(by using their equality definition)
