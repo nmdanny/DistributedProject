@@ -36,7 +36,7 @@ anyhow = "1.0"
 thiserror = "1.0.22"
 derivative = "2.1.1"
 gridiron = "0.8.0"
-num-traits = "0.2"
+curve25519-dalek = "3"
 
 # grpc
 tonic = "0.3.1"

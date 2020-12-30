@@ -1,9 +1,6 @@
-use rand::distributions::{Distribution, Uniform, Standard};
+use anyhow::Context;
 use std::ops::{Add, Sub, Mul, Div};
-use std::num::Wrapping;
 use std::collections::BTreeSet;
-use num_traits::*;
-use gridiron::fp_256::Fp256;
 use rand::seq::SliceRandom;
 use serde::{Serialize, Deserialize};
 use serde::ser::{Serializer, SerializeStruct};
@@ -11,38 +8,47 @@ use serde::de::{self, DeserializeOwned, Deserializer, Visitor, SeqAccess, MapAcc
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hasher, Hash};
 use std::convert::TryFrom;
+use derivative;
+use curve25519_dalek::scalar::Scalar;
+
 
 // A finite field with 256 bits
-pub type FP = Fp256;
+pub type FP = Scalar;
 
 
 /// A secret share
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Derivative, Clone, PartialEq, Eq)]
+#[derivative(Debug)]
 pub struct Share {
-    pub x: FP,
+    pub x: u64,
+
+    #[derivative(Debug = "ignore")]
     pub p_x: FP
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Derivative, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derivative(Debug)]
 pub struct ShareBytes {
-    x: [u8; gridiron::fp_256::PRIMEBYTES],
-    p_x: [u8; gridiron::fp_256::PRIMEBYTES],
+    x: u64,
+
+    #[derivative(Debug = "ignore")]
+    p_x: [u8; 32],
 }
 
 impl Share {
     /// Creates a share for 'x' using the 
-    pub fn new(x: u32) -> Share {
+    pub fn new(x: impl Into<u64>) -> Share {
+        let x: u64 = x.into();
         Share {
-            x: x.into(),
-            p_x: 0u32.into()
+            x: x,
+            p_x: 0u64.into()
         }
     }
 
     pub fn to_bytes(&self) -> ShareBytes {
-        let x = self.x.to_bytes_array();
-        let p_x = self.p_x.to_bytes_array();
+        let p_x = self.p_x.to_bytes();
         ShareBytes {
-            x, p_x
+            x: self.x, p_x
         }
     }
 }
@@ -50,9 +56,10 @@ impl Share {
 
 impl ShareBytes {
     pub fn to_share(&self) -> Share {
+        let p_x = FP::from_bytes_mod_order(self.p_x.clone());
         Share {
-            x: self.x.into(),
-            p_x: self.p_x.into()
+            x: self.x,
+            p_x
         }
     }
 }
@@ -66,26 +73,34 @@ struct Polynomial {
 impl Polynomial {
     /// Creates a polynomial whose value is `secret` at the Y intersection,
     /// and has `deg` 
-    fn encode_secret(secret: FP, deg: u32) -> Polynomial {
+    fn encode_secret(secret: FP, deg: u64) -> Polynomial {
         // note that ThreadRng is cryptographically secure(an important distinction)
-        let rng = rand::thread_rng();
-        let pol_coef = std::iter::once(secret).chain(
-            Standard.sample_iter(rng).take(deg as usize).map(|b: [u8; 32]| b.into())).collect::<Vec<_>>();
+        let rng = &mut rand::thread_rng();
+        let mut pol_coef = Vec::new();
+        pol_coef.push(secret);
+        for _ in 1 ..= deg
+        {
+            pol_coef.push(FP::random(rng));
+        }
         Polynomial { pol_coef }
     }
 
     /// Evaluates the polynomial at x, returning the result
     fn evaluate(&self, x: impl Into<FP>) -> FP {
         let x = x.into();
-        return (0 .. ).into_iter().zip(self.pol_coef.iter()).fold(0u32.into(), |acc, (i, ci)| {
-            acc + (*ci) * x.pow(i)
+        return (0 .. ).into_iter().zip(self.pol_coef.iter()).fold(0u64.into(), |acc, (i, ci)| {
+            let mut exp = FP::one();
+            for _ in 1 ..= i {
+                exp *= x;
+            }
+            acc + (*ci) * exp
         })
     }
 
 }
 
 /// Splits the secret into `n` shares, needing `k` shares to re-construct
-pub fn create_share(secret: FP, k: u32, n: u32) -> Vec<Share> {
+pub fn create_share(secret: FP, k: u64, n: u64) -> Vec<Share> {
     assert!(k <= n, "number of shares can't be bigger than n");
     assert!(k >= 1, "number of shares must be at least 1");
 
@@ -101,7 +116,7 @@ pub fn create_share(secret: FP, k: u32, n: u32) -> Vec<Share> {
 }
 
 /// Reconstructs a secret from a given list of secret shares, assuming secret was split to 'k' different shares
-pub fn reconstruct_secret(shares: &[Share], k: u32) -> FP {
+pub fn reconstruct_secret(shares: &[Share], k: u64) -> FP {
     assert!(shares.len() >= k as usize, "need at least k different points");
     assert_eq!(shares.iter().map(|s| s.x).collect::<BTreeSet<_>>().len(), shares.len(),
                "all shares must have unique 'x' values");
@@ -112,8 +127,9 @@ pub fn reconstruct_secret(shares: &[Share], k: u32) -> FP {
     for (j, Share { x: xj, p_x: p_xj}) in (0..).into_iter().zip(shares.iter().take(k as usize)) {
         let mut el_j = FP::one();
         for m in (0 .. k).into_iter().filter(|&m| m != j) {
-            let xm = shares[m as usize].x;
-            el_j *= xm/(xm - *xj);
+            let xm = FP::from(shares[m as usize].x);
+            let xj = FP::from(*xj);
+            el_j *= xm * (xm - xj).invert();
         }
         result += (*p_xj) * el_j;
     }
@@ -135,20 +151,23 @@ pub fn encode_secret<S: Serialize + Hash>(data: S) -> Result<FP, anyhow::Error> 
     value_and_hash.value.hash(&mut hasher);
     value_and_hash.hash = hasher.finish();
     let bytes = bincode::serialize(&value_and_hash)?;
-    if bytes.len() > 31 {
+    if bytes.len() > 32 {
         return Err(anyhow::anyhow!("Need more than 31 bytes to safely store value, does not fit into secret"));
     }
 
-    let mut secret_bytes = [0u8; 32];
-    &secret_bytes[ .. bytes.len()].copy_from_slice(&bytes);
+    let mut bytes_arr = [0u8; 32];
+    bytes_arr[ .. bytes.len()].copy_from_slice(&bytes);
 
-    let fp = FP::from(secret_bytes);
-    return Ok(fp)
+    let secret = FP::from_canonical_bytes(bytes_arr).context(
+        "Couldn't create secret from value & hash, encoded value is probably too big"
+    )?;
+
+    return Ok(secret)
 
 }
 
 pub fn encode_zero_secret() -> FP {
-    0u32.into()
+    0u64.into()
 }
 
 /// Given a secret(or what we suspect is a secret), tries to deserialize its contents
@@ -158,11 +177,11 @@ pub fn encode_zero_secret() -> FP {
 /// on the format) - if not, then it's extremely likely that hash check will fail. If not, you should buy a lottery ticket
 pub fn decode_secret<S: DeserializeOwned + Hash>(secret: FP) -> Result<Option<S>, anyhow::Error> {
 
-    if secret == 0u32.into() {
+    if secret == 0u64.into() {
         return Ok(None)
     }
 
-    let bytes = secret.to_bytes_array();
+    let bytes = secret.to_bytes();
 
     let value_and_hash = bincode::deserialize::<ValueAndHash<S>>(&bytes)?;
     let mut hasher = DefaultHasher::new();
@@ -189,14 +208,14 @@ mod tests {
     #[test]
     fn test_polynomial_evaluate() {
         // 5 + x^2 + 2*x^4
-        let p = Polynomial { pol_coef: [5u32, 0u32, 1u32, 0u32, 2u32 ].iter().copied().map(Into::into).collect()};
-        assert_eq!(p.evaluate(0u32), 5u32.into());
-        assert_eq!(p.evaluate(1u32), 8u32.into()); // 5 + 1 + 2*1
-        assert_eq!(p.evaluate(2u32), 41u32.into()); // 5 + 2 + 2*16
+        let p = Polynomial { pol_coef: [5u64, 0u64, 1u64, 0u64, 2u64 ].iter().copied().map(Into::into).collect()};
+        assert_eq!(p.evaluate(0u64), 5u64.into());
+        assert_eq!(p.evaluate(1u64), 8u64.into()); // 5 + 1 + 2*1
+        assert_eq!(p.evaluate(2u64), 41u64.into()); // 5 + 2 + 2*16
     }
 
     // #[test]
-    fn test_secret_share(k: u32, n: u32, secret: FP) {
+    fn test_secret_share(k: u64, n: u64, secret: FP) {
         let mut shares = create_share(secret, k, n);
 
         shares.shuffle(&mut rand::thread_rng());
@@ -209,7 +228,7 @@ mod tests {
     fn test_secret_shares() {
         for (k, n) in &[(2, 3), (5, 10), (20, 22)] {
             for secret in &[
-                0u32, 1, 100, 1337, 420, 0xCAFEBABE
+                0u64, 1, 100, 1337, 420, 0xCAFEBABE
             ] {
                 test_secret_share(*k, *n, FP::from(*secret));
             }
@@ -298,11 +317,12 @@ mod tests {
     #[test]
     fn share_bytes_conversion_works() {
         let share = Share {
-            x: 1337u32.into(),
-            p_x: 35125135u32.into()
+            x: 1337u64,
+            p_x: 35125135u64.into()
         };
         let bytes = share.to_bytes();
         let share2 = bytes.to_share();
         assert_eq!(share, share2); 
+        assert_eq!(share.x, 1337u64);
     }
 }

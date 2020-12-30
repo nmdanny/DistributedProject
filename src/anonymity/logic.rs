@@ -93,7 +93,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
 
                 debug!("Got client shares: {:?}", batch);
                 for (chan, share) in (0..).zip(batch.into_iter()) {
-                    assert_eq!(share.x, ((self.id + 1) as u64).into(), "Got wrong share, bug within client");
+                    assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
                     if self.shares[chan].is_empty() {
                         self.shares[chan].push(share);
                     } else {
@@ -128,7 +128,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
         // add all shares for every channel. 
         for chan_num in 0 .. self.config.num_channels {
             let chan_new_share = batch[chan_num].to_share();
-            assert!(chan_new_share.x != ((self.id + 1) as u64).into(), 
+            assert!(chan_new_share.x != ((self.id + 1) as u64), 
                 "impossible, a ServerReconstruct share message can only contain shares of a different ID");
             self.shares[chan_num].push(chan_new_share);
 
@@ -141,7 +141,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
 
     pub fn reconstruct_channel(&mut self, chan: usize) {
         let shares = &self.shares[chan];
-        let val = reconstruct_secret(shares, self.config.threshold as u32);
+        let val = reconstruct_secret(shares, self.config.threshold as u64);
         let decoded = decode_secret(val);
         match decoded {
             Ok(None) => {
