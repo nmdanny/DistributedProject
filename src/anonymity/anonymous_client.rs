@@ -12,6 +12,9 @@ use derivative;
 /// Handles logic of sending a value anonymously
 pub struct AnonymousClient<V: Value + Hash, CT: ClientTransport<AnonymityMessage>> {
     #[derivative(Debug="ignore")]
+    mut_client: Client<CT, AnonymityMessage>,
+
+    #[derivative(Debug="ignore")]
     client: Rc<Client<CT, AnonymityMessage>>,
 
     #[derivative(Debug="ignore")]
@@ -27,6 +30,7 @@ pub struct AnonymousClient<V: Value + Hash, CT: ClientTransport<AnonymityMessage
 impl <CT: ClientTransport<AnonymityMessage>, V: Value + Hash> AnonymousClient<V, CT> {
     pub fn new(client_transport: CT, config: Rc<Config>, client_name: String) -> Self {
         AnonymousClient {
+            mut_client: Client::new(client_name.clone(), client_transport.clone(), config.num_nodes),
             client: Rc::new(Client::new(client_name.clone(), client_transport, config.num_nodes)),
             config,
             phantom: Default::default(),
@@ -61,9 +65,10 @@ impl <CT: ClientTransport<AnonymityMessage>, V: Value + Hash> AnonymousClient<V,
             }).collect();
 
             let client = client.clone();
+            let client_name = self.client_name.clone();
             async move {
                 client.submit_without_commit(node_id, AnonymityMessage::ClientShare {
-                    channel_shares: batch
+                    channel_shares: batch, client_name
                 }).await.map_err(|e| e.context(format!("while sending to server ID {}", node_id)))
             }
         });
@@ -80,6 +85,11 @@ impl <CT: ClientTransport<AnonymityMessage>, V: Value + Hash> AnonymousClient<V,
                 }
             }
         }).await;
+
+        match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_name: self.client_name.clone() }).await {
+            Ok(_) => {}
+            Err(_) => { error!("Couldn't notify that I am live") }
+        }
 
         Ok(())
     }
