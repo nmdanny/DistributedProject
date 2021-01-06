@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tokio::task;
 use async_trait::async_trait;
 use std::fmt::Debug;
+use futures::stream::{Stream, StreamExt};
 use tracing_futures::{Instrument};
 
 
@@ -16,9 +17,24 @@ pub type ForceApply<V> = (ClientForceApplyRequest<V>, oneshot::Sender<Result<Cli
 
 #[async_trait(?Send)]
 pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
-    /// Updates the state machine state
-    /// Note, while this is async, you really don't want to block here for long
+    /// Updates the state machine state. While this is async for convenience, updates 
+    /// are performed sequentially - the state machine won't process the next value before finishing with
+    /// the current one
+    ///
+    /// Be careful not to trigger deadlocks, for example, if the state machines submits a value to the log
+    /// and awaits a result(in the same task of `apply`) - the result will never arrive, as the value needs
+    /// to be processed by the state machine - the same machine waiting for the result.
     async fn apply(&mut self, entry: &V) -> V::Result;
+
+    type HookEvent;
+    type HookStream: Stream<Item = Self::HookEvent>;
+
+    /// Allows hooking into the state machine lifecycle and applying operations
+    /// independently of commit entries
+    fn create_hook_stream(&mut self) -> Self::HookStream;
+
+    fn handle_hook_event(&mut self, event: Self::HookEvent) {
+    }
 
 
     // Spawns the state machine loop, setting up communication
@@ -27,8 +43,13 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
              res_tx: broadcast::Sender<(CommitEntry<V>, V::Result)>) -> JoinHandle<()> {
         let jh = task::spawn_local(async move {
             let mut last_applied: Option<usize> = None;
+            let hook_stream = self.create_hook_stream();
+            tokio::pin!(hook_stream);
             loop {
                 tokio::select! {
+                    Some(event) = hook_stream.next() => {
+                        self.handle_hook_event(event);
+                    },
                     // TODO: don't await in body, you dense motherfucker
                     Some(entry) = entry_rx.recv() => {
                         info!("handling SM change {:?}", entry);
@@ -62,8 +83,18 @@ pub struct NoopStateMachine();
 
 #[async_trait(?Send)]
 impl <V: Value, T: Transport<V>> StateMachine<V, T> for NoopStateMachine  where V::Result : Default {
+
+    type HookEvent = ();
+    type HookStream = futures::stream::Empty<()>;
+
+
+
     async fn apply(&mut self, _entry: &V) -> V::Result {
        Default::default() 
+    }
+
+    fn create_hook_stream(&mut self) -> Self::HookStream {
+        futures::stream::empty()
     }
 }
 

@@ -13,6 +13,8 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use derivative;
 use tracing_futures::Instrument;
+use futures::stream::{Stream, StreamExt};
+use tokio::time::{Interval, Duration};
 
 #[derive(Debug, Clone)]
 /// Configuration used for anonymous message sharing
@@ -87,7 +89,9 @@ pub enum Phase {
         shares: Vec<Vec<(Share, ClientId)>>
     },
     Reconstructing {
-        shares: Vec<Vec<Share>>
+        shares: Vec<Vec<Share>>,
+
+        last_share_at: time::Instant
     }
 }
 
@@ -214,12 +218,13 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             self.begin_reconstructing();
         }
 
-        if let Phase::Reconstructing { shares, .. } = &mut self.state {
+        if let Phase::Reconstructing { shares, last_share_at } = &mut self.state {
             // add all shares for every channel. 
             for channel_num in 0 .. self.config.num_channels {
                 let chan_new_share = batch[channel_num].to_share();
                 shares[channel_num].push(chan_new_share);
             }
+            *last_share_at = Instant::now();
 
             // try decoding all channels once we passed the threshold
             if shares[0].len() >= self.config.threshold {
@@ -268,8 +273,8 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         };
 
         let channels = vec![Vec::new(); self.config.num_channels];
-        self.state = Phase::Reconstructing { shares: channels};
-        info!("Beginning re-construct phase, sending to all other nodes");
+        self.state = Phase::Reconstructing { shares: channels, last_share_at: Instant::now() };
+        debug!("Beginning re-construct phase, sending to all other nodes");
 
         if shares.is_none() {
             error!("I am missing shares from some clients, skipping reconstruct round");
@@ -327,6 +332,32 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
             AnonymityMessage::ServerNotifyGotShare { node_id, client_name } => { self.handle_got_share_notification(*node_id, client_name) }
             AnonymityMessage::ReconstructResult { results, round } => { self.handle_reconstruct_result(&results, *round) }
         }
+    }
+
+    type HookEvent = tokio::time::Instant;
+
+    type HookStream = Interval;
+
+    fn create_hook_stream(&mut self) -> Self::HookStream {
+        tokio::time::interval(self.config.phase_length)
+    }
+
+    fn handle_hook_event(&mut self, _: Self::HookEvent) {
+        let now = Instant::now();
+        match &self.state {
+            Phase::ClientSharing { last_share_at, .. } => {
+                if (now - *last_share_at) > self.config.phase_length {
+                    debug!("ClientSharing timeout");
+                    self.begin_reconstructing();
+                }
+            }
+            Phase::Reconstructing { last_share_at, .. } => {
+                if (now - *last_share_at) > self.config.phase_length {
+                    debug!("Reconstructing time out");
+                    self.begin_client_sharing(self.round + 1);
+                }
+            }
+        };
     }
 }
 
