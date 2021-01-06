@@ -69,17 +69,22 @@ fn mix_shares_from(my_id: Id, live_clients: &HashSet<ClientId>, shares_view: &Ve
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Derivative, Clone, PartialEq, Eq)]
+#[derivative(Debug)]
 pub enum Phase {
     ClientSharing {
         last_share_at: time::Instant,
-        num_shares_seen: usize,
 
+        #[derivative(Debug="ignore")]
         /// Synchronized among all nodes, identifies which servers got shares from which clients
         contact_graph: ContactGraph,
 
         /// Synchronized among all nodes, identifies clients that didn't crash after sending all their shares
-        live_clients: HashSet<ClientId>
+        live_clients: HashSet<ClientId>,
+
+        // Contains 'd' channels, each channel containing shares from many clients
+        #[derivative(Debug="ignore")]
+        shares: Vec<Vec<(Share, ClientId)>>
     },
     Reconstructing {
         shares: Vec<Vec<Share>>
@@ -127,9 +132,6 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage>
 
     pub state: Phase,
 
-    // Contains 'd' channels, each channel containing shares from many clients
-    #[derivative(Debug="ignore")]
-    pub shares: Vec<Vec<(Share, ClientId)>>
 }
 
 impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, CT> {
@@ -137,13 +139,13 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
         assert!(id < config.num_nodes, "Invalid node ID");
         let client = Client::new(format!("SM-{}-cl", id), client_transport, config.num_nodes);
         let state = Phase::ClientSharing {
-            last_share_at: Instant::now(), num_shares_seen: 0,
+            last_share_at: Instant::now(),
             live_clients: HashSet::new(),
-            contact_graph: create_contact_graph(config.num_nodes)
+            contact_graph: create_contact_graph(config.num_nodes),
+            shares: vec![Vec::new(); config.num_channels]
         };
-        let shares = vec![Vec::new(); config.num_channels];
         AnonymousLogSM {
-            committed_messages: Vec::new(), client, id, config, state, shares
+            committed_messages: Vec::new(), client, id, config, state
         }
         
     }
@@ -151,18 +153,17 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
     pub fn handle_client_share(&mut self, client_name: ClientId, batch: &[ShareBytes]) {
         match &mut self.state {
             Phase::Reconstructing { .. } => error!("Got client share while in reconstruct phase"),
-            Phase::ClientSharing { last_share_at, num_shares_seen, 
+            Phase::ClientSharing { last_share_at, shares, 
                                    contact_graph, .. } => {
-                assert_eq!(self.shares.len(), batch.len() , "client batch size mismatch with expected channels");
+                assert_eq!(shares.len(), batch.len() , "client batch size mismatch with expected channels");
                 let batch = batch.into_iter().map(|s| s.to_share()).collect::<Vec<_>>();
-                *num_shares_seen += batch.len();
-                assert!(*num_shares_seen <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
+                assert!(shares.iter().map(|chan| chan.len()).sum::<usize>() <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
 
                 debug!("Got client shares: {:?}", batch);
 
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
-                    self.shares[chan].push((share, client_name.clone()));
+                    shares[chan].push((share, client_name.clone()));
                 }
 
                 *last_share_at = Instant::now();
@@ -222,12 +223,12 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
 
 
     pub fn begin_reconstructing(&mut self) {
-        let live_clients = match &self.state {
-            Phase::ClientSharing { live_clients, .. } => live_clients,
+        let shares = match &self.state {
+            Phase::ClientSharing { live_clients, shares, .. } => {
+                mix_shares_from(self.id, &live_clients, shares)
+            },
             _ => { panic!("Begin reconstructing twice in a row") }
         };
-        let shares = mix_shares_from(self.id, &live_clients, &self.shares);
-        drop(live_clients);
 
         let channels = vec![Vec::new(); self.config.num_channels];
         self.state = Phase::Reconstructing { shares: channels };
@@ -264,10 +265,13 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
                 error!("Begin client sharing while already sharing");
             }
             Phase::Reconstructing { .. } => {
-                self.shares = vec![Vec::new(); self.config.num_channels];
                 let num_nodes = self.config.num_nodes;
-                self.state = Phase::ClientSharing { last_share_at: Instant::now(), num_shares_seen: 0, 
-                    live_clients: HashSet::new(), contact_graph: create_contact_graph(num_nodes) }
+                self.state = Phase::ClientSharing { 
+                    last_share_at: Instant::now(), 
+                    live_clients: HashSet::new(), 
+                    contact_graph: create_contact_graph(num_nodes),
+                    shares: vec![Vec::new(); self.config.num_channels] 
+                }
             }
         }
     }
