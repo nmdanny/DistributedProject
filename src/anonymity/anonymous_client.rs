@@ -10,12 +10,12 @@ use derivative;
 #[derive(Derivative)]
 #[derivative(Debug, Clone)]
 /// Handles logic of sending a value anonymously
-pub struct AnonymousClient<V: Value + Hash, CT: ClientTransport<AnonymityMessage>> {
+pub struct AnonymousClient<V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> {
     #[derivative(Debug="ignore")]
-    mut_client: Client<CT, AnonymityMessage>,
+    mut_client: Client<CT, AnonymityMessage<V>>,
 
     #[derivative(Debug="ignore")]
-    client: Rc<Client<CT, AnonymityMessage>>,
+    client: Rc<Client<CT, AnonymityMessage<V>>>,
 
     #[derivative(Debug="ignore")]
     config: Rc<Config>,
@@ -27,7 +27,7 @@ pub struct AnonymousClient<V: Value + Hash, CT: ClientTransport<AnonymityMessage
 
 }
 
-impl <CT: ClientTransport<AnonymityMessage>, V: Value + Hash> AnonymousClient<V, CT> {
+impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient<V, CT> {
     pub fn new(client_transport: CT, config: Rc<Config>, client_name: String) -> Self {
         AnonymousClient {
             mut_client: Client::new(client_name.clone(), client_transport.clone(), config.num_nodes),

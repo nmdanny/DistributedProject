@@ -93,7 +93,12 @@ pub enum Phase {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum AnonymityMessage {
+pub enum ReconstructError {
+    Collision, NoValue
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AnonymityMessage<V: Value> {
     ClientShare { 
         // A client must always send 'num_channels` shares to a particular server
         channel_shares: Vec<ShareBytes>,
@@ -112,18 +117,24 @@ pub enum AnonymityMessage {
     ServerReconstruct { 
         channel_shares: Vec<ShareBytes>, 
         node_id: Id 
+    },
+    ReconstructResult {
+        /// Maps each channel to the client's secret, or None upon collision
+        #[serde(bound = "V: Value")]
+        results: Vec<Result<V, ReconstructError>>,
+        round: usize
     }
 }
 
 
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage>> {
+pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> {
 
     pub committed_messages: Vec<V>,
 
     #[derivative(Debug="ignore")]
-    pub client: Client<CT, AnonymityMessage>,
+    pub client: Client<CT, AnonymityMessage<V>>,
 
     pub id: Id,
     
@@ -132,9 +143,11 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage>
 
     pub state: Phase,
 
+    pub round: usize
+
 }
 
-impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, CT> {
+impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<V, CT> {
     pub fn new(config: Rc<Config>, id: usize, client_transport: CT) -> AnonymousLogSM<V, CT> {
         assert!(id < config.num_nodes, "Invalid node ID");
         let client = Client::new(format!("SM-{}-cl", id), client_transport, config.num_nodes);
@@ -145,7 +158,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
             shares: vec![Vec::new(); config.num_channels]
         };
         AnonymousLogSM {
-            committed_messages: Vec::new(), client, id, config, state
+            committed_messages: Vec::new(), client, id, config, state, round: 0
         }
         
     }
@@ -201,24 +214,48 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
             self.begin_reconstructing();
         }
 
-        if let Phase::Reconstructing { shares } = &mut self.state {
+        if let Phase::Reconstructing { shares, .. } = &mut self.state {
             // add all shares for every channel. 
-            for chan_num in 0 .. self.config.num_channels {
-                let chan_new_share = batch[chan_num].to_share();
-                shares[chan_num].push(chan_new_share);
+            for channel_num in 0 .. self.config.num_channels {
+                let chan_new_share = batch[channel_num].to_share();
+                shares[channel_num].push(chan_new_share);
+            }
 
-                // try decoding a value once we passed the threshold
-                if shares[chan_num].len() >= self.config.threshold {
-                    match decode_secret::<V>(reconstruct_secret(&shares[chan_num], self.config.threshold as u64)) {
-                        Ok(None) => trace!("Got nothing on channel {}", chan_num),
+            // try decoding all channels once we passed the threshold
+            if shares[0].len() >= self.config.threshold {
+                let mut results = Vec::new();
+                for (channel_num, channel) in (0..).zip(shares) {
+                    let result = match decode_secret::<V>(reconstruct_secret(channel, self.config.threshold as u64)) {
+                        Ok(None) => { 
+                            Err(ReconstructError::NoValue)
+                        },
                         Ok(Some(decoded)) => {
-                            info!("Decoded value {:?} on channel {}", decoded, chan_num);
+                            Ok(decoded)
                         }
-                        Err(e) => error!("Error while decoding channel {}: {:?}", chan_num, e)
-                    }
+                        Err(e) => { 
+                            error!("Error while decoding channel {}: {:?}", channel_num, e);
+                            Err(ReconstructError::Collision)
+                        }
+                    };
+                    results.push(result);
                 }
+                Self::submit_message(self.client.clone(), self.id, AnonymityMessage::ReconstructResult { results, round: self.round });
             }
         }
+    }
+
+    /// Sends a message in a different task
+    pub fn submit_message(mut client: Client<CT, AnonymityMessage<V>>, my_id: Id, msg: AnonymityMessage<V>) {
+        // This must be done in another task, otherwise we will get a deadlock
+        // (see explanation in `state_machine` trait)
+        tokio::task::spawn_local(async move {
+            let res = client.submit_value(msg).await;
+            match res {
+                Ok(_) => trace!("Sent message successfully"),
+                Err(e) => error!("There was an error while submitting message: {:?}", e)
+            }
+
+        }.instrument(info_span!("submit_message", id=?my_id)));
     }
 
 
@@ -231,7 +268,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
         };
 
         let channels = vec![Vec::new(); self.config.num_channels];
-        self.state = Phase::Reconstructing { shares: channels };
+        self.state = Phase::Reconstructing { shares: channels};
         info!("Beginning re-construct phase, sending to all other nodes");
 
         if shares.is_none() {
@@ -241,25 +278,13 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
         let shares = shares.unwrap();
         let id = self.id;
         
-        // This must be done in another task, otherwise we will get a deadlock
-        // (see explanation in `state_machine` trait)
-        let mut client = self.client.clone();
-        tokio::task::spawn_local(async move {
-            let res = client.submit_value(
-                AnonymityMessage::ServerReconstruct {
-                    channel_shares: shares,
-                    node_id: id
-                }
-            ).await;
-            match res {
-                Ok(_) => trace!("Sent all my shares successfully"),
-                Err(e) => error!("There was an error sending my shares: {:?}", e)
-            }
-
-        }.instrument(info_span!("begin_reconstructing", id=?self.id)));
+        Self::submit_message(self.client.clone(), self.id, AnonymityMessage::ServerReconstruct {
+            channel_shares: shares,
+            node_id: id
+        });
     }
 
-    pub fn begin_client_sharing(&mut self) {
+    pub fn begin_client_sharing(&mut self, round: usize) {
         match self.state {
             Phase::ClientSharing { .. } => {
                 error!("Begin client sharing while already sharing");
@@ -271,20 +296,36 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage>> AnonymousLogSM<V, 
                     live_clients: HashSet::new(), 
                     contact_graph: create_contact_graph(num_nodes),
                     shares: vec![Vec::new(); self.config.num_channels] 
-                }
+                };
+                self.round = round;
             }
         }
+    }
+
+    pub fn handle_reconstruct_result(&mut self, results: &[Result<V, ReconstructError>], round: usize) {
+        assert!(round <= self.round, "got reconstruct message from the future");
+        if round < self.round {
+            return
+        }
+        for result in results {
+            if let Ok(val) = result {
+                info!("Committed value {:?} at index {}", val, self.committed_messages.len());
+                self.committed_messages.push(val.clone());
+            }
+        }
+        self.begin_client_sharing(self.round + 1);
     }
 }
 
 #[async_trait(?Send)]
-impl <V: Value + Hash, T: Transport<AnonymityMessage>, C: ClientTransport<AnonymityMessage>> StateMachine<AnonymityMessage, T> for AnonymousLogSM<V, C> {
-    async fn apply(&mut self, entry: &AnonymityMessage) -> () {
+impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<AnonymityMessage<V>>> StateMachine<AnonymityMessage<V>, T> for AnonymousLogSM<V, C> {
+    async fn apply(&mut self, entry: &AnonymityMessage<V>) -> () {
         match entry {
             AnonymityMessage::ClientShare { channel_shares, client_name } => { self.handle_client_share(client_name.to_owned(), channel_shares.as_slice()) },
             AnonymityMessage::ClientNotifyLive { client_name } => { self.handle_client_live_notification(client_name.to_owned()) }
             AnonymityMessage::ServerReconstruct { channel_shares, node_id } => {  self.on_receive_reconstruct_share(channel_shares.as_slice(), *node_id) }
             AnonymityMessage::ServerNotifyGotShare { node_id, client_name } => { self.handle_got_share_notification(*node_id, client_name) }
+            AnonymityMessage::ReconstructResult { results, round } => { self.handle_reconstruct_result(&results, *round) }
         }
     }
 }

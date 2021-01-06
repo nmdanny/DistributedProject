@@ -15,10 +15,10 @@ use std::rc::Rc;
 
 
 pub struct Scenario<V: Value + Hash> {
-    pub communicators: Vec<NodeCommunicator<AnonymityMessage>>,
-    pub server_transport: AdversaryTransport<AnonymityMessage, ThreadTransport<AnonymityMessage>>,
+    pub communicators: Vec<NodeCommunicator<AnonymityMessage<V>>>,
+    pub server_transport: AdversaryTransport<AnonymityMessage<V>, ThreadTransport<AnonymityMessage<V>>>,
     pub clients: Vec<AnonymousClient<V,
-                     AdversaryClientTransport<AnonymityMessage, SingleProcessClientTransport<AnonymityMessage>>>>,
+                     AdversaryClientTransport<AnonymityMessage<V>, SingleProcessClientTransport<AnonymityMessage<V>>>>>,
     phantom: std::marker::PhantomData<V>
 
 }
@@ -94,24 +94,28 @@ mod tests {
                 num_nodes: 2,
                 num_clients: 2,
                 threshold: 2,
-                num_channels: 3,
+                num_channels: 20,
                 phase_length: std::time::Duration::from_secs(1),
 
             }).await;
 
             let mut client_a = scenario.clients.pop().unwrap();
             let mut client_b = scenario.clients.pop().unwrap();
+
             let handle_a = task::spawn_local(async move {
-                let _res = client_a.send_anonymously(1337u64).await;
-                println!("Client A sent all shares");
+                let _res = client_a.send_anonymously(102410231022u64).await;
             });
 
             let handle_b = task::spawn_local(async move {
-                let _res = client_b.send_anonymously(9881u64).await;
-                println!("Client B sent all shares");
+                let _res = client_b.send_anonymously(7331u64).await;
             });
 
-            let _ = join(handle_a, handle_b).await;
+            let _ = join(handle_b, handle_a).await;
+
+            loop {
+                tokio::time::delay_for(tokio::time::Duration::from_secs(5)).await;
+            }
+
         }).await;
         println!("simple_scenario done");
     }
