@@ -142,14 +142,15 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
         }
     }
 
-    pub fn attach_state_machine(&mut self, machine: S) {
+    pub fn attach_state_machine(&mut self, mut machine: S) -> broadcast::Sender<S::PublishedEvent> {
         let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
         let (force_apply_sender, force_apply_recv) = mpsc::unbounded_channel();
         
         self.commit_sender = Some(commit_sender);
         self.force_apply_sender = Some(force_apply_sender);
+        let recv = machine.get_event_stream();
         self.state_machine = Some((machine, commit_receiver, force_apply_recv));
-
+        recv
     }
 
     /// Size of a majority quorum (the minimal amount of valid nodes)
