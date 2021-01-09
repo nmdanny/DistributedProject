@@ -28,13 +28,20 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
 
     type HookEvent;
     type HookStream: Stream<Item = Self::HookEvent>;
+    type PublishedEvent: Send + Debug;
 
     /// Allows hooking into the state machine lifecycle and applying operations
     /// independently of commit entries
     fn create_hook_stream(&mut self) -> Self::HookStream;
 
-    fn handle_hook_event(&mut self, event: Self::HookEvent) {
+    fn handle_hook_event(&mut self, _event: Self::HookEvent) {
     }
+
+    fn get_event_stream(&mut self) -> broadcast::Sender<Self::PublishedEvent> {
+        let (tx, _rx) = broadcast::channel(1);
+        tx
+    }
+
 
 
     // Spawns the state machine loop, setting up communication
@@ -86,6 +93,7 @@ impl <V: Value, T: Transport<V>> StateMachine<V, T> for NoopStateMachine  where 
 
     type HookEvent = ();
     type HookStream = futures::stream::Empty<()>;
+    type PublishedEvent = ();
 
 
 

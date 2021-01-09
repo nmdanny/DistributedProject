@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use derivative;
 use tracing_futures::Instrument;
 use futures::stream::{Stream, StreamExt};
+use tokio::sync::broadcast;
 use tokio::time::{Interval, Duration};
 
 #[derive(Debug, Clone)]
@@ -134,6 +135,7 @@ pub enum AnonymityMessage<V: Value> {
     }
 }
 
+const NEW_ROUND_CHAN_SIZE: usize = 1024;
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -151,9 +153,12 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
 
     pub state: Phase,
 
-    pub round: usize
+    pub round: usize,
+
+    pub new_round_sender: broadcast::Sender<NewRound<V>>
 
 }
+
 
 impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<V, CT> {
     pub fn new(config: Rc<Config>, id: usize, client_transport: CT) -> AnonymousLogSM<V, CT> {
@@ -165,8 +170,9 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             contact_graph: create_contact_graph(config.num_nodes),
             shares: vec![Vec::new(); config.num_channels]
         };
+        let (nr_tx, _nr_rx) = broadcast::channel(NEW_ROUND_CHAN_SIZE);
         AnonymousLogSM {
-            committed_messages: Vec::new(), client, id, config, state, round: 0
+            committed_messages: Vec::new(), client, id, config, state, round: 0, new_round_sender: nr_tx
         }
         
     }
@@ -183,7 +189,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 let batch = batch.into_iter().map(|s| s.to_share()).collect::<Vec<_>>();
                 assert!(shares.iter().map(|chan| chan.len()).sum::<usize>() <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
 
-                info!("Got client shares: {:?}", batch);
+                debug!("Got client shares: {:?}", batch);
 
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
@@ -292,7 +298,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         debug!("Beginning re-construct phase, sending to all other nodes");
 
         if shares.is_none() {
-            error!("I am missing shares from some clients, skipping reconstruct round");
+            error!("I am missing shares from some clients, skipping reconstruct round {}", self.round);
             return;
         }
         let shares = shares.unwrap();
@@ -325,17 +331,38 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
     pub fn handle_reconstruct_result(&mut self, results: &[Result<V, ReconstructError>], round: usize) {
         assert!(round <= self.round, "got reconstruct message from the future");
-        // info!("got reconstruct result for round {}, my round: {}", round, self.round);
         if round < self.round {
             return
         }
         for result in results {
             if let Ok(val) = result {
-                info!("Committed value {:?} at index {}", val, self.committed_messages.len());
+                info!("Node committed value {:?} at index {}", val, self.committed_messages.len());
                 self.committed_messages.push(val.clone());
             }
         }
         self.begin_client_sharing(self.round + 1);
+        self.new_round_sender.send(NewRound {
+            round: self.round,
+            last_reconstruct_results: Some(results.iter().cloned().collect())
+        }).unwrap_or_else(|_e| {
+            error!("No one to notify of new round");
+            0
+        });
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewRound<V> {
+    pub round: usize,
+    pub last_reconstruct_results: Option<Vec<Result<V, ReconstructError>>>
+}
+
+impl <V: Value> NewRound<V> {
+    fn new(round: usize) -> Self {
+        NewRound {
+            round,
+            last_reconstruct_results: None
+        }
     }
 }
 
@@ -354,6 +381,8 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
     type HookEvent = tokio::time::Instant;
 
     type HookStream = Interval;
+
+    type PublishedEvent = NewRound<V>;
 
     fn create_hook_stream(&mut self) -> Self::HookStream {
         tokio::time::interval(self.config.phase_length)
@@ -375,6 +404,10 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
                 }
             }
         };
+    }
+
+    fn get_event_stream(&mut self) -> broadcast::Sender<Self::PublishedEvent> {
+        self.new_round_sender.clone()
     }
 }
 
