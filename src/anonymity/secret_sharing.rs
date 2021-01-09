@@ -115,7 +115,8 @@ pub fn create_share(secret: FP, k: u64, n: u64) -> Vec<Share> {
     }).collect()
 }
 
-/// Reconstructs a secret from a given list of secret shares, assuming secret was split to 'k' different shares
+/// Reconstructs a secret from a given list of secret shares, assuming secret was split to a (k,n) threshold scheme for some n
+/// requiring at least 'k' shares (polynomial of degree k-1)
 pub fn reconstruct_secret(shares: &[Share], k: u64) -> FP {
     assert!(shares.len() >= k as usize, "need at least k different points");
     assert_eq!(shares.iter().map(|s| s.x).collect::<BTreeSet<_>>().len(), shares.len(),
@@ -151,7 +152,7 @@ pub fn encode_secret<S: Serialize + Hash>(data: S) -> Result<FP, anyhow::Error> 
     value_and_hash.value.hash(&mut hasher);
     value_and_hash.hash = hasher.finish();
     let bytes = bincode::serialize(&value_and_hash)?;
-    if bytes.len() > 32 {
+    if bytes.len() > 31 {
         return Err(anyhow::anyhow!("Need more than 31 bytes to safely store value, does not fit into secret"));
     }
 
