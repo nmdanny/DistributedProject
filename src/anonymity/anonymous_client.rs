@@ -23,7 +23,9 @@ pub struct AnonymousClient<V: Value + Hash, CT: ClientTransport<AnonymityMessage
     #[derivative(Debug="ignore")]
     phantom: std::marker::PhantomData<V>,
 
-    client_name: String
+    pub client_name: String,
+
+    pub round: usize
 
 }
 
@@ -34,7 +36,8 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             client: Rc::new(Client::new(client_name.clone(), client_transport, config.num_nodes)),
             config,
             phantom: Default::default(),
-            client_name
+            client_name,
+            round: 0
         }
     }
 
@@ -42,7 +45,7 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
     pub async fn send_anonymously(&mut self, value: V) -> Result<(), anyhow::Error> {
         // note that thread_rng is crypto-secure
         let val_channel = Uniform::new(0, self.config.num_channels).sample(&mut rand::thread_rng());
-        info!("Client is sending value {:?} via channel {}", value, val_channel);
+        debug!("Client is sending value {:?} via channel {}", value, val_channel);
         let secret_val = encode_secret(value)?;
 
 
@@ -65,10 +68,11 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             }).collect();
 
             let client = client.clone();
+            let round = self.round;
             let client_name = self.client_name.clone();
             async move {
                 client.submit_without_commit(node_id, AnonymityMessage::ClientShare {
-                    channel_shares: batch, client_name
+                    channel_shares: batch, client_name, round
                 }).await.map_err(|e| e.context(format!("while sending to server ID {}", node_id)))
             }
         });
@@ -86,11 +90,12 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             }
         }).await;
 
-        match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_name: self.client_name.clone() }).await {
+        match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_name: self.client_name.clone(), round: self.round }).await {
             Ok(_) => {}
             Err(_) => { error!("Couldn't notify that I am live") }
         }
 
+        self.round += 1;
         Ok(())
     }
 }
