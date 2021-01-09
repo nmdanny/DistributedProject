@@ -1,6 +1,8 @@
 use crate::consensus::types::*;
 use anyhow::Error;
 use crate::consensus::node_communicator::NodeCommunicator;
+use crate::consensus::state_machine::StateMachine;
+use crate::consensus::transport::Transport;
 use tokio::time;
 use rand::distributions::{Distribution, Uniform};
 use tracing::Instrument;
@@ -23,15 +25,23 @@ pub trait ClientTransport<V: Value> : 'static + Clone {
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError>;
 }
 
-#[derive(Clone)]
-pub struct SingleProcessClientTransport<V: Value>
+pub struct SingleProcessClientTransport<V: Value, S: StateMachine<V>>
 {
-    communicators: Rc<Vec<NodeCommunicator<V>>>,
+    communicators: Rc<Vec<NodeCommunicator<V, S>>>,
     timeout_duration: Duration
 }
 
-impl <V: Value> SingleProcessClientTransport<V> {
-    pub fn new(communicators: Vec<NodeCommunicator<V>>) -> Self {
+impl <V: Value, S: StateMachine<V>> Clone for SingleProcessClientTransport<V, S> {
+    fn clone(&self) -> Self {
+        SingleProcessClientTransport {
+            communicators: self.communicators.clone(),
+            timeout_duration: self.timeout_duration.clone()
+        }
+    }
+}
+
+impl <V: Value, S: StateMachine<V>> SingleProcessClientTransport<V, S> {
+    pub fn new(communicators: Vec<NodeCommunicator<V, S>>) -> Self {
         SingleProcessClientTransport {
             communicators: Rc::new(communicators),
             timeout_duration: CLIENT_TIMEOUT
@@ -40,7 +50,7 @@ impl <V: Value> SingleProcessClientTransport<V> {
 }
 
 #[async_trait(?Send)]
-impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
+impl <V: Value, S: StateMachine<V>> ClientTransport<V> for SingleProcessClientTransport<V, S> {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError> {
         let fut = self.communicators.get(node_id).expect("Invalid node ID").submit_value(ClientWriteRequest {
             value

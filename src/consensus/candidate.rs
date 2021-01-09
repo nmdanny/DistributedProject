@@ -79,12 +79,12 @@ impl ElectionState {
 
 /// State used by a candidate over one or more consecutive elections
 #[derive(Debug)]
-pub struct CandidateState<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> {
+pub struct CandidateState<'a, V: Value, T: Transport<V, S>, S: StateMachine<V>> {
     pub node: &'a mut Node<V, T, S>
 
 }
 
-impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V, T, S> {
+impl <'a, V: Value, T: Transport<V, S>, S: StateMachine<V>> CandidateState<'a, V, T, S> {
     /// Creates state for a candidate who has just started an election
     pub fn new(candidate: &'a mut Node<V, T, S>) -> Self {
         // a candidate always votes for itself
@@ -212,7 +212,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
 }
 
 
-impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> for CandidateState<'a, V, T, S> {
+impl <'a, V: Value, T: Transport<V, S>, S: StateMachine<V>> CommandHandler<V> for CandidateState<'a, V, T, S> {
     fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         return self.node.on_receive_append_entry(req);
     }

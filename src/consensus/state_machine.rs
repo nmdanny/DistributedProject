@@ -16,7 +16,7 @@ use tracing_futures::{Instrument};
 pub type ForceApply<V> = (ClientForceApplyRequest<V>, oneshot::Sender<Result<ClientForceApplyResponse<V>, RaftError>>);
 
 #[async_trait(?Send)]
-pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
+pub trait StateMachine<V: Value>: Debug + 'static + Sized {
     /// Updates the state machine state. While this is async for convenience, updates 
     /// are performed sequentially - the state machine won't process the next value before finishing with
     /// the current one
@@ -34,6 +34,13 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
     fn create_hook_stream(&mut self) -> Self::HookStream;
 
     fn handle_hook_event(&mut self, event: Self::HookEvent) {
+    }
+
+    type PublishedEvent: Send + Debug;
+
+    fn get_event_stream(&mut self) -> broadcast::Sender<Self::PublishedEvent> {
+        let (tx, _rx) = broadcast::channel(1);
+        tx
     }
 
 
@@ -82,11 +89,12 @@ pub struct NoopStateMachine();
 
 
 #[async_trait(?Send)]
-impl <V: Value, T: Transport<V>> StateMachine<V, T> for NoopStateMachine  where V::Result : Default {
+impl <V: Value> StateMachine<V> for NoopStateMachine  where V::Result : Default {
 
     type HookEvent = ();
     type HookStream = futures::stream::Empty<()>;
 
+    type PublishedEvent = ();
 
 
     async fn apply(&mut self, _entry: &V) -> V::Result {

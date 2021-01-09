@@ -1,5 +1,6 @@
 use crate::consensus::transport::Transport;
 use crate::consensus::client::ClientTransport;
+use crate::consensus::state_machine::StateMachine;
 use crate::consensus::types::*;
 
 use tokio::sync::RwLock;
@@ -35,23 +36,34 @@ pub struct AdversaryState {
 
 
 
-#[derive(Derivative, Clone)]
+#[derive(Derivative)]
 #[derivative(Debug)]
 /// Wraps an arbitrary transport, allowing us to simulate omission(and thus, pause/resume) and
 /// message delays.
-pub struct AdversaryTransport<V: Value, T: Transport<V>> {
+pub struct AdversaryTransport<V: Value, S: StateMachine<V>, T: Transport<V, S>> {
     #[derivative(Debug="ignore")]
     transport: T,
 
     #[derivative(Debug="ignore")]
     state: Arc<RwLock<AdversaryState>>,
 
-    phantom: std::marker::PhantomData<V>,
+    phantom: std::marker::PhantomData<(V,S)>,
 
     node_count: usize,
 }
 
-impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
+impl <V: Value, S: StateMachine<V>, T: Transport<V, S>> Clone for AdversaryTransport<V, S, T> {
+    fn clone(&self) -> Self {
+        AdversaryTransport {
+            transport: self.transport.clone(),
+            state: self.state.clone(),
+            phantom: self.phantom.clone(),
+            node_count: self.node_count
+        }
+    }
+}
+
+impl <V: Value, S: StateMachine<V>, T: Transport<V, S>> AdversaryTransport<V, S, T> {
     pub fn new(transport: T, node_count: usize) -> Self {
         AdversaryTransport {
             transport, phantom: Default::default(), node_count,
@@ -119,7 +131,7 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
 // return an error - this is the same as a timeout duration. In fact, I could send this
 
 #[async_trait(?Send)]
-impl <V: Value, T: Transport<V>> Transport<V> for AdversaryTransport<V, T> {
+impl <V: Value, S: StateMachine<V>, T: Transport<V, S>> Transport<V, S> for AdversaryTransport<V, S, T> {
     async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         self.adversary_request_response(msg.leader_id, to, async move {
             self.transport.send_append_entries(to, msg).await
@@ -132,7 +144,7 @@ impl <V: Value, T: Transport<V>> Transport<V> for AdversaryTransport<V, T> {
         }).await
     }
 
-    async fn on_node_communicator_created(&mut self, id: usize, comm: &mut NodeCommunicator<V>) {
+    async fn on_node_communicator_created(&mut self, id: usize, comm: &mut NodeCommunicator<V, S>) {
         self.transport.on_node_communicator_created(id, comm).await;
         let mut state = self.state.write().await;
         state.delay_dist.entry(id).or_insert(Uniform::new_inclusive(0, 2));
@@ -143,7 +155,7 @@ impl <V: Value, T: Transport<V>> Transport<V> for AdversaryTransport<V, T> {
     }
 }
 
-impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
+impl <V: Value, S: StateMachine<V>, T: Transport<V, S>> AdversaryTransport<V, S, T> {
     async fn adversary_request_response<R>(&self, from: Id, to: Id,
                                            do_request: impl Future<Output = Result<R, RaftError>>) -> Result<R, RaftError>
     {

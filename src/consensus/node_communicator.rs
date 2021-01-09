@@ -29,28 +29,40 @@ pub enum NodeCommand<V: Value> {
 /// made by either other Raft nodes (via the `append_entries`, `request_vote` and `commit_channel` functions)
 /// or by clients (the `submit_value`, `request_values` and `commit_channel` functions)
 ///
-#[derive(Debug, Clone)]
-pub struct NodeCommunicator<V: Value> {
+#[derive(Debug)]
+pub struct NodeCommunicator<V: Value, S: StateMachine<V>> {
     // used for sending messages to the node
     rpc_sender: mpsc::UnboundedSender<NodeCommand<V>>,
 
     // used to subscribe clients to new committed entries
-    commit_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>
+    commit_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
+
+    event_sender: Option<broadcast::Sender<S::PublishedEvent>>
+}
+
+impl <V: Value, S: StateMachine<V>> Clone for NodeCommunicator<V, S> {
+    fn clone(&self) -> Self {
+        NodeCommunicator {
+            rpc_sender: self.rpc_sender.clone(),
+            commit_sender: self.commit_sender.clone(),
+            event_sender: self.event_sender.clone()
+        }
+    }
 }
 
 /// Size of commit notification channel. Note that in case of lagging receivers(clients), they will never block
 /// the node from sending values, but they might lose some commit notifications - see https://docs.rs/tokio/0.3.5/tokio/sync/broadcast/index.html#lagging
 const COMMIT_CHANNEL_SIZE: usize = 1024;
 
-impl <V: Value> NodeCommunicator<V> {
+impl <V: Value, S: StateMachine<V>> NodeCommunicator<V, S> {
 
     /// Creates a node object, returning it along with a communicator that can be used to interact
     /// with it after we spawn it on a task/thread.
-    pub async fn create_with_node<T: Transport<V>, S: StateMachine<V, T>>(
+    pub async fn create_with_node<T: Transport<V, S>>(
                             id: usize,
                             number_of_nodes: usize,
                             transport: T,
-                            machine: S) -> (Node<V, T, S>, NodeCommunicator<V>) {
+                            machine: S) -> (Node<V, T, S>, Self) {
         let mut node = Node::new(id, number_of_nodes, transport);
         let communicator = NodeCommunicator::from_node(&mut node).await;
         node.attach_state_machine(machine);
@@ -58,10 +70,10 @@ impl <V: Value> NodeCommunicator<V> {
     }
 
     /// Creates a NodeCommunicator for a node that wasn't spawned yet
-    pub async fn from_node<T: Transport<V>, S: StateMachine<V, T>>(node: &mut Node<V, T, S>) -> NodeCommunicator<V> {
+    pub async fn from_node<T: Transport<V, S>>(node: &mut Node<V, T, S>) -> Self{
         let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
         let mut communicator = NodeCommunicator {
-            rpc_sender, commit_sender: node.sm_result_sender.clone()
+            rpc_sender, commit_sender: node.sm_result_sender.clone(), event_sender: None
         };
         node.receiver = Some(rpc_receiver);
         node.transport.on_node_communicator_created(node.id, &mut communicator).await;

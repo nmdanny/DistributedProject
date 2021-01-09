@@ -13,7 +13,29 @@ the secret share `(i, p(i))` via channel `d`, where `p` is a randomly generated 
 On all other channels, he sends the secret value 0(or some other special sentinel value) via the same idea. This means, a client generates `d` polynomials,
 one of them encoding `S` and the others encoding some null value.
 
-When a server receives a share `(i, p(i))` via channel `d`, he will add it to log entry at `d` (as in, integer addition to the value stored there)
+When a server receives a share `(i, p(i))` via channel `d`, he will add it to log entry at `d`, along with an identifier from which client it arrived
+(the identifier uses `log_2(c)` space, so in total, each channel uses `clog_2(c)`, and we have `d` of them.)
+
+
+
+Note, if we have either client or server omissions - recovery isn't guaranteed. For instance, an invalid client might send his secret to a majority of nodes and a minority
+of valid nodes, such that the total number of nodes is still a majority, whereas another, valid client, has only sent it to the valid nodes(invalid ones omitted it). In total,
+the invalid node's shares were seen by the majority, yet they might still crash once we begin reconstruction.
+
+So, the fact invalid nodes can stall the network, breaks liveness, as invalid nodes would still be able to get more
+
+
+So, there's another approach - which can live completely within the consensus protocol while maintaining anonymity:
+
+Clients send all their shares, over all channels, such that each share is asymetrically encrypted with the corresponding server's private ekey.
+The sending process will be done via consensus.
+
+This approach simplifies everything related to agreement - by the correctness of Raft/Paxos, every node which sees his share(committed),
+knows that at least `f+1` other nodes have seen it, in particular, one valid node must have seen it, so all valid nodes have seen it too, so it must be recoverable
+amongst these nodes. 
+
+The main disadvantage is overhead - each node will maintain all shares in the system over its log, while only being able to decrypt 1/c'th of them
+
 
 
 Lets assume for a moment that two clients can never transmit a non zero secret via the same channel.
@@ -58,17 +80,48 @@ Then, after performing reconstruction, we try to decode the checksum and apply i
 no collision. (The probability of both having a collision on a channel, and the resulting data being interpreted as a valid checksum matching the rest of the data in the value, are
 extremely low if we use a good checksum)
 
-The main disadvantage is that we wish to minimize the size of the secret shares (as I'll explain below regarding field size), and the checksum would use some of the space
-within the secret.
-
-An alternative, is to use a cryptographic hash function on the secret value, and send it alongside the secret, in plain-text(whether it is 0 or not!)
-By correctness of cryptographic hash, a PPT adversary has an extremely low probability of gaining any information about the secret from the hash
-
-A disadvantage of this approach, is that we would need to keep a list of all hashes seen over a given channel, and we'd need to verify all of them with the resulting value
-and ensure at least 1 match.
-
 Once we detected a collision, we can notify 'Collision over channel d', and next round, all clients who are responsible for the collision(who sent real values over `d`) will
-try re-sending it over different channels(randomly generated of course) next round
+try re-sending it over different channels(randomly generated) next round
+
+## Client omissions
+
+There is a potential issue with client omissions - suppose a client sends a share (even of a meaningless value like 0) over some channel to some servers, but crashes before sending
+at least f+1 shares. Every server which has received it, has added it to the corresponding channel, thereby effectively corrupting that channel, making its contents unrecoverable.
+Retrying wouldn't help, since a faulty client can repeat this behavior every time.
+
+Obtaining consensus on the fact that a given client indeed sent his shares to f+1 servers, isn't enough, since some of those f+1 servers might be faulty too. 
+Here's an example:
+
+n = 3, c = 3, f = 1
+ClientA -> shares to servers A,B,C
+ClientB -> shares to servers A,B
+ClientC -> shares to servers B,D
+
+
+By the consensus mechanism, lets say that nodes B,D agree on getting shares from client B
+Now, note that no other agreement is possible in this phase - for example, nodes A,B(,C) cannot
+agree on getting shares from from client A, because nodes A(,C) didn't hear a share from client B - after all,
+we are trying to have consensus on a sequence of values, in this case, a sequence of clients.
+
+So ultimately, only nodes B,D agreed on shares, and the rest of the nodes are inactive.
+Next round, B and D will try to reconstruct their shares. Now, suppose that 'D' is faulty, then no one accepted anything.
+
+So, to have the chance of reconstructring some secret, we should have the maximal set of nodes agree on some value. In this case,
+had nodes A,B,C agreed on the input from value client A instead, then even if one of them would crash, the secret would still be recoverable.
+So, before entering the reconstruct stage, we could all nodes agree on the number of clients they've seen, and then, share 
+
+
+
+I have another solution, which also makes the solution more simple to implement:
+
+- Each client sends all its shares(over all channels) in a single message, where each share is asymetrically encrypted with the corresponding server's
+  
+
+
+
+
+
+In effect, if a client 
 
 ## How do we tie this to consensus?
 
@@ -93,7 +146,7 @@ using state machines will allow them to perform arbitrary logic(e.g, reconstruct
 ## Other concerns
 
 - How do we achieve anonymity? Every client will always send a message at the beginning of each round, so we'll use a special value(e.g, 0)
-  if a client has nothing to say. 
+  if a client has nothing to say.
 
 - Message lengths
   We want the length of messages to stay secret, so we cannot use a variable finite field size, nor

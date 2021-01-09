@@ -38,7 +38,7 @@ pub enum ServerState {
 /// Contains all state used by any node
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
+pub struct Node<V: Value, T: Transport<V, S>, S: StateMachine<V>> {
 
     /* related to async & message sending */
 
@@ -113,10 +113,13 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
     pub force_apply_sender: Option<mpsc::UnboundedSender<ForceApply<V>>>,
 
     #[derivative(Debug="ignore")]
-    sm_phantom: std::marker::PhantomData<S>
+    sm_phantom: std::marker::PhantomData<S>,
+
+    #[derivative(Debug="ignore")]
+    pub sm_event_stream: Option<broadcast::Sender<S::PublishedEvent>>
 }
 
-impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
+impl <V: Value, T: Transport<V, S>, S: StateMachine<V>> Node<V, T, S> {
     pub fn new(id: usize,
                number_of_nodes: usize,
                transport: T) -> Self {
@@ -138,16 +141,18 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
             sm_result_sender,
             commit_sender: None,
             force_apply_sender: None,
-            sm_phantom: Default::default()
+            sm_phantom: Default::default(),
+            sm_event_stream: None
         }
     }
 
-    pub fn attach_state_machine(&mut self, machine: S) {
+    pub fn attach_state_machine(&mut self, mut machine: S) {
         let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
         let (force_apply_sender, force_apply_recv) = mpsc::unbounded_channel();
         
         self.commit_sender = Some(commit_sender);
         self.force_apply_sender = Some(force_apply_sender);
+        self.sm_event_stream = Some(machine.get_event_stream());
         self.state_machine = Some((machine, commit_receiver, force_apply_recv));
 
     }
@@ -165,7 +170,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
 
 
 /* Following block contains logic shared with all states of a raft node */
-impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
+impl <V: Value, T: std::fmt::Debug + Transport<V, S>, S: StateMachine<V>> Node<V, T, S> {
 
     #[instrument(skip(self))]
     /// The main loop - this does everything, and it has ownership of the Node

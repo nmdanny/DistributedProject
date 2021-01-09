@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use tokio::task;
 use std::fmt::Debug;
 use crate::consensus::node::Node;
+use crate::consensus::state_machine::StateMachine;
 use crate::consensus::node_communicator::NodeCommunicator;
 use derivative;
 use std::collections::HashMap;
@@ -13,14 +14,14 @@ use tokio::stream::StreamExt;
 /// Used for sending and receiving Raft messages
 /// Should be cheap to clone
 #[async_trait(?Send)]
-pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
+pub trait Transport<V : Value, S: StateMachine<V>> : Debug + Clone + 'static {
     async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError>;
 
     async fn send_request_vote(&self, to: Id, msg: RequestVote) -> Result<RequestVoteResponse, RaftError>;
 
     /// A hook that runs after a `NodeCommunicator` is created(along with a node)
     /// but before the node is spawned.
-    async fn on_node_communicator_created(&mut self, _id: Id, _comm: &mut NodeCommunicator<V>) {
+    async fn on_node_communicator_created(&mut self, _id: Id, _comm: &mut NodeCommunicator<V, S>) {
 
     }
 
@@ -37,7 +38,7 @@ pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
 pub struct NoopTransport();
 
 #[async_trait(?Send)]
-impl <V : Value> Transport<V> for NoopTransport {
+impl <V : Value, S: StateMachine<V>> Transport<V, S> for NoopTransport {
     async fn send_append_entries(&self, _: usize, _: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         loop {
             task::yield_now().await;
@@ -51,24 +52,33 @@ impl <V : Value> Transport<V> for NoopTransport {
     }
 }
 
-struct ThreadTransportState<V: Value>
+struct ThreadTransportState<V: Value, S: StateMachine<V>>
 {
-    senders: HashMap<Id, NodeCommunicator<V>>,
+    senders: HashMap<Id, NodeCommunicator<V, S>>
 
 }
 
-#[derive(Derivative, Clone)]
+#[derive(Derivative)]
 #[derivative(Debug)]
-pub struct ThreadTransport<V: Value>
+pub struct ThreadTransport<V: Value, S: StateMachine<V>>
 {
     #[derivative(Debug="ignore")]
-    state: Arc<RwLock<ThreadTransportState<V>>>,
+    state: Arc<RwLock<ThreadTransportState<V, S>>>,
 
     #[derivative(Debug="ignore")]
     barrier: Arc<Barrier>
 }
 
-impl <V: Value> ThreadTransport<V> {
+impl <V: Value, S: StateMachine<V>> std::clone::Clone for ThreadTransport<V, S> {
+    fn clone(&self) -> Self {
+        ThreadTransport {
+            state: self.state.clone(),
+            barrier: self.barrier.clone()
+        }
+    }
+}
+
+impl <V: Value, S: StateMachine<V>> ThreadTransport<V, S> {
     pub fn new(expected_num_nodes: usize) -> Self {
         let barrier = Arc::new(Barrier::new(expected_num_nodes));
         let state = ThreadTransportState {
@@ -82,7 +92,7 @@ impl <V: Value> ThreadTransport<V> {
 }
 
 #[async_trait(?Send)]
-impl <V: Value> Transport<V> for ThreadTransport<V> {
+impl <V: Value, S: StateMachine<V>> Transport<V, S> for ThreadTransport<V, S> {
     #[instrument]
     async fn send_append_entries(&self, to: usize, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         let comm = {
@@ -99,7 +109,7 @@ impl <V: Value> Transport<V> for ThreadTransport<V> {
         Ok(comm.request_vote(msg).await?)
     }
 
-    async fn on_node_communicator_created(&mut self, id: Id, comm: &mut NodeCommunicator<V>) {
+    async fn on_node_communicator_created(&mut self, id: Id, comm: &mut NodeCommunicator<V, S>) {
         let mut state = self.state.write().await;
 
         let _prev = state.senders.insert(id, comm.clone());

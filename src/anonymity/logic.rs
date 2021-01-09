@@ -340,7 +340,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 }
 
 #[async_trait(?Send)]
-impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<AnonymityMessage<V>>> StateMachine<AnonymityMessage<V>, T> for AnonymousLogSM<V, C> {
+impl <V: Value + Hash, C: ClientTransport<AnonymityMessage<V>>> StateMachine<AnonymityMessage<V>> for AnonymousLogSM<V, C> {
     async fn apply(&mut self, entry: &AnonymityMessage<V>) -> () {
         match entry {
             AnonymityMessage::ClientShare { channel_shares, client_name, round} => { self.handle_client_share(client_name.to_owned(), channel_shares.as_slice(), *round) },
@@ -354,6 +354,8 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
     type HookEvent = tokio::time::Instant;
 
     type HookStream = Interval;
+
+    type PublishedEvent = ();
 
     fn create_hook_stream(&mut self) -> Self::HookStream {
         tokio::time::interval(self.config.phase_length)
