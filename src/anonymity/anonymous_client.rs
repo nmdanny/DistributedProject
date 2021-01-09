@@ -3,8 +3,8 @@ use crate::anonymity::logic::*;
 use crate::consensus::client::{ClientTransport, Client};
 use crate::consensus::types::*;
 use std::{hash::Hash, rc::Rc};
-use std::collections::VecDeque;
-use tokio::sync::{watch, mpsc};
+use std::collections::{VecDeque, HashMap};
+use tokio::sync::{watch, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use rand::distributions::{Distribution, Uniform};
 use tracing_futures::Instrument;
@@ -37,15 +37,18 @@ pub struct AnonymousClient<V: Value + Hash> {
     handle: JoinHandle<()>,
 
     #[derivative(Debug="ignore")]
-    send_anonym_queue: mpsc::UnboundedSender<V>,
+    send_anonym_queue: mpsc::UnboundedSender<(V, CommitResolver)>,
 
-    pub client_name: String
+    pub client_name: String,
 
 }
 
+type CommitResolver = oneshot::Sender<(usize, usize)>;
+
 struct ToBeCommitted<V> {
     value: V,
-    channel_and_round: Option<(usize, usize)>
+    channel_and_round: Option<(usize, usize)>,
+    resolver: CommitResolver
 }
 
 fn was_value_committed<V: Value>(new_round: &NewRound<V>, last_sent: &ToBeCommitted<V>) -> Option<()> {
@@ -89,9 +92,9 @@ impl <V: Value + Hash> AnonymousClient<V> {
             loop {
                tokio::select! {
                    // handle client requests
-                   Some(value) = rx.recv() => {
+                   Some((value, resolver)) = rx.recv() => {
                        uncommited_queue.push_back(ToBeCommitted {
-                           value, channel_and_round: None
+                           value, channel_and_round: None, resolver: resolver
                        });
                        notify.broadcast(()).unwrap();
                    },
@@ -103,7 +106,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
                                 sent_for_round = round as i64;
                                 if let Ok(sec_channel) = client.send_anonymously(tbc.value.clone(), round).await {
                                         tbc.channel_and_round = Some((sec_channel, round));
-                                        info!("Sending {:?} for round {} via channel {}", tbc.value, round, sec_channel);
+                                        info!("Sent {:?} for round {} via channel {}", tbc.value, round, sec_channel);
                                 } else {
                                     error!("Client Couldn't send {:?}", tbc.value);
                                 }
@@ -119,7 +122,9 @@ impl <V: Value + Hash> AnonymousClient<V> {
                        trace!("Saw new round: {:?}", new_round);
                        // check if the previous value was committed
                         if !uncommited_queue.is_empty() && was_value_committed(&new_round, &uncommited_queue[0]).is_some() {
-                            let _ = uncommited_queue.pop_front();
+                            let tbc = uncommited_queue.pop_front().unwrap();
+                            let (round, chan) = tbc.channel_and_round.unwrap();
+                            tbc.resolver.send((round, chan)).unwrap();
                         }
 
                        // update the round
@@ -141,7 +146,9 @@ impl <V: Value + Hash> AnonymousClient<V> {
 
     #[instrument]
     pub async fn send_anonymously(&mut self, value: V) -> Result<(), anyhow::Error> {
-        self.send_anonym_queue.send(value)?;
+        let (tx, rx) = oneshot::channel();
+        self.send_anonym_queue.send((value, tx))?;
+        let _ = rx.await.unwrap();
         Ok(())
     }
 }
@@ -207,7 +214,7 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
 
         match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_name: self.client_name.clone(), round: round }).await {
             Ok(_) => {}
-            Err(_) => { error!("Couldn't notify that I am live") }
+            Err(e) => { error!("Couldn't notify that I am live to some servers: {:?}", e) }
         }
 
         Ok(val_channel)
