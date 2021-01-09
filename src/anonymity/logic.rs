@@ -16,6 +16,7 @@ use tracing_futures::Instrument;
 use futures::stream::{Stream, StreamExt};
 use tokio::sync::broadcast;
 use tokio::time::{Interval, Duration};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 /// Configuration used for anonymous message sharing
@@ -49,6 +50,9 @@ fn find_reconstruction_group(live_clients: &HashSet<ClientId>, contact_graph: &C
 /// Given a list of clients who are 'live', that is, didn't crash before sending all their shares,
 /// and all of the node's shares, sums shares from those channels
 fn mix_shares_from(my_id: Id, live_clients: &HashSet<ClientId>, shares_view: &Vec<Vec<(Share, ClientId)>>) -> Option<Vec<ShareBytes>> {
+
+    debug!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, shares_view);
+
     if !shares_view.into_iter().all(|chan| {
         chan.iter().map(|(_, client_id)| client_id)
             .cloned()
@@ -155,8 +159,14 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
 
     pub round: usize,
 
-    pub new_round_sender: broadcast::Sender<NewRound<V>>
+    #[derivative(Debug="ignore")]
+    pub new_round_sender: broadcast::Sender<NewRound<V>>,
 
+
+    /// Maps rounds from the future to a list of clients along with their shares
+    /// This is used to handle share requests from future rounds
+    #[derivative(Debug="ignore")]
+    pub round_to_shares: HashMap<usize, Vec<(String, Vec<ShareBytes>)>>
 }
 
 
@@ -172,13 +182,25 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         };
         let (nr_tx, _nr_rx) = broadcast::channel(NEW_ROUND_CHAN_SIZE);
         AnonymousLogSM {
-            committed_messages: Vec::new(), client, id, config, state, round: 0, new_round_sender: nr_tx
+            committed_messages: Vec::new(), client, id, config, state, round: 0, 
+            new_round_sender: nr_tx,
+            round_to_shares: HashMap::new()
         }
         
     }
 
+    #[instrument]
     pub fn handle_client_share(&mut self, client_name: ClientId, batch: &[ShareBytes], round: usize) {
-        if self.round != round {
+        // with bad enough timing, this might be possible
+        // assert!(round <= self.round + 1, "Cannot receive share from a round bigger than 1 from the current one");
+        if round < self.round {
+            warn!("Client {:} sent shares for old round: {}, I'm at round {}", client_name, round, self.round);
+            return;
+        }
+        if round > self.round {
+            let entries = self.round_to_shares.entry(round).or_default();
+            entries.push((client_name, batch.iter().cloned().collect()));
+            warn!("Got share from the next round {}, enqueueing shares {}", round, self.round);
             return;
         }
         match &mut self.state {
@@ -189,7 +211,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 let batch = batch.into_iter().map(|s| s.to_share()).collect::<Vec<_>>();
                 assert!(shares.iter().map(|chan| chan.len()).sum::<usize>() <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
 
-                debug!("Got client shares: {:?}", batch);
+                info!("Got shares from client {} for round {}: {:?}", client_name, round, batch);
 
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
@@ -221,6 +243,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             debug!("{} is live", client_name);
             live_clients.insert(client_name);
             if live_clients.len() == self.config.num_clients {
+                info!("Beginning re-construct for round {} since all client sent shares to everyone", self.round);
                 self.begin_reconstructing();
             }
         } else {
@@ -271,6 +294,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
     }
 
     /// Sends a message in a different task
+    #[instrument(skip(client))]
     pub fn submit_message(mut client: Client<CT, AnonymityMessage<V>>, my_id: Id, msg: AnonymityMessage<V>) {
         // This must be done in another task, otherwise we will get a deadlock
         // (see explanation in `state_machine` trait)
@@ -285,6 +309,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
     }
 
 
+    #[instrument]
     pub fn begin_reconstructing(&mut self) {
         let shares = match &self.state {
             Phase::ClientSharing { live_clients, shares, .. } => {
@@ -295,7 +320,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
         let channels = vec![Vec::new(); self.config.num_channels];
         self.state = Phase::Reconstructing { shares: channels, last_share_at: Instant::now() };
-        debug!("Beginning re-construct phase, sending to all other nodes");
+        debug!("Beginning re-construct phase, sending my shares {:?} to all other nodes", shares);
 
         if shares.is_none() {
             error!("I am missing shares from some clients, skipping reconstruct round {}", self.round);
@@ -329,18 +354,26 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         }
     }
 
+    #[instrument]
     pub fn handle_reconstruct_result(&mut self, results: &[Result<V, ReconstructError>], round: usize) {
         assert!(round <= self.round, "got reconstruct message from the future");
         if round < self.round {
             return
         }
-        for result in results {
-            if let Ok(val) = result {
-                info!("Node committed value {:?} at index {}", val, self.committed_messages.len());
-                self.committed_messages.push(val.clone());
+        for (chan, result) in (0..).zip(results) {
+            match result {
+                Ok(val) => {
+                    info!(round=?self.round, "Node committed value {:?} via channel {} into index {}", val, chan, self.committed_messages.len());
+                    self.committed_messages.push(val.clone());
+                },
+                Err(ReconstructError::Collision) => {
+                    error!("Node detected collision at channel {}", chan);
+                },
+                Err(ReconstructError::NoValue) => {}
             }
         }
         self.begin_client_sharing(self.round + 1);
+        
         self.new_round_sender.send(NewRound {
             round: self.round,
             last_reconstruct_results: Some(results.iter().cloned().collect())
@@ -348,6 +381,13 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             error!("No one to notify of new round");
             0
         });
+
+        if let Some(entries) = self.round_to_shares.remove(&self.round) {
+            for (client, batch) in entries {
+                debug!("Handling delayed share from client {}", client);
+                self.handle_client_share(client, &batch, self.round);
+            }
+        }
     }
 }
 
