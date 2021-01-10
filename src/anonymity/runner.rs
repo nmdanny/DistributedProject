@@ -26,7 +26,7 @@ pub fn combined_subscriber<V: Value>(senders: Vec<broadcast::Sender<NewRound<V>>
             while let Ok(round) = recv.recv().await {
                 if round.round >= next_round_to_send {
                     next_round_to_send = round.round + 1;
-                    if let Err(e) = tx.send(round) {
+                    if let Err(_e) = tx.send(round) {
                         error!("Couldn't send NewRound to client");
                     }
                 }
@@ -107,6 +107,7 @@ mod tests {
     use futures::future::join;
     use tokio::task;
 
+
     #[tokio::test]
     async fn simple_scenario() {
         let ls = tokio::task::LocalSet::new();
@@ -136,13 +137,10 @@ mod tests {
 
             let _ = join(handle_b, handle_a).await;
 
-            loop {
-                tokio::time::delay_for(tokio::time::Duration::from_secs(5)).await;
-            }
-
         }).await;
-        println!("simple_scenario done");
     }
+
+    const VALS_TO_COMMIT: u64 = 10;
 
     #[tokio::test]
     async fn with_omissions() {
@@ -152,18 +150,19 @@ mod tests {
             setup_logging().unwrap();
 
             let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
-                num_nodes: 3,
-                num_clients: 1,
-                threshold: 2,
-                num_channels: 1,
-                phase_length: std::time::Duration::from_secs(2),
+                num_nodes: 5,
+                num_clients: 2,
+                threshold: 3,
+                num_channels: 20,
+                phase_length: std::time::Duration::from_millis(200),
 
             }).await;
+
 
             let handles = (0..).zip(scenario.clients.drain(..)).map(|(num, mut client)| {
                 task::spawn_local(async move {
                     let mut i = num * 1000;
-                    let delay_dist = Uniform::from(1000 .. 1001);
+                    let mut sends = 0;
                     loop {
                         let res = client.send_anonymously(i).await;
                         match res {
@@ -171,8 +170,10 @@ mod tests {
                             Err(e) => { error!("Client {} failed to send shares: {}", client.client_name, e) }
                         }
                         i += 1;
-                        let delay = delay_dist.sample(&mut rand::thread_rng());
-                        tokio::time::delay_for(tokio::time::Duration::from_millis(delay)).await;
+                        sends += 1;
+                        if sends == VALS_TO_COMMIT {
+                            return;
+                        }
                     }
                 })
             });
