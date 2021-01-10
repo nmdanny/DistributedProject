@@ -103,7 +103,7 @@ pub enum Phase {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReconstructError {
-    Collision, NoValue
+    Collision, NoValue, Timeout
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,9 +153,12 @@ impl <V: Value, CT: ClientTransport<AnonymityMessage<V>>> SMSender<V, CT> {
         let (tx, mut rx) = mpsc::unbounded_channel::<(AnonymityMessage<V>, oneshot::Sender<()>)>();
         let task_handle = tokio::task::spawn_local(async move {
             while let Some((msg, resolver)) = rx.recv().await {
-                let res = client.submit_value(msg).await;
+                let res = client.submit_value(msg.clone()).await;
                 if let Err(e) = res {
                     panic!("Couldn't commit message to other nodes: {:?}", e);
+                } 
+                if let Ok(res) = res {
+                    trace!("Result of sending {:?} is {:?}", msg, res);
                 }
                 resolver.send(()).unwrap_or_else(|_e| {
                     error!("Couldn't send SM Send response, initiator dumped his receiver?");
@@ -297,6 +300,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             debug!("{} is live", client_name);
             live_clients.insert(client_name);
             if live_clients.len() == self.config.num_clients {
+                // TODO:
                 debug!("Beginning re-construct for round {} since all client sent shares to everyone", self.round);
                 self.begin_reconstructing();
             }
@@ -347,6 +351,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         }
     }
 
+    /// Submits a message without waiting for it
     #[instrument(skip(self))]
     pub fn submit_message(&mut self, msg: AnonymityMessage<V>) {
         let rx = self.client.submit(msg);
@@ -399,6 +404,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                     shares: vec![Vec::new(); self.config.num_channels] 
                 };
                 self.round = round;
+                // TODO wake the fuck up of everyone
             }
         }
     }
@@ -420,6 +426,10 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                     trace!("Node detected collision at channel {}", chan);
                 },
                 Err(ReconstructError::NoValue) => {}
+                Err(ReconstructError::Timeout) => {
+                    error!("Saw that reconstruct for round {} has timed out, not enough valid servers", round);
+                    break;
+                }
             }
         }
         self.begin_client_sharing(self.round + 1);
@@ -490,14 +500,20 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
         match &self.state {
             Phase::ClientSharing { last_share_at, .. } => {
                 if (now - *last_share_at) > self.config.phase_length {
-                    debug!("ClientSharing timeout");
+                    trace!("ClientSharing timeout");
                     self.begin_reconstructing();
                 }
             }
             Phase::Reconstructing { last_share_at, .. } => {
                 if (now - *last_share_at) > self.config.phase_length {
-                    debug!("Reconstructing time out");
-                    self.begin_client_sharing(self.round + 1);
+                    trace!("Reconstructing time out");
+
+                    let results = vec![Err(ReconstructError::Timeout); self.config.num_channels];
+                    let msg = AnonymityMessage::ReconstructResult {
+                        round: self.round,
+                        results
+                    };
+                    self.submit_message(msg);
                 }
             }
         };
