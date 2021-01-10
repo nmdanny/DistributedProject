@@ -181,6 +181,63 @@ impl <V: Value, CT: ClientTransport<AnonymityMessage<V>>> SMSender<V, CT> {
 
 const NEW_ROUND_CHAN_SIZE: usize = 1024;
 
+use tokio::fs::{File};
+use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
+
+struct Metrics {
+    share_tx: mpsc::UnboundedSender<(usize, usize, Share)>,
+    decode_tx: mpsc::UnboundedSender<(usize, usize, bool)>,
+    join_handle: tokio::task::JoinHandle<Result<(), anyhow::Error>>
+}
+
+impl Metrics {
+    fn new(node_id: usize, config: Rc<Config>) -> Self {
+        let (share_tx, mut share_rx) = mpsc::unbounded_channel::<(usize, usize, Share)>();
+        let (decode_tx, mut decode_rx) = mpsc::unbounded_channel::<(usize, usize, bool)>();
+
+
+        let join_handle = tokio::task::spawn_local(async move {
+            let folder = PathBuf::from(file!()).parent().unwrap().parent().unwrap().parent().unwrap().join("out");
+            let share_file = folder.join(format!("{}-share.csv", node_id));
+            let decode_file = folder.join(format!("{}-decode.csv", node_id));
+            let mut share_file = File::create(share_file).await?;
+            let mut decode_file = File::create(decode_file).await?;
+
+            share_file.write_all("id,round,chan,share_x,share_px\n".as_bytes()).await?;
+            decode_file.write_all("id,round,chan,malformed\n".as_bytes()).await?;
+
+            loop {
+                tokio::select! {
+                    Some(tup) = share_rx.recv() => {
+                        let (round, chan, share) = tup;
+                        let s = format!("{},{},{},{},\"{:?}\"\n", node_id, round, chan, share.x, share.p_x.as_bytes());
+                        share_file.write_all(s.as_bytes()).await?;
+                    },
+                    Some(tup) = decode_rx.recv() => {
+                        let (round, chan, malformed) = tup;
+                        let s = format!("{},{},{},{}\n", node_id, round, chan, malformed);
+                        decode_file.write_all(s.as_bytes()).await?;
+                    },
+                    else => { return Ok(()); }
+                }
+            }
+
+        });
+
+        Self {
+            share_tx, decode_tx, join_handle
+        }
+    }
+    fn report_share(&mut self, round: usize, chan: usize, share: Share) {
+        self.share_tx.send((round, chan, share)).unwrap();
+    }
+
+    fn report_decode_result(&mut self, round: usize, chan: usize, malformed: bool) {
+        self.decode_tx.send((round, chan, malformed)).unwrap();
+    }
+}
+
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> {
@@ -216,6 +273,9 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
     #[derivative(Debug="ignore")]
     pub messages_being_sent: Vec<oneshot::Receiver<()>>,
 
+    #[derivative(Debug="ignore")]
+    metrics: Metrics
+
 }
 
 
@@ -231,11 +291,12 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         };
         let (nr_tx, _nr_rx) = broadcast::channel(NEW_ROUND_CHAN_SIZE);
         AnonymousLogSM {
-            committed_messages: Vec::new(), client, id, config, state, round: 0, 
+            committed_messages: Vec::new(), client, id, config: config.clone(), state, round: 0, 
             new_round_sender: nr_tx,
             round_to_shares: HashMap::new(),
             round_to_live: HashMap::new(),
-            messages_being_sent: Vec::new()
+            messages_being_sent: Vec::new(),
+            metrics: Metrics::new(id, config)
         }
         
     }
@@ -266,6 +327,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
+                    self.metrics.report_share(round, chan, share.clone());
                     shares[chan].push((share, client_name.clone()));
                 }
 
@@ -421,9 +483,11 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 Ok(val) => {
                     trace!(round=?self.round, "Node committed value {:?} via channel {} into index {}", val, chan, self.committed_messages.len());
                     self.committed_messages.push(val.clone());
+                    self.metrics.report_decode_result(self.round, chan, false);
                 },
                 Err(ReconstructError::Collision) => {
                     trace!("Node detected collision at channel {}", chan);
+                    self.metrics.report_decode_result(self.round, chan, true);
                 },
                 Err(ReconstructError::NoValue) => {}
                 Err(ReconstructError::Timeout) => {
@@ -528,4 +592,62 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::distributions::{Distribution, Uniform};
+    use tokio::task;
+
+    const MAX_ITERS: usize = 50000;
+
+    const THRESHOLD: usize = 3;
+    const NUM_NODES: usize = 5;
+    const NUM_CHANNELS: usize = 1;
+
+    #[tokio::test]
+    pub async fn test_simulation() {
+        crate::consensus::logging::setup_logging().unwrap();
+
+        let config = Rc::new(Config {
+            threshold: THRESHOLD,
+            num_channels: NUM_CHANNELS,
+            num_nodes: NUM_NODES,
+            num_clients: 1, phase_length: Duration::from_millis(1)
+        });
+
+        let ls = tokio::task::LocalSet::new();
+        ls.run_until(async move {
+
+            let mut metricses = (0 .. config.num_nodes).into_iter().map(|node_id| Metrics::new(node_id, config.clone())).collect::<Vec<_>>();
+            let mut rand_metrics = Metrics::new(1337, config.clone());
+
+            for round in 0 .. MAX_ITERS {
+                let val_channel = Uniform::new(0, config.num_channels).sample(&mut rand::thread_rng());
+                let secret_val = encode_secret(0u64).unwrap();
+
+                // create 'd' collections of shares, one for each server
+                for chan in 0.. config.num_channels {
+                    let secret = if chan == val_channel { secret_val } else { encode_zero_secret() };
+                    let threshold = config.threshold as u64;
+                    let num_nodes = config.num_nodes as u64;
+                    let shares = create_share(secret, threshold, num_nodes);
+                    for (node_id, share) in (0..).zip(shares) {
+                        metricses[node_id].report_share(round, chan, share);
+                    }
+                }
+
+
+                let p_x = FP::random(&mut rand::thread_rng());
+                let share = Share {
+                    x: 1338,
+                    p_x
+                };
+                rand_metrics.report_share(round, 0, share);
+
+                if round % (MAX_ITERS / 10).max(1) == 0 {
+                    info!("Progress {:.1}%", 100.0 * (round as f64/MAX_ITERS as f64));
+                    tokio::task::yield_now().await;
+                }
+
+            }
+        }).await;
+        ls.await;
+    }
 }
