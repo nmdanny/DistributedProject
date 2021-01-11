@@ -51,7 +51,7 @@ fn find_reconstruction_group(live_clients: &HashSet<ClientId>, contact_graph: &C
 /// and all of the node's shares, sums shares from those channels
 fn mix_shares_from(my_id: Id, live_clients: &HashSet<ClientId>, shares_view: &Vec<Vec<(Share, ClientId)>>) -> Option<Vec<ShareBytes>> {
 
-    debug!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, shares_view);
+    info!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, shares_view);
 
     if !shares_view.into_iter().all(|chan| {
         chan.iter().map(|(_, client_id)| client_id)

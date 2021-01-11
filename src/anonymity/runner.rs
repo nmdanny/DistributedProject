@@ -8,6 +8,7 @@ use crate::consensus::adversarial_transport::{AdversaryTransport, AdversaryClien
 use crate::consensus::transport::{ThreadTransport};
 use crate::anonymity::logic::*;
 use crate::anonymity::anonymous_client::AnonymousClient;
+use callbacks::*;
 
 use futures::Stream;
 use rand::distributions::{Distribution, Uniform};
@@ -15,6 +16,9 @@ use tracing_futures::Instrument;
 use tokio::sync::{mpsc, broadcast};
 use std::hash::Hash;
 use std::rc::Rc;
+use std::borrow::BorrowMut;
+
+use super::callbacks;
 
 pub fn combined_subscriber<V: Value>(senders: Vec<broadcast::Sender<NewRound<V>>>) -> mpsc::UnboundedReceiver<NewRound<V>> {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -40,6 +44,8 @@ pub struct Scenario<V: Value + Hash> {
     pub communicators: Vec<NodeCommunicator<AnonymityMessage<V>>>,
     pub server_transport: AdversaryTransport<AnonymityMessage<V>, ThreadTransport<AnonymityMessage<V>>>,
     pub clients: Vec<AnonymousClient<V>>,
+
+    pub client_transports: Vec<AdversaryClientTransport<AnonymityMessage<V>, SingleProcessClientTransport<AnonymityMessage<V>>>>,
     phantom: std::marker::PhantomData<V>
 
 }
@@ -74,9 +80,11 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
 
         
         let mut clients = Vec::new();
+        let mut client_ts = Vec::new();
         for i in 0 .. config.num_clients {
             let client_transport = AdversaryClientTransport::new(
                 SingleProcessClientTransport::new(communicators.clone()));
+            client_ts.push(client_transport.clone());
             let recv = combined_subscriber(event_senders.clone());
             let client = AnonymousClient::new(client_transport, config.clone(), format!("AnonymClient {}", i), recv);
             clients.push(client);
@@ -97,6 +105,7 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
             communicators,
             server_transport,
             clients,
+            client_transports: client_ts,
             phantom: Default::default()
         }
 }
@@ -106,6 +115,7 @@ mod tests {
     use super::*;
     use futures::future::join;
     use tokio::task;
+    use crate::anonymity::callbacks::*;
 
 
     #[tokio::test]
@@ -143,7 +153,7 @@ mod tests {
     const VALS_TO_COMMIT: u64 = 10;
 
     #[tokio::test]
-    async fn with_omissions() {
+    async fn many_rounds() {
         let ls = tokio::task::LocalSet::new();
         ls.run_until(async move {
 
@@ -183,8 +193,59 @@ mod tests {
 
 
         }).await;
-        println!("simple_scenario done");
 
+    }
+
+
+    #[tokio::test]
+    async fn client_crash() {
+        let ls = tokio::task::LocalSet::new();
+        ls.run_until(async move {
+
+            setup_logging().unwrap();
+
+            let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
+                num_nodes: 3,
+                num_clients: 2,
+                threshold: 2,
+                num_channels: 2,
+                phase_length: std::time::Duration::from_secs(1),
+
+            }).await;
+
+            let mut client_b = scenario.clients.pop().unwrap();
+            let mut client_a = scenario.clients.pop().unwrap();
+
+            let a_transport = Rc::new(scenario.client_transports[0].clone());
+
+            // ensure 'a' always fails sending to node 3
+            // technically I am simulating here some kind of omission since node 3 isn't necessarily the last one he sends a message to
+            a_transport.set_omission_chance(2, 1.0);
+
+            register_client_send_callback(Box::new(move |_name, _round, node_id| {
+                let omission_chance = &a_transport.request_omission_chance;
+
+                // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
+                if node_id.is_none() {
+                    omission_chance.set(1.0);
+                } else {
+                    omission_chance.set(0.0);
+                }
+
+
+            }));
+
+            let handle_a = task::spawn_local(async move {
+                let _res = client_a.send_anonymously(1337u64).await;
+            });
+
+            let handle_b = task::spawn_local(async move {
+                let _res = client_b.send_anonymously(7331u64).await;
+            });
+
+            let _ = join(handle_b, handle_a).await;
+
+        }).await;
     }
 
 

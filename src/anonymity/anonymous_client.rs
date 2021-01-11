@@ -1,5 +1,6 @@
 use crate::anonymity::secret_sharing::*;
 use crate::anonymity::logic::*;
+use crate::anonymity::callbacks::*;
 use crate::consensus::client::{ClientTransport, Client};
 use crate::consensus::types::*;
 use std::{hash::Hash, rc::Rc};
@@ -181,9 +182,9 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
 
         }).collect::<Vec<_>>();
 
+
+
         // create tasks for sending batches of channels for every server
-
-
         let client = self.client.clone();
         let batch_futs = (0.. self.config.num_nodes).map(|node_id| {
             let batch = chan_secrets.iter().map(|chan_shares| {
@@ -193,6 +194,7 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             let client = client.clone();
             let client_name = self.client_name.clone();
             async move {
+                on_anonym_client_send(&client_name, round, Some(node_id));
                 client.submit_without_commit(node_id, AnonymityMessage::ClientShare {
                     channel_shares: batch, client_name, round
                 }).await.map_err(|e| e.context(format!("while sending to server ID {}", node_id)))
@@ -212,6 +214,7 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             }
         }).await;
 
+        on_anonym_client_send(&self.client_name, round, None);
         match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_name: self.client_name.clone(), round: round }).await {
             Ok(_) => {}
             Err(e) => { error!("Couldn't notify that I am live to some servers: {:?}", e) }

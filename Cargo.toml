@@ -37,6 +37,7 @@ thiserror = "1.0.22"
 derivative = "2.1.1"
 gridiron = "0.8.0"
 curve25519-dalek = "3"
+lazy_static = "1.4.0"
 
 # grpc
 tonic = "0.3.1"

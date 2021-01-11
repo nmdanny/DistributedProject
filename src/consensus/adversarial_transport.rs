@@ -16,7 +16,7 @@ use tokio::time::Duration;
 use rand::distributions::uniform::UniformFloat;
 use tracing::Instrument;
 use std::collections::btree_map::Entry;
-use std::cell::Cell;
+use std::cell::{RefCell, Cell};
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -179,10 +179,15 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
     }
 }
 
+/// The client adversary allows setting omission probabilities(between 0 to 1) per node,as well
+/// as setting a default omission chance for all nodes.
+/// In addition, clones of the adversary client transport retain the same omission probabilities - thus you
+/// need to explicitly create a new instance of AdversaryClientTransport if you don't want the adversary to affect everyone
 #[derive(Clone)]
 pub struct AdversaryClientTransport<V: Value, T: ClientTransport<V>>
 {
     transport: T,
+    pub omission_chance: Rc<RefCell<BTreeMap<Id, f64>>>,
     pub request_omission_chance: Rc<Cell<f64>>,
     pub response_omission_chance: Rc<Cell<f64>>,
     phantom: std::marker::PhantomData<V>,
@@ -192,10 +197,15 @@ impl <V: Value, T: ClientTransport<V>> AdversaryClientTransport<V, T> {
     pub fn new(transport: T) -> Self {
         AdversaryClientTransport {
             transport,
+            omission_chance: Rc::new(RefCell::new(BTreeMap::new())),
             request_omission_chance: Rc::new(Cell::new(0.0)),
             response_omission_chance: Rc::new(Cell::new(0.0)),
             phantom: Default::default()
         }
+    }
+
+    pub fn set_omission_chance(&self, id: Id, chance: f64) {
+        *self.omission_chance.borrow_mut().entry(id).or_default() = chance;
     }
 
 }
@@ -228,24 +238,30 @@ async fn adversary_request_response<R>(req_omission_chance: f64,
 #[async_trait(?Send)]
 impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTransport<V, T> {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>, RaftError> {
-        adversary_request_response(self.request_omission_chance.get(),
-                                   self.response_omission_chance.get(),
+        let req_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.request_omission_chance.get());
+        let res_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.response_omission_chance.get());
+        adversary_request_response(req_chance,
+                                   res_chance,
                                    node_id, async move {
             self.transport.submit_value(node_id, value).await
         }).await
     }
 
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
-        adversary_request_response(self.request_omission_chance.get(),
-                                   self.response_omission_chance.get(),
+        let req_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.request_omission_chance.get());
+        let res_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.response_omission_chance.get());
+        adversary_request_response(req_chance,
+                                   res_chance,
                                    node_id, async move {
             self.transport.request_values(node_id, from, to).await
         }).await
     }
 
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
-        adversary_request_response(self.request_omission_chance.get(),
-                                   self.response_omission_chance.get(),
+        let req_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.request_omission_chance.get());
+        let res_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.response_omission_chance.get());
+        adversary_request_response(req_chance,
+                                   res_chance,
                                    node_id, async move {
             self.transport.force_apply(node_id, value).await
         }).await
