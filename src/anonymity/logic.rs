@@ -200,6 +200,7 @@ impl Metrics {
 
         let join_handle = tokio::task::spawn_local(async move {
             let folder = PathBuf::from(file!()).parent().unwrap().parent().unwrap().parent().unwrap().join("out");
+            std::fs::create_dir_all(&folder).unwrap();
             let share_file = folder.join(format!("{}-share.csv", node_id));
 
             let time = Local::now();
@@ -445,7 +446,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         debug!("Beginning re-construct phase, sending my shares {:?} to all other nodes", shares);
 
         if shares.is_none() {
-            error!("I am missing shares from some clients, skipping reconstruct round {}", self.round);
+            warn!("I am missing shares from some clients, skipping reconstruct round {}", self.round);
             return;
         }
         let shares = shares.unwrap();

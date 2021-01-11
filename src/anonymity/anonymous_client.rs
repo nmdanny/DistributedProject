@@ -105,9 +105,9 @@ impl <V: Value + Hash> AnonymousClient<V> {
                        if let Some(tbc) = uncommited_queue.get_mut(0) {
                            if sent_for_round < round as i64 {
                                 sent_for_round = round as i64;
-                                if let Ok(sec_channel) = client.send_anonymously(tbc.value.clone(), round).await {
+                                if let Ok((sec_channel, succ_count)) = client.send_anonymously(tbc.value.clone(), round).await {
                                         tbc.channel_and_round = Some((sec_channel, round));
-                                        info!("Sent {:?} for round {} via channel {}", tbc.value, round, sec_channel);
+                                        info!("Sent {:?} for round {} via channel {} to {} nodes", tbc.value, round, sec_channel, succ_count);
                                 } else {
                                     error!("Client Couldn't send {:?}", tbc.value);
                                 }
@@ -165,9 +165,9 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
         }
     }
 
-    /// Sends a value anonymously, returning the channel via it was sent
+    /// Sends a value anonymously, returning the channel via it was sent and the number of odes that got their shares
     #[instrument]
-    async fn send_anonymously(&mut self, value: V, round: usize) -> Result<usize, anyhow::Error> {
+    async fn send_anonymously(&mut self, value: V, round: usize) -> Result<(usize, usize), anyhow::Error> {
         // note that thread_rng is crypto-secure
         let val_channel = Uniform::new(0, self.config.num_channels).sample(&mut rand::thread_rng());
         let secret_val = encode_secret(value)?;
@@ -202,16 +202,26 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
         });
 
         let ls = tokio::task::LocalSet::new();
-        ls.run_until(async move {
-            let handles = batch_futs.into_iter().map(|f| tokio::task::spawn_local(f));
-            let results = futures::future::join_all(handles).await;
-            for result in results {
-                match result {
-                    Ok(Err(e)) => error!("Got an error while sending shares to servers: {:?}", e),
-                    Err(e) => error!("There was an error when joining a send-share task: {:?}", e),
-                    _ => {}
+        let succ_count = ls.run_until(async move {
+            let mut handles = batch_futs.into_iter().map(|f| tokio::task::spawn_local(f)).collect::<Vec<_>>();
+            let mut succ_count = 0;
+            while !handles.is_empty() {
+                match futures::future::select_all(handles).await {
+                    (Ok(Err(e)), _index, remaining) => {
+                        error!("Got an error while sending shares to servers: {:?}", e);
+                        handles = remaining;
+                    },
+                    (Err(e), _index, remaining) => {
+                        error!("Got an error while joining send-share task: {:?}", e);
+                        handles = remaining;
+                    },
+                    (Ok(Ok(_res)), _index, remaining) => {
+                        succ_count += 1;
+                        handles = remaining;
+                    }
                 }
             }
+            return succ_count;
         }).await;
 
         on_anonym_client_send(&self.client_name, round, None);
@@ -220,6 +230,6 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             Err(e) => { error!("Couldn't notify that I am live to some servers: {:?}", e) }
         }
 
-        Ok(val_channel)
+        Ok((val_channel, succ_count))
     }
 }
