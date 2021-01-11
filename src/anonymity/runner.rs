@@ -150,7 +150,7 @@ mod tests {
         }).await;
     }
 
-    const VALS_TO_COMMIT: u64 = 10;
+    const VALS_TO_COMMIT: u64 = 20;
 
     #[tokio::test]
     async fn many_rounds() {
@@ -161,10 +161,10 @@ mod tests {
 
             let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
                 num_nodes: 5,
-                num_clients: 2,
                 threshold: 3,
-                num_channels: 20,
-                phase_length: std::time::Duration::from_millis(200),
+                num_clients: 8,
+                num_channels: 8,
+                phase_length: std::time::Duration::from_millis(500),
 
             }).await;
 

@@ -17,6 +17,7 @@ use futures::stream::{Stream, StreamExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Interval, Duration};
 use std::collections::HashMap;
+use chrono::Local;
 
 #[derive(Debug, Clone)]
 /// Configuration used for anonymous message sharing
@@ -51,7 +52,7 @@ fn find_reconstruction_group(live_clients: &HashSet<ClientId>, contact_graph: &C
 /// and all of the node's shares, sums shares from those channels
 fn mix_shares_from(my_id: Id, live_clients: &HashSet<ClientId>, shares_view: &Vec<Vec<(Share, ClientId)>>) -> Option<Vec<ShareBytes>> {
 
-    info!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, shares_view);
+    debug!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, shares_view);
 
     if !shares_view.into_iter().all(|chan| {
         chan.iter().map(|(_, client_id)| client_id)
@@ -200,12 +201,16 @@ impl Metrics {
         let join_handle = tokio::task::spawn_local(async move {
             let folder = PathBuf::from(file!()).parent().unwrap().parent().unwrap().parent().unwrap().join("out");
             let share_file = folder.join(format!("{}-share.csv", node_id));
-            let decode_file = folder.join(format!("{}-decode.csv", node_id));
+
+            let time = Local::now();
+            let time_st = time.format("%H-%M-%S");
+
+            let decode_file = folder.join(format!("{}-decode-{}.csv", node_id, time_st));
             let mut share_file = File::create(share_file).await?;
             let mut decode_file = File::create(decode_file).await?;
 
             share_file.write_all("id,round,chan,share_x,share_px\n".as_bytes()).await?;
-            decode_file.write_all("id,round,chan,malformed\n".as_bytes()).await?;
+            decode_file.write_all("num_nodes,num_clients,num_channels,id,round,chan,malformed\n".as_bytes()).await?;
 
             loop {
                 tokio::select! {
@@ -216,7 +221,8 @@ impl Metrics {
                     },
                     Some(tup) = decode_rx.recv() => {
                         let (round, chan, malformed) = tup;
-                        let s = format!("{},{},{},{}\n", node_id, round, chan, malformed);
+                        let Config  { num_nodes, num_clients, num_channels, .. } = *config;
+                        let s = format!("{},{},{},{},{},{},{}\n",  num_nodes, num_clients, num_channels, node_id, round, chan, malformed);
                         decode_file.write_all(s.as_bytes()).await?;
                     },
                     else => { return Ok(()); }
@@ -316,7 +322,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             return;
         }
         match &mut self.state {
-            Phase::Reconstructing { .. } => error!("Got client share while in reconstruct phase"),
+            Phase::Reconstructing { .. } => trace!("Got client share too late (while in reconstruct phase)"),
             Phase::ClientSharing { last_share_at, shares, 
                                    contact_graph, .. } => {
                 assert_eq!(shares.len(), batch.len() , "client batch size mismatch with expected channels");
@@ -466,7 +472,6 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                     shares: vec![Vec::new(); self.config.num_channels] 
                 };
                 self.round = round;
-                // TODO wake the fuck up of everyone
             }
         }
     }
@@ -491,7 +496,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 },
                 Err(ReconstructError::NoValue) => {}
                 Err(ReconstructError::Timeout) => {
-                    error!("Saw that reconstruct for round {} has timed out, not enough valid servers", round);
+                    trace!("Saw that reconstruct for round {} has timed out, not enough valid servers", round);
                     break;
                 }
             }
