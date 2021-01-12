@@ -98,7 +98,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
         self.node.leader_id = None;
         self.node.current_term += 1;
         self.node.voted_for = Some(self.node.id);
-        warn!("Starting elections started for term {}", self.node.current_term);
+        debug!("Starting elections started for term {}", self.node.current_term);
 
         // for notifying the loop of received votes
         let (tx, rx) = mpsc::unbounded_channel();
@@ -124,7 +124,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                         });
                     },
                     Err(RaftError::NetworkError(e)) => {
-                        error!(net_err=true, "Network error when sending vote request: {}", e);
+                        trace!(net_err=true, "Network error when sending vote request: {}", e);
                     },
                     Err(e) => {
                         error!("Misc Raft error when sending vote request: {}", e);
@@ -151,7 +151,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
 
             let duration = generate_election_length();
             let election_end = tokio::time::Instant::now() + duration;
-            warn!("elections started({} elections in a row), duration: {:?}", elections_in_a_row, duration);
+            debug!("elections started({} elections in a row), duration: {:?}", elections_in_a_row, duration);
 
             // loop for a single election
             loop {
@@ -164,7 +164,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                 tokio::select! {
                     _ = election_end_fut => {
                         // election timed out, start another one
-                        warn!("elections timed out(got: {} yes, {} no), starting more elections",
+                        debug!("elections timed out(got: {} yes, {} no), starting more elections",
                                election_state.yes, election_state.no);
                         break;
                     },
@@ -179,7 +179,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                         match election_state.tally() {
                             ElectionResult::Lost => {
                                 if !_lost {
-                                    info!("lost election, results: {:?}", election_state);
+                                    debug!("lost election, results: {:?}", election_state);
                                 }
                                 _lost = true;
                                 // we will not change the state yet, this will be done once we
