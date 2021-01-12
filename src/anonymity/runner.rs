@@ -161,27 +161,25 @@ mod tests {
 
             setup_logging().unwrap();
 
-            let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
+            let mut scenario = setup_single_process_anonymity_nodes::<String>(Config {
                 num_nodes: 5,
                 threshold: 3,
                 num_clients: 8,
-                num_channels: 20,
-                phase_length: std::time::Duration::from_millis(500),
+                num_channels: 40,
+                phase_length: std::time::Duration::from_millis(1000),
 
             }).await;
 
 
             let handles = (0..).zip(scenario.clients.drain(..)).map(|(num, mut client)| {
                 task::spawn_local(async move {
-                    let mut i = num * 1000;
                     let mut sends = 0;
                     loop {
-                        let res = client.send_anonymously(i).await;
+                        let res = client.send_anonymously(format!("CL{}|V={}", num, sends)).await;
                         match res {
                             Ok(_) => {}
                             Err(e) => { error!("Client {} failed to send shares: {}", client.client_name, e) }
                         }
-                        i += 1;
                         sends += 1;
                         if sends == VALS_TO_COMMIT {
                             return;
@@ -365,7 +363,7 @@ mod tests {
             // client 0 shouldn't be able to commit,
             // client 1 should commit since a majority of valid nodes(nodes 1, 2) should see his shares
 
-            let duration = tokio::time::Duration::from_secs(5);
+            let duration = tokio::time::Duration::from_secs(10);
 
             let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
                 let _res = client_a.send_anonymously(1337u64).await;

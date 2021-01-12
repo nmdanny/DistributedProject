@@ -48,3 +48,10 @@ pub fn on_anonym_client_send(client_name: &str, round: usize, node_id: Option<Id
         cb.borrow_mut().on_anonym_client_send(client_name, round, node_id);
     })
 }
+
+/// To be ran at the beginning of each test
+pub fn clean_callbacks() {
+    CALLBACKS.with(|cb| {
+        cb.borrow_mut().client_callbacks.clear();
+    })
+}
