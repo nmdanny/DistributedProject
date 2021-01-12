@@ -44,7 +44,14 @@ pub struct AnonymousClient<V: Value + Hash> {
 
 }
 
-type CommitResolver = oneshot::Sender<(usize, usize)>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct CommitResult { 
+    pub round: usize,
+    pub channel: usize
+}
+
+type CommitResolver = oneshot::Sender<CommitResult>;
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -144,9 +151,9 @@ impl <V: Value + Hash> AnonymousClient<V> {
                        // check if the previous value was committed
                        if !uncommited_queue.is_empty() && was_value_committed(&new_round, &uncommited_queue[0]).is_some() {
                            let tbc = uncommited_queue.pop_front().unwrap();
-                           let (round, chan) = tbc.channel_and_round.unwrap();
+                           let (channel, round) = tbc.channel_and_round.unwrap();
                            info!("Gonna try and send {:?}", tbc);
-                           tbc.resolver.send((round, chan)).unwrap();
+                           tbc.resolver.send(CommitResult { round, channel}).unwrap();
                        }
 
 
@@ -166,12 +173,13 @@ impl <V: Value + Hash> AnonymousClient<V> {
 
     }
 
+
     #[instrument]
-    pub async fn send_anonymously(&mut self, value: V) -> Result<(), anyhow::Error> {
+    pub async fn send_anonymously(&mut self, value: V) -> Result<CommitResult, anyhow::Error> {
         let (tx, rx) = oneshot::channel();
         self.send_anonym_queue.send((value, tx))?;
-        let _ = rx.await.unwrap();
-        Ok(())
+        let res = rx.await.unwrap();
+        Ok(res)
     }
 }
 

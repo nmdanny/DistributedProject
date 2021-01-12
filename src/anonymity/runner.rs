@@ -7,7 +7,7 @@ use crate::consensus::client::{SingleProcessClientTransport, ClientTransport};
 use crate::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 use crate::consensus::transport::{ThreadTransport};
 use crate::anonymity::logic::*;
-use crate::anonymity::anonymous_client::AnonymousClient;
+use crate::anonymity::anonymous_client::{AnonymousClient, CommitResult};
 use callbacks::*;
 
 use futures::Stream;
@@ -166,7 +166,7 @@ mod tests {
                 threshold: 3,
                 num_clients: 8,
                 num_channels: 40,
-                phase_length: std::time::Duration::from_millis(1000),
+                phase_length: std::time::Duration::from_millis(100),
 
             }).await;
 
@@ -177,8 +177,9 @@ mod tests {
                     loop {
                         let res = client.send_anonymously(format!("CL{}|V={}", num, sends)).await;
                         match res {
-                            Ok(_) => {}
-                            Err(e) => { error!("Client {} failed to send shares: {}", client.client_name, e) }
+                            Ok(CommitResult { round, channel}) => { 
+                                println!("CL{}|V={}  was committed via channel {} at round {}", num, sends, channel, round)}
+                            Err(e) => { panic!("Client {} failed to send shares: {}", client.client_name, e) }
                         }
                         sends += 1;
                         if sends == VALS_TO_COMMIT {
