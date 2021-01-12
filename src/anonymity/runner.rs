@@ -32,7 +32,7 @@ pub fn combined_subscriber<V: Value>(senders: Vec<broadcast::Sender<NewRound<V>>
                     next_round_to_send = round.round + 1;
                     if let Err(_e) = tx.send(round) {
                         error!("Couldn't send NewRound to client");
-                    }
+                    } 
                 }
             }
         });
@@ -112,6 +112,8 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use futures::future::join;
     use tokio::task;
@@ -163,7 +165,7 @@ mod tests {
                 num_nodes: 5,
                 threshold: 3,
                 num_clients: 8,
-                num_channels: 8,
+                num_channels: 20,
                 phase_length: std::time::Duration::from_millis(500),
 
             }).await;
@@ -198,7 +200,7 @@ mod tests {
 
 
     #[tokio::test]
-    async fn client_crash() {
+    async fn client_crash_only() {
         let ls = tokio::task::LocalSet::new();
         ls.run_until(async move {
 
@@ -218,7 +220,7 @@ mod tests {
 
             let a_transport = Rc::new(scenario.client_transports[0].clone());
 
-            // ensure 'a' always fails sending to node 3
+            // ensure 'a' always fails sending to node 2
             // technically I am simulating here some kind of omission since node 3 isn't necessarily the last one he sends a message to
             a_transport.set_omission_chance(2, 1.0);
 
@@ -235,18 +237,152 @@ mod tests {
 
             }));
 
-            let handle_a = task::spawn_local(async move {
+            let duration = tokio::time::Duration::from_secs(5);
+
+            let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
                 let _res = client_a.send_anonymously(1337u64).await;
-            });
+            }));
 
-            let handle_b = task::spawn_local(async move {
+
+            let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
                 let _res = client_b.send_anonymously(7331u64).await;
-            });
+            }));
 
-            let _ = join(handle_b, handle_a).await;
+            let (res1, res2) = futures::future::join(handle_a, handle_b).await;
+            assert!(res1.is_err(), "Client A is crashed and shouldn't be able to submit his value");
+            assert!(res2.is_ok(), "Client B is not faulty and should have managed to submit his value");
+
 
         }).await;
     }
 
+
+    #[tokio::test]
+    async fn client_crash_server_drop() {
+        let ls = tokio::task::LocalSet::new();
+        ls.run_until(async move {
+
+            setup_logging().unwrap();
+
+            let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
+                num_nodes: 3,
+                num_clients: 2,
+                threshold: 2,
+                num_channels: 2,
+                phase_length: std::time::Duration::from_secs(1),
+
+            }).await;
+
+            let mut client_b = scenario.clients.pop().unwrap();
+            let mut client_a = scenario.clients.pop().unwrap();
+
+            let a_transport = Rc::new(scenario.client_transports[0].clone());
+
+            // ensure 'a' always fails sending to node 2
+            // technically I am simulating here some kind of omission since node 2 isn't necessarily the last one he sends a message to
+            a_transport.set_omission_chance(2, 1.0);
+
+            // make node 0 omit messages with 0.5 probability
+            scenario.server_transport.set_omission_chance(0, 0.5).await;
+
+            register_client_send_callback(Box::new(move |_name, _round, node_id| {
+                let omission_chance = &a_transport.request_omission_chance;
+
+                // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
+                if node_id.is_none() {
+                    omission_chance.set(1.0);
+                } else {
+                    omission_chance.set(0.0);
+                }
+
+
+            }));
+
+
+            let duration = tokio::time::Duration::from_secs(4);
+
+            let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
+                let _res = client_a.send_anonymously(1337u64).await;
+            }));
+
+
+            let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
+                let _res = client_b.send_anonymously(7331u64).await;
+            }));
+
+            let (res1, res2) = futures::future::join(handle_a, handle_b).await;
+            assert!(res1.is_err(), "Client A is crashed and shouldn't be able to submit his value");
+            assert!(res2.is_ok(), "Client B is not faulty and should have managed to submit his value");
+
+
+        }).await;
+    }
+
+    
+    #[tokio::test]
+    async fn client_crash_server_crash() {
+        let ls = tokio::task::LocalSet::new();
+        ls.run_until(async move {
+
+            setup_logging().unwrap();
+
+            let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
+                num_nodes: 3,
+                num_clients: 2,
+                threshold: 2,
+                num_channels: 5,
+                phase_length: std::time::Duration::from_secs(1),
+
+            }).await;
+
+            let mut client_b = scenario.clients.pop().unwrap();
+            let mut client_a = scenario.clients.pop().unwrap();
+
+            let a_transport = Rc::new(scenario.client_transports[0].clone());
+
+            // ensure 'a' always fails sending to node 2
+            // technically I am simulating here some kind of omission since node 2 isn't necessarily the last one he sends a message to
+            a_transport.set_omission_chance(2, 1.0);
+
+            // make node 0 appear crashed (omit messages to everyone else)
+            scenario.server_transport.set_omission_chance(0, 1.0).await;
+            scenario.client_transports[0].set_omission_chance(0, 1.0);
+            scenario.client_transports[1].set_omission_chance(0, 1.0);
+
+            register_client_send_callback(Box::new(move |_name, _round, node_id| {
+                let omission_chance = &a_transport.request_omission_chance;
+
+                // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
+                if node_id.is_none() {
+                    omission_chance.set(1.0);
+                } else {
+                    omission_chance.set(0.0);
+                }
+
+
+            }));
+
+            // client 0 shouldn't be able to commit,
+            // client 1 should commit since a majority of valid nodes(nodes 1, 2) should see his shares
+
+            let duration = tokio::time::Duration::from_secs(5);
+
+            let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
+                let _res = client_a.send_anonymously(1337u64).await;
+            }));
+
+
+            let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
+                let _res = client_b.send_anonymously(7331u64).await;
+            }));
+
+            info!("Starting to submit items");
+            let (res1, res2) = futures::future::join(handle_a, handle_b).await;
+            assert!(res1.is_err(), "Client A is crashed and shouldn't be able to submit his value");
+            assert!(res2.is_ok(), "Client B is not faulty and should have managed to submit his values to [1,2]");
+
+
+        }).await;
+    }
 
 }
