@@ -298,9 +298,14 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         assert_ne!(req.leader_id, self.id, "A leader cannot send append entry to himself");
         assert!(req.entries.iter().all(|e| e.term <= req.term), "A leader cannot have entries whose term is higher than his own");
 
+        // note that in any case we return early, we also perform
+        // step 5 - in case leader_commit > commit_index, update our commit_index
+        // to the latest entry. (Even if the leader is stale or whatever, his leader_commit should always be correct)
+
         // 1. Check if sender is stale leader
         if req.term < self.current_term {
             warn!("sender is stale leader (my term = {}, other term = {})", req.term, self.current_term);
+            self.observe_leader_commit(req.leader_commit);
             return Ok(AppendEntriesResponse::failed(self.current_term));
         }
 
@@ -313,21 +318,24 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
                 None => {
                     warn!("mismatching prev_log_term for index {}. my log is too short, their term: {}",
                           prev_log_index, prev_log_term);
+                          
+                    self.observe_leader_commit(req.leader_commit);
                     return Ok(AppendEntriesResponse::failed(self.current_term));
                 }
                 Some(entry) => {
                     if entry.term != prev_log_term {
                         warn!("mismatching prev_log_term for index {}. mine: {}, their: {}",
                             prev_log_index, entry.term, prev_log_term);
+                        self.observe_leader_commit(req.leader_commit);
                         return Ok(AppendEntriesResponse::failed(self.current_term));
                     }
                 }
             }
         }
 
-        // this is a heartbeat, nothing to do
         if req.entries.is_empty() {
             trace!("got heartbeat/empty entry list");
+            self.observe_leader_commit(req.leader_commit);
             return Ok(AppendEntriesResponse::success(self.current_term));
         }
 
@@ -347,10 +355,12 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         // 4. append entries that aren't in the log
         self.storage.append_entries_not_in_log(&req.entries, insertion_index);
 
-        if req.leader_commit > self.commit_index {
-            let index_of_last_new_entry = req.entries.len() - 1 + insertion_index;
-            self.update_commit_index(req.leader_commit.min(Some(index_of_last_new_entry)));
-        }
+        // TODO: sometimes this assert fails, why?
+        let _index_of_last_new_entry = req.entries.len() - 1 + insertion_index;
+        assert_eq!(_index_of_last_new_entry, self.storage.last_log_index_term().index().unwrap());
+
+        // 5. if leader's commit index is bigger than our own, update 
+        self.observe_leader_commit(req.leader_commit);
 
         Ok(AppendEntriesResponse::success(self.current_term))
     }
@@ -364,6 +374,12 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
             });
     }
 
+    pub fn observe_leader_commit(&mut self, leader_commit_index: Option<usize>) {
+        if leader_commit_index > self.commit_index {
+            let last_log_entry = self.storage.last_log_index_term().index();
+            self.update_commit_index(leader_commit_index.min(last_log_entry));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -559,9 +575,10 @@ mod tests {
         assert!(!res2.success);
 
         // ensure the failed request did not affect the node other than updating his term
+        // and commit index
         assert_eq!(res2.term, 4);
         assert_eq!(node.current_term, 4);
-        assert_eq!(node.commit_index, None);
+        assert_eq!(node.commit_index, Some(1));
 
         assert_eq!(node.storage.get_from(0), &[
             LogEntry::new(0, 0),
