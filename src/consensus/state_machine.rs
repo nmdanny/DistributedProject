@@ -64,7 +64,8 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
                         assert_eq!(new_last_applied, entry.index, "Commit entry index should equal new last applied");
                         let out = self.apply(&entry.value).await;
                         res_tx.send((entry, out)).unwrap_or_else(|_e| {
-                            error!("Couldn't broadcast result of state machine, no one is subscribed");
+                            // this is normal for a non-leader node
+                            trace!("Couldn't broadcast result of state machine, no one is subscribed");
                             0
                         });
                         last_applied = Some(new_last_applied);
