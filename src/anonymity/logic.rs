@@ -581,12 +581,12 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
 
     type HookEvent = tokio::time::Instant;
 
-    type HookStream = Interval;
+    type HookStream = tokio_stream::wrappers::IntervalStream;
 
     type PublishedEvent = NewRound<V>;
 
     fn create_hook_stream(&mut self) -> Self::HookStream {
-        tokio::time::interval(self.config.phase_length)
+        tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(self.config.phase_length))
     }
 
     fn handle_hook_event(&mut self, _: Self::HookEvent) {

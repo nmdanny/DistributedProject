@@ -8,7 +8,7 @@ use core::result::Result;
 use core::option::Option::{None, Some};
 use core::result::Result::Ok;
 use async_trait::async_trait;
-use tokio::stream::StreamExt;
+use tokio_stream::StreamExt;
 use tokio::sync::watch;
 use crate::consensus::timing::generate_election_length;
 
@@ -32,7 +32,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> FollowerState<'a, V,
     }
 
     fn update_timer(&mut self) {
-        self.heartbeat_or_grant_vote_watch.as_ref().unwrap().broadcast(()).unwrap();
+        self.heartbeat_or_grant_vote_watch.as_ref().unwrap().send(()).unwrap();
     }
 
     #[instrument]
@@ -43,7 +43,8 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> FollowerState<'a, V,
         let (tx, mut rx) = watch::channel(());
         self.heartbeat_or_grant_vote_watch = Some(tx);
         let timeout_duration = generate_election_length();
-        let mut delay_fut = tokio::time::delay_for(timeout_duration);
+        let delay_fut = tokio::time::sleep(timeout_duration);
+        tokio::pin!(delay_fut);
         info!("Became follower, timeout duration(no heartbeats/vote) is {:?}", timeout_duration);
 
         loop {
@@ -57,12 +58,12 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> FollowerState<'a, V,
                     warn!("haven't received a heartbeat/voted too long, becoming candidate");
                     self.node.change_state(ServerState::Candidate);
                 },
-                res = self.node.receiver.as_mut().expect("follower - Node::receiver was None").next() => {
+                res = self.node.receiver.as_mut().expect("follower - Node::receiver was None").recv() => {
                     let cmd = res.unwrap();
                     self.handle_command(cmd);
                 },
-                Some(()) = rx.recv() => {
-                    delay_fut.reset(tokio::time::Instant::from_std(Instant::now() + timeout_duration));
+                Ok(()) = rx.changed() => {
+                    delay_fut.as_mut().reset(tokio::time::Instant::from_std(Instant::now() + timeout_duration));
                 }
             }
         }

@@ -117,11 +117,11 @@ impl <V: Value + Hash> AnonymousClient<V> {
                        uncommited_queue.push_back(ToBeCommitted {
                            value, channel_and_round: None, resolver: resolver
                        });
-                       notify.broadcast(()).unwrap();
+                       notify.send(()).unwrap();
                    },
                 
                    // try sending a new value for the current round
-                   Some(()) = notify_rx.recv() => {
+                   Ok(()) = notify_rx.changed() => {
                        if let Some(tbc) = uncommited_queue.get_mut(0) {
                            if sent_for_round < round as i64 {
                                 sent_for_round = round as i64;
@@ -159,7 +159,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
 
                        round = new_round.round;
                        // try sending an uncommitted value
-                       notify.broadcast(()).unwrap();
+                       notify.send(()).unwrap();
                    }
                } 
             }

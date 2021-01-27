@@ -13,7 +13,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
-use tokio::stream::StreamExt;
 use serde;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::broadcast;

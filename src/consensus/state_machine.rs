@@ -28,7 +28,7 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
 
     type HookEvent;
     type HookStream: Stream<Item = Self::HookEvent>;
-    type PublishedEvent: Send + Debug;
+    type PublishedEvent: Clone + Send + Debug;
 
     /// Allows hooking into the state machine lifecycle and applying operations
     /// independently of commit entries

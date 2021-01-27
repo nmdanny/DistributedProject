@@ -165,8 +165,8 @@ mod tests {
                 num_nodes: 5,
                 threshold: 3,
                 num_clients: 8,
-                num_channels: 40,
-                phase_length: std::time::Duration::from_millis(100),
+                num_channels: 16,
+                phase_length: std::time::Duration::from_millis(200),
 
             }).await;
 

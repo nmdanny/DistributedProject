@@ -159,7 +159,7 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
         let requester_omission = Bernoulli::new(req_omission).expect("omission chance must be in [0,1]");
         let responder_omission = Bernoulli::new(res_omission).expect("omission chance must be in [0,1]");
 
-        tokio::time::delay_for(Duration::from_millis(req_delay)).await;
+        tokio::time::sleep(Duration::from_millis(req_delay)).await;
 
         if requester_omission.sample(&mut rng) || responder_omission.sample(&mut rng) {
             return Err(RaftError::NetworkError(
@@ -167,7 +167,7 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
         }
         let res = do_request.await;
 
-        tokio::time::delay_for(Duration::from_millis(res_delay)).await;
+        tokio::time::sleep(Duration::from_millis(res_delay)).await;
 
         if responder_omission.sample(&mut rng) || responder_omission.sample(&mut rng) {
             return Err(RaftError::NetworkError(

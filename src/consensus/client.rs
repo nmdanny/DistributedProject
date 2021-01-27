@@ -184,7 +184,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     self.set_leader(None);
                 }
             }
-            time::delay_for(Duration::from_millis(self.retry_delay_ms.sample(
+            time::sleep(Duration::from_millis(self.retry_delay_ms.sample(
                 &mut rand::thread_rng()))).await;
             attempt += 1;
         }
@@ -229,7 +229,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     self.set_leader(None);
                 }
             }
-            time::delay_for(Duration::from_millis(self.retry_delay_ms.sample(
+            time::sleep(Duration::from_millis(self.retry_delay_ms.sample(
                 &mut rand::thread_rng()))).await;
             attempt += 1;
         }
@@ -252,7 +252,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     return Ok(res.result)
                 }
             }
-            time::delay_for(Duration::from_millis(self.retry_delay_ms.sample(
+            time::sleep(Duration::from_millis(self.retry_delay_ms.sample(
                 &mut rand::thread_rng()))).await;
             attempt += 1;
         }

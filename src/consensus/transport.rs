@@ -8,7 +8,6 @@ use derivative;
 use std::collections::HashMap;
 use tokio::sync::{RwLock, Barrier, mpsc};
 use std::sync::Arc;
-use tokio::stream::StreamExt;
 
 /// Used for sending and receiving Raft messages
 /// Should be cheap to clone

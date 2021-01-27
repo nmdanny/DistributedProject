@@ -13,7 +13,6 @@ use dist_lib::consensus::client::{Client, SingleProcessClientTransport, ClientTr
 use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
-use tokio::stream::StreamExt;
 use std::collections::btree_map::Entry;
 use std::rc::Rc;
 use std::cell::Cell;
@@ -65,7 +64,7 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
         let handle = tokio::task::spawn_local(async move {
             let mut view = BTreeMap::<usize, LogEntry<V>>::new();
             loop {
-                let res = self.notifier.next().await;
+                let res = self.notifier.recv().await;
                 assert!(res.is_some(), "ConsistencyCheck notifier should never be closed");
                 let commit_entry = res.unwrap();
                 let entry = LogEntry { term: commit_entry.term, value: commit_entry.value.clone()};
@@ -165,7 +164,7 @@ async fn client_message_loop<T: ClientTransport<String>>(client: &mut Client<T, 
 
 
 /// This tests the 'Random omission of clients and server' scenario
-#[tokio::main(max_threads=1)]
+#[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Error> {
     setup_logging()?;
 
@@ -213,7 +212,7 @@ pub async fn main() -> Result<(), Error> {
 mod tests {
     use super::*;
     use tokio::task;
-    use futures::StreamExt;
+    use tokio_stream::StreamExt;
 
     #[tokio::test]
     pub async fn simple_crash() {
@@ -221,6 +220,7 @@ mod tests {
         setup_logging().unwrap();
         ls.run_until(async move {
             let (scenario, rx) = Scenario::<u32>::setup(3, 1).await;
+            let rx = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
             let Scenario { mut clients, server_transport, ..} = scenario;
             
             let client_jh = task::spawn_local(async move {

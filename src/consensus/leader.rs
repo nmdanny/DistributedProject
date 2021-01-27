@@ -5,7 +5,7 @@ use crate::consensus::node::{Node, ServerState};
 use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch, broadcast};
-use tokio::stream::StreamExt;
+use tokio_stream::StreamExt;
 use futures::{TryFutureExt, FutureExt};
 use tracing_futures::Instrument;
 use std::collections::BTreeMap;
@@ -199,9 +199,9 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
 
     #[instrument(skip(stale_sender))]
     /// To run concurrently as long as the leader is active.
-    pub async fn run_replication_loop(mut self, mut stale_sender: mpsc::Sender<StaleLeader>) {
+    pub async fn run_replication_loop(mut self, stale_sender: mpsc::Sender<StaleLeader>) {
         let current_term = self.node.borrow().current_term;
-        while let Some(()) = self.tick_receiver.next().await {
+        while let Ok(()) = self.tick_receiver.changed().await {
             match self.try_replication().await {
                 Ok(_) => {},
                 Err(ReplicationLoopError::PeerError(e)) => {
@@ -465,12 +465,12 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
 
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
-                        replicate_trigger.broadcast(()).unwrap_or_else(|e| {
+                        replicate_trigger.send(()).unwrap_or_else(|e| {
                             error!("Couldn't send heartbeat, no peer replication streams: {:?}", e);
                         });
                 },
-                _ = self.replicate_receiver.next() => {
-                    replicate_trigger.broadcast(()).unwrap_or_else(|e| {
+                _ = self.replicate_receiver.changed() => {
+                    replicate_trigger.send(()).unwrap_or_else(|e| {
                         error!("Couldn't trigger replication, no peer replication streams: {:?}", e);
                     });
                 },
@@ -483,17 +483,17 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
                 res = sm_result_recv.recv() => {
                     match res {
                         Ok(res) => self.on_commit_apply(&res.0, res.1),
-                        Err(broadcast::RecvError::Lagged(s)) => error!("Leader lagged for {} commits, how is this possible", s) ,
+                        Err(broadcast::error::RecvError::Lagged(s)) => error!("Leader lagged for {} commits, how is this possible", s) ,
                         _ => {}
                     }
                 },
-                Some(StaleLeader { newer_term}) = stale_receiver.next() => {
+                Some(StaleLeader { newer_term}) = stale_receiver.recv() => {
                     let mut node = self.node.borrow_mut();
                     let _res = node.try_update_term(newer_term, None);
                     assert!(_res);
                     return Ok(())
                 },
-                res = receiver.next() => {
+                res = receiver.recv() => {
                     // TODO can this channel close prematurely?
                     let cmd = res.unwrap();
                     match cmd {
@@ -528,7 +528,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
         assert!(_prev.is_none(), "can't insert multiple PendingWriteRequests to same log index");
 
         // notify all replication streams of the newly added
-        self.replicate_sender.broadcast(()).unwrap_or_else(|e| {
+        self.replicate_sender.send(()).unwrap_or_else(|e| {
             error!("No replication stream to be notified of added entry: {:?}", e);
         });
     }

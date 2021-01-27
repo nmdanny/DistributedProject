@@ -5,7 +5,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::{Node, ServerState};
 use tokio::sync::mpsc;
-use tokio::stream::StreamExt;
+use tokio_stream::StreamExt;
 use crate::consensus::node_communicator::CommandHandler;
 use tracing_futures::Instrument;
 use async_trait::async_trait;
@@ -160,7 +160,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                     return Ok(());
                 }
 
-                let election_end_fut = tokio::time::delay_until(election_end);
+                let election_end_fut = tokio::time::sleep_until(election_end);
                 tokio::select! {
                     _ = election_end_fut => {
                         // election timed out, start another one
@@ -168,7 +168,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                                election_state.yes, election_state.no);
                         break;
                     },
-                    Some(vote) = election_state.vote_receiver.next() => {
+                    Some(vote) = election_state.vote_receiver.recv() => {
                         // If we get vote from a node at a later term, we'll convert
                         // to follower. (§5.1)
                         if self.node.try_update_term(vote.term, None) {
@@ -199,7 +199,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                             }
                         }
                     },
-                    res = self.node.receiver.as_mut().expect("candidate - Node::receiver was None").next() => {
+                    res = self.node.receiver.as_mut().expect("candidate - Node::receiver was None").recv() => {
                         // TODO can this channel close prematurely?
                         let cmd = res.unwrap();
                         self.handle_command(cmd);
