@@ -54,7 +54,11 @@ fn mix_shares_from(my_id: Id, live_clients: &HashSet<ClientId>, shares_view: &Ve
     let condensed_view = shares_view[0].iter().map(|s| &s.1).collect::<Vec<_>>();
     info!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, condensed_view);
 
-    debug!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, shares_view);
+    // A faulty node will disagree on live clients yet proceed to reconstruct stage
+    // TODO: maybe this is not enough? 
+    // if live_clients.is_empty() {
+    //     return None;
+    // }
 
     if !shares_view.into_iter().all(|chan| {
         chan.iter().map(|(_, client_id)| client_id)
