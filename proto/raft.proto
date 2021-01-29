@@ -1,0 +1,15 @@
+syntax = "proto3";
+package raft;
+
+
+message GenericMessage {
+    bytes buf = 1;
+}
+
+service Raft {
+    rpc VoteRequestRPC(GenericMessage) returns (GenericMessage);
+    rpc AppendEntriesRPC(GenericMessage) returns (GenericMessage);
+    rpc ClientWriteRequest(GenericMessage) returns (GenericMessage);
+    rpc ClientReadRequest(GenericMessage) returns (GenericMessage);
+    rpc ClientForceApplyRequest(GenericMessage) returns (GenericMessage);
+}

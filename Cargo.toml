@@ -42,7 +42,7 @@ lazy_static = "1.4.0"
 chrono = "0.4"
 
 # grpc
-tonic = "0.4"
+tonic = { version = "0.4", features = ["default", "tls"] }
 prost = "0.7"
 parking_lot = "0.11.0"
 
@@ -59,4 +59,4 @@ name = "raft"
 path = "src/consensus/single_process_runner.rs"
 
 [build-dependencies]
-tonic-build = "0.3"
+tonic-build = "0.4"

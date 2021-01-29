@@ -150,9 +150,9 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
         let mut rng = rand::thread_rng();
         let state = self.state.read().await;
         let req_omission = state.omission_chance.get(&from).copied().unwrap_or(0.0);
-        let req_delay =  state.delay_dist.get(&from).unwrap().sample(&mut rng);
+        let req_delay =  state.delay_dist.get(&from).map(|dist| dist.sample(&mut rng)).unwrap_or(0);
         let res_omission = state.omission_chance.get(&to).copied().unwrap_or(0.0);
-        let res_delay =  state.delay_dist.get(&to).unwrap().sample(&mut rng);
+        let res_delay =  state.delay_dist.get(&to).map(|dist| dist.sample(&mut rng)).unwrap_or(0);
         std::mem::drop(state);
 
 
