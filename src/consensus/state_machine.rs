@@ -1,6 +1,7 @@
 use crate::consensus::types::*;
 use crate::consensus::node::Node;
 use crate::consensus::transport::Transport;
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::broadcast;
@@ -28,7 +29,7 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
 
     type HookEvent;
     type HookStream: Stream<Item = Self::HookEvent>;
-    type PublishedEvent: Clone + Send + Debug;
+    type PublishedEvent: Clone + Send + Debug + Serialize;
 
     /// Allows hooking into the state machine lifecycle and applying operations
     /// independently of commit entries

@@ -99,6 +99,10 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
     pub state_machine: Option<(S, mpsc::UnboundedReceiver<CommitEntry<V>>,
                                   mpsc::UnboundedReceiver<ForceApply<V>>)>,
 
+    /// Used to notify communicator of newly published state machine events(serialized)
+    #[derivative(Debug="ignore")]
+    pub sm_publish_sender: broadcast::Sender<Vec<u8>>,
+
     /// Leader can subscribe in order to be notified of commits
     #[derivative(Debug="ignore")]
     pub sm_result_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
@@ -120,7 +124,8 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
                number_of_nodes: usize,
                transport: T) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
-        let (sm_result_sender, _) = broadcast::channel(1024);
+        let (sm_result_sender, _) = broadcast::channel(BROADCAST_CHAN_SIZE);
+        let (sm_publish_sender, _) = broadcast::channel(BROADCAST_CHAN_SIZE);
         Node {
             transport,
             receiver: None,
@@ -134,6 +139,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
             voted_for: None,
             commit_index: None,
             state_machine: None,
+            sm_publish_sender,
             sm_result_sender,
             commit_sender: None,
             force_apply_sender: None,
@@ -141,15 +147,24 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
         }
     }
 
-    pub fn attach_state_machine(&mut self, mut machine: S) -> broadcast::Sender<S::PublishedEvent> {
+    pub fn attach_state_machine(&mut self, mut machine: S) {
         let (commit_sender, commit_receiver) = mpsc::unbounded_channel();
         let (force_apply_sender, force_apply_recv) = mpsc::unbounded_channel();
         
         self.commit_sender = Some(commit_sender);
         self.force_apply_sender = Some(force_apply_sender);
-        let recv = machine.get_event_stream();
+        let mut recv = machine.get_event_stream().subscribe();
+        let ser_sender = self.sm_publish_sender.clone();
+        tokio::spawn(async move {
+            while let Ok(res) = recv.recv().await {
+                let ser = serde_json::to_vec_pretty(&res).unwrap();
+                ser_sender.send(ser).unwrap_or_else(|_| {
+                    warn!("Nobody is listening to serialized state machine outputs");
+                    0
+                });
+            }
+        }.instrument(info_span!("attach_state_machine event serialization loop", id=?self.id)));
         self.state_machine = Some((machine, commit_receiver, force_apply_recv));
-        recv
     }
 
     /// Size of a majority quorum (the minimal amount of valid nodes)

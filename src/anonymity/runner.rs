@@ -11,23 +11,23 @@ use crate::anonymity::anonymous_client::{AnonymousClient, CommitResult};
 use callbacks::*;
 
 use futures::Stream;
+use parking_lot::RwLock;
 use rand::distributions::{Distribution, Uniform};
 use tracing_futures::Instrument;
 use tokio::sync::{mpsc, broadcast};
-use std::hash::Hash;
+use std::{cell::RefCell, collections::HashMap, hash::Hash, sync::Arc};
 use std::rc::Rc;
 use std::borrow::BorrowMut;
 
 use super::callbacks;
 
-pub fn combined_subscriber<V: Value>(senders: Vec<broadcast::Sender<NewRound<V>>>) -> mpsc::UnboundedReceiver<NewRound<V>> {
+pub fn combined_subscriber<V: Value>(mut receivers: Vec<mpsc::UnboundedReceiver<NewRound<V>>>) -> mpsc::UnboundedReceiver<NewRound<V>> {
     let (tx, rx) = mpsc::unbounded_channel();
-    for sender in senders {
+    for mut recv in receivers.drain(..) {
         let tx = tx.clone();
         tokio::spawn(async move {
             let mut next_round_to_send = 0;
-            let mut recv = sender.subscribe();
-            while let Ok(round) = recv.recv().await {
+            while let Some(round) = recv.recv().await {
                 if round.round >= next_round_to_send {
                     next_round_to_send = round.round + 1;
                     if let Err(_e) = tx.send(round) {
@@ -56,12 +56,18 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
         let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
 
         let config = Rc::new(config);
+        let num_clients = config.num_clients;
+        let event_senders = RefCell::new(HashMap::<Id, Vec<_>>::new());
 
         let (mut nodes, communicators) = futures::future::join_all(
             (0 .. config.num_nodes).map(|id| {
                 let mut node = Node::new(id, config.num_nodes, server_transport.clone());
                 async {
                     let comm = NodeCommunicator::from_node(&mut node).await;
+                    for client_id in 0 .. num_clients {
+                        let event_sender = comm.state_machine_output_channel::<NewRound<V>>();
+                        event_senders.borrow_mut().entry(client_id).or_default().push(event_sender);
+                    }
                     (node, comm)
                 }
             })
@@ -69,13 +75,11 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
 
             
 
-        let mut event_senders = Vec::new();
         for node in &mut nodes {
             // used for communicating with other nodes
             let client_transport = SingleProcessClientTransport::new(communicators.clone());
             let sm = AnonymousLogSM::<V, _>::new(config.clone(), node.id, client_transport);
-            let event_sender = node.attach_state_machine(sm);
-            event_senders.push(event_sender);
+            node.attach_state_machine(sm);
         }
 
         
@@ -85,7 +89,7 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
             let client_transport = AdversaryClientTransport::new(
                 SingleProcessClientTransport::new(communicators.clone()));
             client_ts.push(client_transport.clone());
-            let recv = combined_subscriber(event_senders.clone());
+            let recv = combined_subscriber(event_senders.borrow_mut().remove(&i).unwrap());
             let client = AnonymousClient::new(client_transport, config.clone(), format!("AnonymClient {}", i), recv);
             clients.push(client);
         }
@@ -140,11 +144,11 @@ mod tests {
             let mut client_b = scenario.clients.pop().unwrap();
 
             let handle_a = task::spawn_local(async move {
-                let _res = client_a.send_anonymously(1337u64).await;
+                let _res = client_a.send_anonymously(1337u64).await.unwrap();
             });
 
             let handle_b = task::spawn_local(async move {
-                let _res = client_b.send_anonymously(7331u64).await;
+                let _res = client_b.send_anonymously(7331u64).await.unwrap();
             });
 
             let _ = join(handle_b, handle_a).await;
@@ -239,12 +243,12 @@ mod tests {
             let duration = tokio::time::Duration::from_secs(5);
 
             let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
-                let _res = client_a.send_anonymously(1337u64).await;
+                let _res = client_a.send_anonymously(1337u64).await.unwrap();
             }));
 
 
             let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
-                let _res = client_b.send_anonymously(7331u64).await;
+                let _res = client_b.send_anonymously(7331u64).await.unwrap();
             }));
 
             let (res1, res2) = futures::future::join(handle_a, handle_b).await;
@@ -301,12 +305,12 @@ mod tests {
             let duration = tokio::time::Duration::from_secs(4);
 
             let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
-                let _res = client_a.send_anonymously(1337u64).await;
+                let _res = client_a.send_anonymously(1337u64).await.unwrap();
             }));
 
 
             let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
-                let _res = client_b.send_anonymously(7331u64).await;
+                let _res = client_b.send_anonymously(7331u64).await.unwrap();
             }));
 
             let (res1, res2) = futures::future::join(handle_a, handle_b).await;
@@ -367,12 +371,12 @@ mod tests {
             let duration = tokio::time::Duration::from_secs(10);
 
             let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
-                let _res = client_a.send_anonymously(1337u64).await;
+                let _res = client_a.send_anonymously(1337u64).await.unwrap();
             }));
 
 
             let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
-                let _res = client_b.send_anonymously(7331u64).await;
+                let _res = client_b.send_anonymously(7331u64).await.unwrap();
             }));
 
             info!("Starting to submit items");

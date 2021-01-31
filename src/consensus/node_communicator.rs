@@ -1,5 +1,10 @@
+use std::pin::Pin;
+
 use crate::consensus::types::*;
+use futures::Stream;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::{oneshot, mpsc};
+use tracing_futures::Instrument;
 use crate::consensus::state_machine::{StateMachine, ForceApply};
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
@@ -35,7 +40,13 @@ pub struct NodeCommunicator<V: Value> {
     rpc_sender: mpsc::UnboundedSender<NodeCommand<V>>,
 
     // used to subscribe clients to new committed entries
-    commit_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>
+    commit_sender: broadcast::Sender<(CommitEntry<V>, V::Result)>,
+
+    // used to subscribe clients to state machine events(serialized)
+    // TODO: avoid serialization at this point, somehow tie NodeCommunicator to the state machine?
+    sm_event_sender: broadcast::Sender<Vec<u8>>,
+
+    id: usize
 }
 
 /// Size of commit notification channel. Note that in case of lagging receivers(clients), they will never block
@@ -61,7 +72,10 @@ impl <V: Value> NodeCommunicator<V> {
     pub async fn from_node<T: Transport<V>, S: StateMachine<V, T>>(node: &mut Node<V, T, S>) -> NodeCommunicator<V> {
         let (rpc_sender, rpc_receiver) = mpsc::unbounded_channel();
         let mut communicator = NodeCommunicator {
-            rpc_sender, commit_sender: node.sm_result_sender.clone()
+            rpc_sender,
+            commit_sender: node.sm_result_sender.clone(),
+            sm_event_sender: node.sm_publish_sender.clone(),
+            id: node.id
         };
         node.receiver = Some(rpc_receiver);
         node.transport.on_node_communicator_created(node.id, &mut communicator).await;
@@ -71,6 +85,18 @@ impl <V: Value> NodeCommunicator<V> {
     /// Allows one to be notified of entries that were committed AFTER this function is called.
     pub async fn commit_channel(&self) -> Result<broadcast::Receiver<(CommitEntry<V>, V::Result)>, RaftError> {
         Ok(self.commit_sender.subscribe())
+    }
+
+    pub fn state_machine_output_channel<E: Value>(&self) -> mpsc::UnboundedReceiver<E> {
+        let mut rec = self.sm_event_sender.subscribe();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok(sm_bytes) = rec.recv().await {
+                let event = serde_json::from_slice(&sm_bytes).unwrap();
+                tx.send(event).unwrap();
+            }
+        }.instrument(info_span!("state_machine_output_channel", id=?self.id)));
+        rx
     }
 
     #[instrument]

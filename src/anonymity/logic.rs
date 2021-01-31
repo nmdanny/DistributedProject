@@ -551,7 +551,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NewRound<V> {
     pub round: usize,
     pub last_reconstruct_results: Option<Vec<Result<V, ReconstructError>>>
