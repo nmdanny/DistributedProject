@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde::{Deserialize, de::DeserializeOwned};
 
 use anyhow::Context;
-use super::pb::{GenericMessage, TypeConversionError, raft_client::RaftClient, raft_server::{Raft, RaftServer}, raft_to_tonic, tonic_to_raft};
+use super::pb::{GenericMessage, TypeConversionError, raft_client::RaftClient, raft_server::{Raft, RaftServer}, raft_to_tonic, tonic_to_raft, tonic_stream_to_raft};
 
 const STARTUP_TIME: tokio::time::Duration = tokio::time::Duration::from_secs(0u64);
 const RECONNECT_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(2u64);
@@ -224,6 +224,23 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
         let msg: GenericMessage = value.try_into().context("While serializing ClientForceApplyRequest").map_err(RaftError::InternalError)?;
         let res = client.client_force_apply_request(msg).await;
         tonic_to_raft(res)
+    }
+
+    #[instrument]
+    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
+        let inner = self.inner.read();
+        if (!inner.clients_init) {
+            drop(inner);
+            let mut inner = self.inner.write();
+            inner.connect_to_nodes().await.map_err(RaftError::InternalError)?;
+        }
+        let inner = self.inner.read();
+
+        let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
+        let stream = client.state_machine_updates(tonic::Request::new(GenericMessage {
+            buf: Vec::new()
+        })).await;
+        tonic_stream_to_raft(stream)
     }
 }
 

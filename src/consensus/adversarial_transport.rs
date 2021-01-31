@@ -3,14 +3,15 @@ use crate::consensus::client::ClientTransport;
 use crate::consensus::types::*;
 
 use tokio::sync::RwLock;
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 use std::collections::BTreeMap;
 use crate::consensus::node::Node;
 use crate::consensus::node_communicator::NodeCommunicator;
 use anyhow::Error;
 use rand::distributions::{Uniform, Bernoulli, Distribution};
 use async_trait::async_trait;
-use futures::{Future, TryFutureExt};
+use futures::{Future, Stream, TryFutureExt};
+use tokio_stream::StreamExt;
 use std::boxed::Box;
 use tokio::time::Duration;
 use rand::distributions::uniform::UniformFloat;
@@ -265,5 +266,20 @@ impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTra
                                    node_id, async move {
             self.transport.force_apply(node_id, value).await
         }).await
+    }
+
+
+    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
+        let omit_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.response_omission_chance.get());
+        let res_ber =  Bernoulli::new(omit_chance).expect("Invalid omission chance");
+        let stream = self.transport.get_sm_event_stream(node_id).await?;
+        let res_stream = stream.filter(move |_| {
+            if res_ber.sample(&mut rand::thread_rng()) {
+                return false;
+            }
+            true
+        });
+
+        Ok(Box::pin(res_stream))
     }
 }

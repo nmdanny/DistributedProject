@@ -1,5 +1,6 @@
 use crate::consensus::types::*;
 use anyhow::Error;
+use serde::de::DeserializeOwned;
 use crate::consensus::node_communicator::NodeCommunicator;
 use tokio::time;
 use rand::distributions::{Distribution, Uniform};
@@ -10,8 +11,8 @@ use color_eyre::eyre::ContextCompat;
 use crate::consensus::timing::{CLIENT_RETRY_DELAY_RANGE, CLIENT_TIMEOUT};
 use tokio::time::timeout;
 use derivative;
-use futures::TryFutureExt;
-use std::rc::Rc;
+use futures::{Stream, TryFutureExt};
+use std::{pin::Pin, rc::Rc};
 
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait(?Send)]
@@ -21,6 +22,8 @@ pub trait ClientTransport<V: Value> : 'static + Clone {
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
 
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError>;
+
+    async fn get_sm_event_stream<EventType: Value>(&self, _node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError>;
 }
 
 #[derive(Clone)]
@@ -67,6 +70,12 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
         timeout(self.timeout_duration, fut).map_err(|_| RaftError::TimeoutError(
             anyhow::anyhow!("client did not receive response to force_apply in enough time")
         )).await?
+    }
+
+    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
+        let event_rec = self.communicators.get(node_id).expect("Invlid node ID").state_machine_output_channel::<EventType>();
+        let event_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rec);
+        Ok(Box::pin(event_stream))
     }
 }
 

@@ -3,8 +3,9 @@ use crate::anonymity::logic::*;
 use crate::anonymity::callbacks::*;
 use crate::consensus::client::{ClientTransport, Client};
 use crate::consensus::types::*;
-use std::{hash::Hash, rc::Rc};
+use std::{hash::Hash, pin::Pin, rc::Rc};
 use std::collections::{VecDeque, HashMap};
+use futures::{Stream, StreamExt};
 use tokio::sync::{watch, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use rand::distributions::{Distribution, Uniform};
@@ -91,7 +92,7 @@ fn was_value_committed<V: Value>(new_round: &NewRound<V>, last_sent: &ToBeCommit
 impl <V: Value + Hash> AnonymousClient<V> {
     pub fn new<CT: ClientTransport<AnonymityMessage<V>>>(client_transport: CT, 
         config: Rc<Config>, client_name: String, 
-        mut event_recv: mpsc::UnboundedReceiver<NewRound<V>>) -> Self 
+        mut event_recv: Pin<Box<dyn Stream<Item = NewRound<V>>>>) -> Self 
     {
         let mut client = AnonymousClientInner::new(client_transport, config, client_name.clone());
 
@@ -141,7 +142,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
                    },
 
                    // handle new rounds
-                   Some(new_round) = event_recv.recv() => {
+                   Some(new_round) = event_recv.next() => {
                        trace!("Saw new round: {:?}", new_round);
 
                        // ignore delayed new-round messages

@@ -10,34 +10,41 @@ use crate::anonymity::logic::*;
 use crate::anonymity::anonymous_client::{AnonymousClient, CommitResult};
 use callbacks::*;
 
-use futures::Stream;
+use futures::{Future, Stream, StreamExt, future::join_all};
 use parking_lot::RwLock;
 use rand::distributions::{Distribution, Uniform};
+use tokio_stream::StreamMap;
 use tracing_futures::Instrument;
 use tokio::sync::{mpsc, broadcast};
-use std::{cell::RefCell, collections::HashMap, hash::Hash, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, hash::Hash, pin::Pin, sync::Arc};
 use std::rc::Rc;
 use std::borrow::BorrowMut;
 
 use super::callbacks;
 
-pub fn combined_subscriber<V: Value>(mut receivers: Vec<mpsc::UnboundedReceiver<NewRound<V>>>) -> mpsc::UnboundedReceiver<NewRound<V>> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    for mut recv in receivers.drain(..) {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let mut next_round_to_send = 0;
-            while let Some(round) = recv.recv().await {
-                if round.round >= next_round_to_send {
-                    next_round_to_send = round.round + 1;
-                    if let Err(_e) = tx.send(round) {
-                        error!("Couldn't send NewRound to client");
-                    } 
-                }
-            }
-        });
+/// Combines NewRound streams(ideally from many servers) onto a single stream, allowing to handle events
+/// from many servers in case some are faulty
+pub fn combined_subscriber<V: Value>(receivers: impl Iterator<Item = Pin<Box<dyn Stream<Item = NewRound<V>>>>>) 
+    -> Pin<Box<dyn Stream<Item = NewRound<V>>>> {
+
+    let mut stream_map = StreamMap::new();
+
+    for (i, stream) in (0 ..).zip(receivers) {
+        let _res = stream_map.insert(i, stream);
+        assert!(_res.is_none());
     }
-    rx
+
+    // let mut next_round_to_send = Box::pin(0usize);
+    let mut next_round_to_send = 0;
+    let combined_stream = stream_map.filter_map(move |(_, round)| {
+        let res = if round.round >= next_round_to_send {
+            next_round_to_send = round.round + 1;
+            Some(round)
+        } else { None };
+        futures::future::ready(res)
+    });
+
+    Box::pin(combined_stream)
 }
 
 pub struct Scenario<V: Value + Hash> {
@@ -56,18 +63,12 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
         let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
 
         let config = Rc::new(config);
-        let num_clients = config.num_clients;
-        let event_senders = RefCell::new(HashMap::<Id, Vec<_>>::new());
 
         let (mut nodes, communicators) = futures::future::join_all(
             (0 .. config.num_nodes).map(|id| {
                 let mut node = Node::new(id, config.num_nodes, server_transport.clone());
                 async {
                     let comm = NodeCommunicator::from_node(&mut node).await;
-                    for client_id in 0 .. num_clients {
-                        let event_sender = comm.state_machine_output_channel::<NewRound<V>>();
-                        event_senders.borrow_mut().entry(client_id).or_default().push(event_sender);
-                    }
                     (node, comm)
                 }
             })
@@ -89,7 +90,16 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
             let client_transport = AdversaryClientTransport::new(
                 SingleProcessClientTransport::new(communicators.clone()));
             client_ts.push(client_transport.clone());
-            let recv = combined_subscriber(event_senders.borrow_mut().remove(&i).unwrap());
+
+            let sm_events = futures::future::join_all((0 .. config.num_nodes).map(|node_id| {
+                let stream = client_transport.get_sm_event_stream::<NewRound<V>>(node_id);
+                async move {
+                    stream.await.unwrap()
+                }
+                
+            })).await;
+
+            let recv = combined_subscriber(sm_events.into_iter());
             let client = AnonymousClient::new(client_transport, config.clone(), format!("AnonymClient {}", i), recv);
             clients.push(client);
         }

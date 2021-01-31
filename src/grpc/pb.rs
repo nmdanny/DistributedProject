@@ -1,11 +1,14 @@
-use std::convert::{TryFrom, TryInto};
+use std::{convert::{TryFrom, TryInto}, pin::Pin};
 
+use futures::{Stream};
+use serde::de::DeserializeOwned;
+use tokio_stream::StreamExt;
 use tonic;
 use serde_json::to_vec;
 use serde_json::from_slice;
 use anyhow::Context;
 mod inner {
-    include!(concat!(env!("OUT_DIR"),concat!("/","raft",".rs")));
+    std::include!(concat!(env!("OUT_DIR"),concat!("/","raft",".rs")));
 }
 
 use crate::consensus::types::*;
@@ -67,6 +70,17 @@ pub fn raft_to_tonic<T: TryInto<inner::GenericMessage, Error = TypeConversionErr
     }
 }
 
+fn tonic_status_to_raft(status: tonic::Status) -> RaftError {
+    match status.code() {
+        tonic::Code::Unavailable => RaftError::NetworkError(anyhow::anyhow!("{}", status.message())),
+        tonic::Code::Aborted=> RaftError::NoLongerLeader(),
+        tonic::Code::Internal if status.message().starts_with("communicator") => RaftError::CommunicatorError(anyhow::anyhow!("{}", status.message())),
+        tonic::Code::Internal => RaftError::InternalError(anyhow::anyhow!("{}", status.message())),
+        tonic::Code::DeadlineExceeded => RaftError::TimeoutError(anyhow::anyhow!("{}", status.message())),
+        _ => RaftError::InternalError(anyhow::anyhow!("unknown error {}", status.message()))
+    }
+}
+
 pub fn tonic_to_raft<T: TryFrom<inner::GenericMessage, Error = TypeConversionError>>(tonic_result: Result<tonic::Response<inner::GenericMessage>, tonic::Status>) -> Result<T, RaftError> {
     match tonic_result {
         Ok(res) => {
@@ -74,17 +88,41 @@ pub fn tonic_to_raft<T: TryFrom<inner::GenericMessage, Error = TypeConversionErr
             Ok(res)
         }
         Err(status) => {
-            Err(match status.code() {
-                tonic::Code::Unavailable => RaftError::NetworkError(anyhow::anyhow!("{}", status.message())),
-                tonic::Code::Aborted=> RaftError::NoLongerLeader(),
-                tonic::Code::Internal if status.message().starts_with("communicator") => RaftError::CommunicatorError(anyhow::anyhow!("{}", status.message())),
-                tonic::Code::Internal => RaftError::InternalError(anyhow::anyhow!("{}", status.message())),
-                tonic::Code::DeadlineExceeded => RaftError::TimeoutError(anyhow::anyhow!("{}", status.message())),
-                _ => RaftError::InternalError(anyhow::anyhow!("{}", status.message()))
-            })
+            Err(tonic_status_to_raft(status))
         }
     }
 }
+
+
+pub fn tonic_stream_to_raft<EventType: Value>(tonic_result: Result<tonic::Response<tonic::Streaming<inner::GenericMessage>>, tonic::Status>) 
+    -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
+    match tonic_result {
+        Ok(res) => {
+            Ok(Box::pin(res.into_inner().filter_map(|res| {
+                match res {
+                    Ok(generic_message) => {
+                        let deser = serde_json::from_slice::<EventType>(&generic_message.buf);
+                        match deser {
+                            Ok(event) => { Some(event) }
+                            Err(err) => {
+                                error!("Couldn't deserialize during tonic_stream_to_raft: {:?}", err);
+                                None
+                            }
+                        }
+                    }
+                    Err(err) => { 
+                        error!("There was an error while receiving stream-element during tonic_stream_to_raft: {:?}", err);
+                        None
+                    }
+                }
+                })))
+            },
+            Err(status) => {
+                Err(tonic_status_to_raft(status))
+            }
+    }
+}
+
 
 gen_generic!(RequestVote,);
 gen_generic!(RequestVoteResponse,);
