@@ -4,11 +4,13 @@ use crate::consensus::node_communicator::NodeCommunicator;
 use curve25519_dalek::digest::generic_array::GenericArray;
 use derivative;
 use async_trait::async_trait;
-use futures::Future;
+use futures::{Future, Stream};
 use parking_lot::RwLock;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tonic::{IntoRequest, Response};
 use tracing_futures::Instrument;
-use std::{convert::{TryInto, TryFrom}, sync::Arc};
+use std::{convert::{TryInto, TryFrom}, pin::Pin, sync::Arc};
 
 use std::collections::HashMap;
 use serde::Serialize;
@@ -17,7 +19,9 @@ use serde::{Deserialize, de::DeserializeOwned};
 use anyhow::Context;
 use super::pb::{GenericMessage, TypeConversionError, raft_client::RaftClient, raft_server::{Raft, RaftServer}, raft_to_tonic, tonic_to_raft};
 
-const STARTUP_TIME: tokio::time::Duration = tokio::time::Duration::from_secs(1u64);
+const STARTUP_TIME: tokio::time::Duration = tokio::time::Duration::from_secs(0u64);
+const RECONNECT_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(2u64);
+const MAX_RECONNECTS: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct GRPCConfig {
@@ -60,11 +64,28 @@ pub struct GRPCTransportInner<V: Value> {
 }
 
 impl <V: Value> GRPCTransportInner<V> {
+    /// Attempts to connect to all raft nodes, returns with an error if any connection fails
+    #[instrument]
     pub async fn connect_to_nodes(&mut self) -> Result<(), anyhow::Error> {
         let my_id = self.my_id;
         for (id, url) in self.config.nodes.clone().into_iter().filter(|(id, _)| Some(*id) != my_id) {
+            let mut attempts = 0;
+            let client = loop {
+                attempts += 1;
             let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
-            let client = RaftClient::connect(endpoint).await?;
+                let res = RaftClient::connect(endpoint).await;
+                match res {
+                    Ok(client) => break client,
+                    Err(e) => {
+                        error!("Attempt {}/{} - Couldn't connect to node: {:?}", attempts, MAX_RECONNECTS, e);
+                        if attempts > MAX_RECONNECTS {
+                            return Err(e.into())
+                        }
+                        tokio::time::sleep(RECONNECT_DELAY).await;
+                    }
+
+                }
+            };
             self.clients.insert(id, client);
         }
         self.clients_init = true;
@@ -123,9 +144,9 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
         tonic_to_raft(res)
     }
 
+    #[instrument]
     async fn on_node_communicator_created(&mut self, id: Id, comm: &mut NodeCommunicator<V>) {
 
-        // spawn a server for handling our own
         let mut inner = self.inner.write();
         inner.my_id = Some(id);
         inner.my_node = Some(comm.clone());
@@ -140,7 +161,7 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
                 .serve(addr)
                 .await.unwrap();
 
-        }).instrument(info_span!("grpc_server", id=?id));
+        }.instrument(info_span!("grpc_server", id=?id)));
 
         tokio::time::sleep(STARTUP_TIME).await;
 
@@ -155,6 +176,7 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
 
 #[async_trait(?Send)]
 impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
+    #[instrument]
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError> {
         let inner = self.inner.read();
         if (!inner.clients_init) {
@@ -171,6 +193,7 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
         tonic_to_raft(res)
     }
 
+    #[instrument]
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
         let inner = self.inner.read();
         if (!inner.clients_init) {
@@ -186,6 +209,7 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
         tonic_to_raft(res)
     }
 
+    #[instrument]
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
         let inner = self.inner.read();
         if (!inner.clients_init) {
@@ -215,7 +239,6 @@ impl <V: Value> RaftService<V> {
     {
         let request = Req::try_from(request.into_inner()).context(format!("serializing request for {}", desc)).map_err(|e| 
             tonic::Status::internal(e.to_string()))?;
-        // let res: Result<Res, RaftError> = op(request).await.context(format!("performing operation for {}", desc));
         let res: Result<Res, RaftError> = op(request).await;
         raft_to_tonic(res)
     }
@@ -223,6 +246,10 @@ impl <V: Value> RaftService<V> {
 
 #[async_trait]
 impl <V: Value> Raft for RaftService<V> {
+
+        type StateMachineUpdatesStream = Pin<Box<dyn Stream<Item = Result<GenericMessage, tonic::Status>> + Send + Sync + 'static>>;
+
+        #[instrument]
         async fn vote_request_rpc(
             &self,
             request: tonic::Request<GenericMessage>,
@@ -230,29 +257,48 @@ impl <V: Value> Raft for RaftService<V> {
         {
             self.do_op("vote_request_rpc", request, |rv| self.communicator.request_vote(rv)).await
         }
+
+        #[instrument]
         async fn append_entries_rpc(
             &self,
             request: tonic::Request<GenericMessage>,
         ) -> Result<tonic::Response<GenericMessage>, tonic::Status> {
             self.do_op("append_entries_rpc", request, |ae| self.communicator.append_entries(ae)).await
         }
+        
+
+        #[instrument]
         async fn client_write_request(
             &self,
             request: tonic::Request<GenericMessage>,
         ) -> Result<tonic::Response<GenericMessage>, tonic::Status> {
             self.do_op("client_write_request", request, |cwr| self.communicator.submit_value(cwr)).await
         }
+
+        #[instrument]
         async fn client_read_request(
             &self,
             request: tonic::Request<GenericMessage>,
         ) -> Result<tonic::Response<GenericMessage>, tonic::Status> {
             self.do_op("client_read_request", request, |crr| self.communicator.request_values(crr)).await
         }
+
+        #[instrument]
         async fn client_force_apply_request(
             &self,
             request: tonic::Request<GenericMessage>,
         ) -> Result<tonic::Response<GenericMessage>, tonic::Status> {
             self.do_op("client_force_apply_request", request, |cfar| self.communicator.force_apply(cfar)).await
+        }
+
+
+        async fn state_machine_updates(
+            &self,
+            _request: tonic::Request<GenericMessage>,
+        ) -> Result<tonic::Response<Self::StateMachineUpdatesStream>, tonic::Status> {
+            let sm_events = tokio_stream::wrappers::UnboundedReceiverStream::new(self.communicator.state_machine_output_channel());
+            let sm_events = Box::pin(sm_events.map(|buf| Ok(GenericMessage { buf })));
+            Ok(tonic::Response::new(sm_events))
         }
 }
 

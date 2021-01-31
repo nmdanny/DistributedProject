@@ -12,4 +12,6 @@ service Raft {
     rpc ClientWriteRequest(GenericMessage) returns (GenericMessage);
     rpc ClientReadRequest(GenericMessage) returns (GenericMessage);
     rpc ClientForceApplyRequest(GenericMessage) returns (GenericMessage);
+
+    rpc StateMachineUpdates(GenericMessage) returns (stream GenericMessage);
 }
