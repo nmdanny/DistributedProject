@@ -1,4 +1,4 @@
-use crate::consensus::logging::setup_logging;
+use crate::{consensus::logging::setup_logging, grpc::transport::{GRPCConfig, GRPCTransport}};
 use crate::consensus::types::*;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
@@ -47,26 +47,114 @@ pub fn combined_subscriber<V: Value>(receivers: impl Iterator<Item = Pin<Box<dyn
     Box::pin(combined_stream)
 }
 
-pub struct Scenario<V: Value + Hash> {
+pub struct Scenario<V: Value + Hash, ST: Transport<AnonymityMessage<V>>, CT: ClientTransport<AnonymityMessage<V>>> {
+
     pub communicators: Vec<NodeCommunicator<AnonymityMessage<V>>>,
-    pub server_transport: AdversaryTransport<AnonymityMessage<V>, ThreadTransport<AnonymityMessage<V>>>,
+    pub server_transport: AdversaryTransport<AnonymityMessage<V>, ST>,
     pub clients: Vec<AnonymousClient<V>>,
 
-    pub client_transports: Vec<AdversaryClientTransport<AnonymityMessage<V>, SingleProcessClientTransport<AnonymityMessage<V>>>>,
+    pub client_transports: Vec<AdversaryClientTransport<AnonymityMessage<V>, CT>>,
     phantom: std::marker::PhantomData<V>
 
 }
 
-pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Config) -> Scenario<V> {
+pub type SingleProcessScenario<V> = Scenario<V, ThreadTransport<AnonymityMessage<V>>, 
+    SingleProcessClientTransport<AnonymityMessage<V>>>;
 
+pub type GRPCScenario<V> = Scenario<V, GRPCTransport<AnonymityMessage<V>>, GRPCTransport<AnonymityMessage<V>>>;
+
+
+pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenario<V> {
+
+        let num_nodes = config.num_nodes;
+
+        let config = Rc::new(config);
+
+        let grpc_config = GRPCConfig::default_for_nodes(num_nodes);
+        let (mut nodes, communicators) = futures::future::join_all(
+            (0 .. num_nodes).map(|id| {
+                let grpc_config = grpc_config.clone();
+                async move {
+                    let server_transport = GRPCTransport::new(Some(id), grpc_config).await.unwrap();
+                    let server_transport = AdversaryTransport::new(server_transport, num_nodes);
+                    let mut node = Node::new(id, num_nodes, server_transport.clone());
+                    let comm = NodeCommunicator::from_node(&mut node).await;
+                    (node, comm)
+                }
+            })
+            ).await.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
+
+        let server_transport = nodes[0].transport.clone();
+
+        info!("setup - created nodes");
+            
+
+        for node in &mut nodes {
+            // used for communicating with other nodes
+            let client_transport = node.transport.get_inner().clone();
+            let sm = AnonymousLogSM::<V, _>::new(config.clone(), node.id, client_transport);
+            node.attach_state_machine(sm);
+        }
+
+        for node in nodes {
+            let id = node.id;
+            tokio::task::spawn_local(async move {
+                node.run_loop()
+                    .instrument(tracing::info_span!("node-loop", node.id = id))
+                    .await
+                    .unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
+            });
+        }
+
+        info!("setup - spawned nodes");
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        
+        let mut clients = Vec::new();
+        let mut client_ts = Vec::new();
+        for i in 0 .. config.num_clients {
+            let server_transport = GRPCTransport::new(None, grpc_config.clone()).await.unwrap();
+            info!("created server transport for client {}", i);
+            let client_transport = AdversaryClientTransport::new(server_transport);
+            client_ts.push(client_transport.clone());
+
+            let sm_events = futures::future::join_all((0 .. num_nodes).map(|node_id| {
+                let stream = client_transport.get_sm_event_stream::<NewRound<V>>(node_id);
+                async move {
+                    stream.await.unwrap()
+                }
+                
+            })).await;
+            info!("obtained server event streams");
+
+            let recv = combined_subscriber(sm_events.into_iter());
+            let client = AnonymousClient::new(client_transport, config.clone(), format!("AnonymClient {}", i), recv);
+            clients.push(client);
+        }
+
+        info!("setup - created clients");
+
+        info!("Starting GRPC scenario");
+
+        Scenario {
+            communicators,
+            server_transport,
+            clients,
+            client_transports: client_ts,
+            phantom: Default::default()
+        }
+}
+
+pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> SingleProcessScenario<V> {
         let num_nodes = config.num_nodes;
         let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
 
         let config = Rc::new(config);
 
         let (mut nodes, communicators) = futures::future::join_all(
-            (0 .. config.num_nodes).map(|id| {
-                let mut node = Node::new(id, config.num_nodes, server_transport.clone());
+            (0 .. num_nodes).map(|id| {
+                let mut node = Node::new(id, num_nodes, server_transport.clone());
                 async {
                     let comm = NodeCommunicator::from_node(&mut node).await;
                     (node, comm)
@@ -91,7 +179,7 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
                 SingleProcessClientTransport::new(communicators.clone()));
             client_ts.push(client_transport.clone());
 
-            let sm_events = futures::future::join_all((0 .. config.num_nodes).map(|node_id| {
+            let sm_events = futures::future::join_all((0 .. num_nodes).map(|node_id| {
                 let stream = client_transport.get_sm_event_stream::<NewRound<V>>(node_id);
                 async move {
                     stream.await.unwrap()
@@ -124,6 +212,10 @@ pub async fn setup_single_process_anonymity_nodes<V: Value + Hash>(config: Confi
         }
 }
 
+pub async fn setup_scenario<V: Value + Hash>(config: Config) -> GRPCScenario<V> {
+    setup_grpc_scenario(config).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -141,7 +233,7 @@ mod tests {
 
             setup_logging().unwrap();
 
-            let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
+            let mut scenario = setup_grpc_scenario::<u64>(Config {
                 num_nodes: 2,
                 num_clients: 2,
                 threshold: 2,
@@ -175,7 +267,7 @@ mod tests {
 
             setup_logging().unwrap();
 
-            let mut scenario = setup_single_process_anonymity_nodes::<String>(Config {
+            let mut scenario = setup_test_scenario::<String>(Config {
                 num_nodes: 5,
                 threshold: 3,
                 num_clients: 8,
@@ -219,7 +311,7 @@ mod tests {
 
             setup_logging().unwrap();
 
-            let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
+            let mut scenario = setup_test_scenario::<u64>(Config {
                 num_nodes: 3,
                 num_clients: 2,
                 threshold: 2,
@@ -277,7 +369,7 @@ mod tests {
 
             setup_logging().unwrap();
 
-            let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
+            let mut scenario = setup_test_scenario::<u64>(Config {
                 num_nodes: 3,
                 num_clients: 2,
                 threshold: 2,
@@ -339,7 +431,7 @@ mod tests {
 
             setup_logging().unwrap();
 
-            let mut scenario = setup_single_process_anonymity_nodes::<u64>(Config {
+            let mut scenario = setup_test_scenario::<u64>(Config {
                 num_nodes: 3,
                 num_clients: 2,
                 threshold: 2,

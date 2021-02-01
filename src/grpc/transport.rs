@@ -65,6 +65,8 @@ pub struct GRPCTransportInner<V: Value> {
 
 impl <V: Value> GRPCTransportInner<V> {
     /// Attempts to connect to all raft nodes, returns with an error if any connection fails
+    /// 
+    /// Note that 
     #[instrument]
     pub async fn connect_to_nodes(&mut self) -> Result<(), anyhow::Error> {
         let my_id = self.my_id;
@@ -72,7 +74,8 @@ impl <V: Value> GRPCTransportInner<V> {
             let mut attempts = 0;
             let client = loop {
                 attempts += 1;
-            let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
+                let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
+                info!("Connecting to {}", url);
                 let res = RaftClient::connect(endpoint).await;
                 match res {
                     Ok(client) => break client,
@@ -101,13 +104,16 @@ pub struct GRPCTransport<V: Value> {
 
 impl <V: Value> GRPCTransport<V> {
     pub async fn new(my_id: Option<Id>, config: GRPCConfig) -> Result<Self, anyhow::Error> {
-        let inner = GRPCTransportInner {
+        let mut inner = GRPCTransportInner {
             clients: Default::default(),
             my_id,
             my_node: None,
             config,
             clients_init: false
         };
+        if my_id.is_none() {
+            inner.connect_to_nodes().await?;
+        }
         Ok(Self {
             inner: Arc::new(RwLock::new(inner))
         })
@@ -166,6 +172,8 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
         tokio::time::sleep(STARTUP_TIME).await;
 
         inner.connect_to_nodes().await.unwrap();
+
+        info!("Setup grpc transport for node {}", id);
     }
 
     async fn before_node_loop(&mut self, _id: Id) {
@@ -179,15 +187,14 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
     #[instrument]
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError> {
         let inner = self.inner.read();
-        if (!inner.clients_init) {
-            drop(inner);
-            let mut inner = self.inner.write();
-            inner.connect_to_nodes().await.map_err(RaftError::InternalError)?;
+        let value = ClientWriteRequest { value };
+        trace!("submit_value, node_id: {}", node_id);
+
+        if Some(node_id) == inner.my_id {
+            return inner.my_node.as_ref().unwrap().submit_value(value).await;
         }
-        let inner = self.inner.read();
 
         let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
-        let value = ClientWriteRequest { value };
         let msg: GenericMessage = value.try_into().context("While serializing ClientWriteRequest").map_err(RaftError::InternalError)?;
         let res = client.client_write_request(msg).await;
         tonic_to_raft(res)
@@ -196,14 +203,14 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
     #[instrument]
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
         let inner = self.inner.read();
-        if (!inner.clients_init) {
-            drop(inner);
-            let mut inner = self.inner.write();
-            inner.connect_to_nodes().await.map_err(RaftError::InternalError)?;
-        }
-        let inner = self.inner.read();
-        let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
         let value = ClientReadRequest { from, to };
+        trace!("request_values, node_id: {}", node_id);
+
+        if Some(node_id) == inner.my_id {
+            return inner.my_node.as_ref().unwrap().request_values(value).await;
+        }
+
+        let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
         let msg: GenericMessage = value.try_into().context("While serializing ClientReadRequest").map_err(RaftError::InternalError)?;
         let res = client.client_read_request(msg).await;
         tonic_to_raft(res)
@@ -212,15 +219,14 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
     #[instrument]
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
         let inner = self.inner.read();
-        if (!inner.clients_init) {
-            drop(inner);
-            let mut inner = self.inner.write();
-            inner.connect_to_nodes().await.map_err(RaftError::InternalError)?;
+        let value = ClientForceApplyRequest { value };
+        trace!("force_apply, node_id: {}", node_id);
+
+        if Some(node_id) == inner.my_id {
+            return inner.my_node.as_ref().unwrap().force_apply(value).await;
         }
-        let inner = self.inner.read();
 
         let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
-        let value = ClientForceApplyRequest { value };
         let msg: GenericMessage = value.try_into().context("While serializing ClientForceApplyRequest").map_err(RaftError::InternalError)?;
         let res = client.client_force_apply_request(msg).await;
         tonic_to_raft(res)
@@ -229,12 +235,7 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
     #[instrument]
     async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
         let inner = self.inner.read();
-        if (!inner.clients_init) {
-            drop(inner);
-            let mut inner = self.inner.write();
-            inner.connect_to_nodes().await.map_err(RaftError::InternalError)?;
-        }
-        let inner = self.inner.read();
+        trace!("get_sm_event_stream, node_id: {}", node_id);
 
         let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
         let stream = client.state_machine_updates(tonic::Request::new(GenericMessage {
@@ -313,7 +314,9 @@ impl <V: Value> Raft for RaftService<V> {
             &self,
             _request: tonic::Request<GenericMessage>,
         ) -> Result<tonic::Response<Self::StateMachineUpdatesStream>, tonic::Status> {
-            let sm_events = tokio_stream::wrappers::UnboundedReceiverStream::new(self.communicator.state_machine_output_channel());
+            // TODO what is the type here
+            let sm_events = self.communicator.state_machine_output_channel_raw();
+            let sm_events = tokio_stream::wrappers::UnboundedReceiverStream::new(sm_events);
             let sm_events = Box::pin(sm_events.map(|buf| Ok(GenericMessage { buf })));
             Ok(tonic::Response::new(sm_events))
         }

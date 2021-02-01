@@ -87,17 +87,36 @@ impl <V: Value> NodeCommunicator<V> {
         Ok(self.commit_sender.subscribe())
     }
 
+    #[instrument]
     pub fn state_machine_output_channel<E: Value>(&self) -> mpsc::UnboundedReceiver<E> {
         let mut rec = self.sm_event_sender.subscribe();
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Ok(sm_bytes) = rec.recv().await {
-                let event = serde_json::from_slice(&sm_bytes).unwrap();
-                tx.send(event).unwrap();
+                let event = serde_json::from_slice::<E>(&sm_bytes);
+                match event {
+                    Ok(event) => { tx.send(event).unwrap() }
+                    Err(err) => {
+                        panic!("Couldn't deserialize JSON: {:?}\n", err);
+                    }
+                }
             }
         }.instrument(info_span!("state_machine_output_channel", id=?self.id)));
         rx
     }
+
+    #[instrument]
+    pub fn state_machine_output_channel_raw(&self) -> mpsc::UnboundedReceiver<Vec<u8>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut rec = self.sm_event_sender.subscribe();
+        tokio::spawn(async move {
+            while let Ok(sm_bytes) = rec.recv().await {
+                tx.send(sm_bytes).unwrap();
+            }
+        });
+        rx
+    }
+
 
     #[instrument]
     pub async fn append_entries(&self, ae: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {

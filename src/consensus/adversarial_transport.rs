@@ -64,6 +64,10 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
         }
     }
 
+    pub fn get_inner(&self) -> &T {
+        &self.transport
+    }
+
     #[instrument]
     pub async fn set_omission_chance(&self, id: Id, chance: f64) -> bool
     {
