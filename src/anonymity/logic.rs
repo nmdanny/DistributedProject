@@ -5,7 +5,7 @@ use crate::consensus::client::{Client, ClientTransport};
 use crate::anonymity::secret_sharing::*;
 use serde::{Serialize, Deserialize};
 use time::Instant;
-use std::boxed::Box;
+use std::{boxed::Box, convert::TryInto};
 use std::hash::Hash;
 use std::rc::Rc;
 use std::time;
@@ -18,14 +18,31 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Interval, Duration};
 use std::collections::HashMap;
 use chrono::Local;
+use clap::Clap;
 
-#[derive(Debug, Clone)]
+fn parse_phase_length(src: &str) -> Result<std::time::Duration, anyhow::Error> {
+    let millis = src.parse::<u64>()?;
+    Ok(std::time::Duration::from_millis(millis))
+}
+
+
+#[derive(Debug, Clone, Clap)]
 /// Configuration used for anonymous message sharing
 pub struct Config {
+    #[clap(short = 's', long = "num_servers", about = "Number of servers", default_value = "5")]
     pub num_nodes: usize,
+
+    #[clap(short = 'c', long = "num_clients", about = "Number of clients", default_value = "100")]
     pub num_clients: usize,
+
+    #[clap(short = 't', long = "threshold", about = "Minimal number of shares needed to recover a secret", default_value = "51")]
     pub threshold: usize,
+
+    #[clap(short = 'h', long = "num_channels", about = "Number of channels. Should be a multiple of the number of clients ", default_value = "300")]
     pub num_channels: usize,
+
+    #[clap(short='l', long = "phase_length", about = "Length of a phase(share/recover) in miliseconds", 
+           parse(try_from_str = parse_phase_length), default_value = "500")]
     pub phase_length: std::time::Duration
 }
 

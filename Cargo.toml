@@ -24,6 +24,7 @@ tokio-stream = "0.1"
 futures-retry = "0.5.0"
 futures = "0.3"
 crossbeam = "0.8"
+parking_lot = "0.11"
 async-trait = "0.1.42"
 tokio-test = "0.4.0"
 
@@ -36,7 +37,6 @@ clap = "3.0.0-beta.2"
 anyhow = "1.0"
 thiserror = "1.0.22"
 derivative = "2.1.1"
-gridiron = "0.8.0"
 curve25519-dalek = "3"
 lazy_static = "1.4.0"
 chrono = "0.4"
@@ -44,15 +44,14 @@ chrono = "0.4"
 # grpc
 tonic = { version = "0.4", features = ["default", "tls"] }
 prost = "0.7"
-parking_lot = "0.11.0"
 
 [lib]
 name = "dist_lib"
 path = "src/lib.rs"
 
-#[[bin]]
-#name = "runner"
-#path = "src/runner.rs"
+[[bin]]
+name = "runner"
+path = "src/anonymity/runner.rs"
 
 [[bin]]
 name = "raft"

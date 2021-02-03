@@ -9,8 +9,35 @@ use futures::{Stream, StreamExt};
 use tokio::sync::{watch, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use rand::distributions::{Distribution, Uniform};
+use tokio_stream::StreamMap;
 use tracing_futures::Instrument;
 use derivative;
+
+
+/// Combines NewRound streams(ideally from many servers) onto a single stream, allowing to handle events
+/// from many servers in case some are faulty
+pub fn combined_subscriber<V: Value>(receivers: impl Iterator<Item = Pin<Box<dyn Stream<Item = NewRound<V>>>>>) 
+    -> Pin<Box<dyn Stream<Item = NewRound<V>>>> {
+
+    let mut stream_map = StreamMap::new();
+
+    for (i, stream) in (0 ..).zip(receivers) {
+        let _res = stream_map.insert(i, stream);
+        assert!(_res.is_none());
+    }
+
+    let mut next_round_to_send = 0;
+    let combined_stream = stream_map.filter_map(move |(_, round)| {
+        let res = if round.round >= next_round_to_send {
+            next_round_to_send = round.round + 1;
+            Some(round)
+        } else { None };
+        futures::future::ready(res)
+    });
+
+    Box::pin(combined_stream)
+}
+
 
 #[derive(Derivative)]
 #[derivative(Debug)]
