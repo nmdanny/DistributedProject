@@ -118,6 +118,7 @@ pub enum Phase {
         shares: Vec<Vec<(Share, ClientId)>>
     },
     Reconstructing {
+        #[derivative(Debug="ignore")]
         shares: Vec<Vec<Share>>,
 
         last_share_at: time::Instant
@@ -130,11 +131,13 @@ pub enum ReconstructError {
     Collision, NoValue, Timeout
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Derivative, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derivative(Debug)]
 pub enum AnonymityMessage<V: Value> {
     /// Note that the following message is not synchronized
     ClientShare { 
         // A client must always send 'num_channels` shares to a particular server
+        #[derivative(Debug="ignore")]
         channel_shares: Vec<ShareBytes>,
         client_name: ClientId,
         round: usize
@@ -157,6 +160,7 @@ pub enum AnonymityMessage<V: Value> {
         round: usize
     },
     ServerReconstructShare { 
+        #[derivative(Debug="ignore")]
         channel_shares: Vec<ShareBytes>, 
         node_id: Id,
         round: usize
@@ -417,7 +421,8 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
         if let Phase::Reconstructing { shares, last_share_at } = &mut self.state {
 
-            info!("Node {} at round {} got the following batch from node {}: {:?}", self.id, round, _from_node, batch);
+            info!("Node {} at round {} got a batch batch from node {}", self.id, round, _from_node);
+            debug!("Batch: {:?}", batch);
 
             // add all shares for every channel. 
             for channel_num in 0 .. self.config.num_channels {
@@ -484,7 +489,8 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
         let channels = vec![Vec::new(); self.config.num_channels];
         self.state = Phase::Reconstructing { shares: channels, last_share_at: Instant::now() };
-        info!("Beginning re-construct phase for round {}, initiated by {}, sending my shares {:?} to all other nodes", self.round, initiator, shares);
+        info!("Beginning re-construct phase for round {}, initiated by {}, sending my shares to all other nodes", self.round, initiator);
+        debug!("My shares being sent: {:?}", shares);
 
         if shares.is_none() {
             warn!("I am missing shares from some clients, skipping reconstruct round {}", self.round);

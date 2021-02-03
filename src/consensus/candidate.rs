@@ -124,7 +124,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                         });
                     },
                     Err(RaftError::NetworkError(e)) => {
-                        trace!(net_err=true, "Network error when sending vote request: {}", e);
+                        trace!(net_err=true, "Network error when sending vote request to {}: {}", node_id, e);
                     },
                     Err(e) => {
                         error!("Misc Raft error when sending vote request: {}", e);

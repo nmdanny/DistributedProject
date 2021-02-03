@@ -77,18 +77,22 @@ fn tonic_status_to_raft(status: tonic::Status) -> RaftError {
         tonic::Code::Internal if status.message().starts_with("communicator") => RaftError::CommunicatorError(anyhow::anyhow!("{}", status.message())),
         tonic::Code::Internal => RaftError::InternalError(anyhow::anyhow!("{}", status.message())),
         tonic::Code::DeadlineExceeded => RaftError::TimeoutError(anyhow::anyhow!("{}", status.message())),
-        _ => RaftError::InternalError(anyhow::anyhow!("unknown error {}", status.message()))
+        c => RaftError::InternalError(anyhow::anyhow!("unknown error, code: {}, message: {}", c, status.message()))
     }
 }
 
-pub fn tonic_to_raft<T: TryFrom<inner::GenericMessage, Error = TypeConversionError>>(tonic_result: Result<tonic::Response<inner::GenericMessage>, tonic::Status>) -> Result<T, RaftError> {
+pub fn tonic_to_raft<T: TryFrom<inner::GenericMessage, Error = TypeConversionError>>(tonic_result: Result<tonic::Response<inner::GenericMessage>, tonic::Status>, to: Id) -> Result<T, RaftError> {
     match tonic_result {
         Ok(res) => {
             let res = res.into_inner().try_into().context("deserialization error").map_err(|se| RaftError::InternalError(se))?;
             Ok(res)
         }
         Err(status) => {
-            Err(tonic_status_to_raft(status))
+            let mut raft_err = tonic_status_to_raft(status);
+            if let RaftError::NetworkError(e) = raft_err {
+                raft_err = RaftError::NetworkError(e.context(format!("from request to {}", to)));
+            }
+            Err(raft_err)
         }
     }
 }

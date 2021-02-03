@@ -21,7 +21,7 @@ use super::pb::{GenericMessage, TypeConversionError, raft_client::RaftClient, ra
 
 const STARTUP_TIME: tokio::time::Duration = tokio::time::Duration::from_secs(0u64);
 const RECONNECT_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(2u64);
-const MAX_RECONNECTS: usize = 10;
+const MAX_RECONNECTS: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct GRPCConfig {
@@ -50,6 +50,7 @@ type Client = RaftClient<tonic::transport::channel::Channel>;
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
 pub struct GRPCTransportInner<V: Value> {
+    #[derivative(Debug="ignore")]
     clients: HashMap<usize, Client>,
 
     #[derivative(Debug="ignore")]
@@ -58,6 +59,7 @@ pub struct GRPCTransportInner<V: Value> {
     #[derivative(Debug="ignore")]
     my_id: Option<Id>,
 
+    #[derivative(Debug="ignore")]
     config: GRPCConfig,
 
     clients_init: bool
@@ -81,7 +83,7 @@ impl <V: Value> GRPCTransportInner<V> {
                     Ok(client) => break client,
                     Err(e) => {
                         error!("Attempt {}/{} - Couldn't connect to node: {:?}", attempts, MAX_RECONNECTS, e);
-                        if attempts > MAX_RECONNECTS {
+                        if attempts >= MAX_RECONNECTS {
                             return Err(e.into())
                         }
                         tokio::time::sleep(RECONNECT_DELAY).await;
@@ -134,7 +136,7 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
         let mut client = inner.clients.get(&to).expect("invalid 'to' id").clone();
         let msg: GenericMessage = msg.try_into().context("While serializing AppendEntries").map_err(RaftError::InternalError)?;
         let res = client.append_entries_rpc(msg).await;
-        tonic_to_raft(res)
+        tonic_to_raft(res, to)
     }
 
     async fn send_request_vote(&self, to: Id, msg: RequestVote) -> Result<RequestVoteResponse, RaftError> {
@@ -147,7 +149,7 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
         let mut client = inner.clients.get(&to).expect("invalid 'to' id").clone();
         let msg: GenericMessage = msg.try_into().context("While serializing RequestVote").map_err(RaftError::InternalError)?;
         let res = client.vote_request_rpc(msg).await;
-        tonic_to_raft(res)
+        tonic_to_raft(res, to)
     }
 
     #[instrument]
@@ -197,7 +199,7 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
         let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
         let msg: GenericMessage = value.try_into().context("While serializing ClientWriteRequest").map_err(RaftError::InternalError)?;
         let res = client.client_write_request(msg).await;
-        tonic_to_raft(res)
+        tonic_to_raft(res, node_id)
     }
 
     #[instrument]
@@ -213,7 +215,7 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
         let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
         let msg: GenericMessage = value.try_into().context("While serializing ClientReadRequest").map_err(RaftError::InternalError)?;
         let res = client.client_read_request(msg).await;
-        tonic_to_raft(res)
+        tonic_to_raft(res, node_id)
     }
 
     #[instrument]
@@ -229,7 +231,7 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
         let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").clone();
         let msg: GenericMessage = value.try_into().context("While serializing ClientForceApplyRequest").map_err(RaftError::InternalError)?;
         let res = client.client_force_apply_request(msg).await;
-        tonic_to_raft(res)
+        tonic_to_raft(res, node_id)
     }
 
     #[instrument]
