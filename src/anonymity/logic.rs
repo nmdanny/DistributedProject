@@ -229,7 +229,8 @@ impl Metrics {
                 tokio::select! {
                     Some(tup) = share_rx.recv() => {
                         let (round, chan, share) = tup;
-                        let s = format!("{},{},{},{},\"{:?}\"\n", node_id, round, chan, share.x, share.p_x.as_bytes());
+                        let bytes = share.p_x.clone();
+                        let s = format!("{},{},{},{},\"{:?}\"\n", node_id, round, chan, share.x, bytes);
                         share_file.write_all(s.as_bytes()).await?;
                     },
                     Some(tup) = decode_rx.recv() => {
@@ -656,20 +657,20 @@ mod tests {
             for round in 0 .. MAX_ITERS {
                 let val_channel = Uniform::new(0, config.num_channels).sample(&mut rand::thread_rng());
                 let secret_val = encode_secret(0u64).unwrap();
+                let zero_val = encode_zero_secret();
 
                 // create 'd' collections of shares, one for each server
                 for chan in 0.. config.num_channels {
-                    let secret = if chan == val_channel { secret_val } else { encode_zero_secret() };
+                    let secret = if chan == val_channel { &secret_val } else { &zero_val };
                     let threshold = config.threshold as u64;
                     let num_nodes = config.num_nodes as u64;
-                    let shares = create_share(secret, threshold, num_nodes);
+                    let shares = create_share(secret.clone(), threshold, num_nodes);
                     for (node_id, share) in (0..).zip(shares) {
                         metricses[node_id].report_share(round, chan, share);
                     }
                 }
 
-
-                let p_x = FP::random(&mut rand::thread_rng());
+                let p_x = (0 .. NUM_POLYS).map(|_| FP::random(&mut rand::thread_rng())).collect();
                 let share = Share {
                     x: 1338,
                     p_x

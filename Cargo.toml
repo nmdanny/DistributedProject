@@ -58,5 +58,10 @@ path = "src/lib.rs"
 name = "raft"
 path = "src/consensus/single_process_runner.rs"
 
+
+[dev-dependencies]
+quickcheck = "1"
+quickcheck_macros = "1"
+
 [build-dependencies]
 tonic-build = "0.4"

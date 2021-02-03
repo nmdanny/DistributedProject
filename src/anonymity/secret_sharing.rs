@@ -15,6 +15,10 @@ use curve25519_dalek::scalar::Scalar;
 // A finite field with 256 bits
 pub type FP = Scalar;
 
+/// Number of polynomials in a single message
+/// Since each polynomial can encode a secret of 31 bytes
+/// A single message can consist of 31*NUM_POLYS bytes
+pub const NUM_POLYS: usize = 16;
 
 /// A secret share
 #[derive(Derivative, Clone, PartialEq, Eq)]
@@ -23,7 +27,7 @@ pub struct Share {
     pub x: u64,
 
     #[derivative(Debug = "ignore")]
-    pub p_x: FP
+    pub p_x: Vec<FP>
 }
 
 #[derive(Derivative, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,23 +36,28 @@ pub struct ShareBytes {
     x: u64,
 
     #[derivative(Debug = "ignore")]
-    p_x: [u8; 32],
+    p_x: Vec<[u8; 32]>
 }
 
 impl Share {
     /// Creates a share for 'x' using the 
     pub fn new(x: impl Into<u64>) -> Share {
         let x: u64 = x.into();
+        let p_x = vec![FP::zero(); NUM_POLYS];
         Share {
-            x: x,
-            p_x: 0u64.into()
+            x, p_x
         }
     }
 
     pub fn to_bytes(&self) -> ShareBytes {
-        let p_x = self.p_x.to_bytes();
+        let x = self.x;
+        assert_eq!(self.p_x.len(), NUM_POLYS);
+        let mut p_x = vec![[0u8; 32]; NUM_POLYS];
+        for i in 0 .. NUM_POLYS {
+            p_x[i] = self.p_x[i].to_bytes();
+        }
         ShareBytes {
-            x: self.x, p_x
+            x, p_x
         }
     }
 }
@@ -56,10 +65,10 @@ impl Share {
 
 impl ShareBytes {
     pub fn to_share(&self) -> Share {
-        let p_x = FP::from_bytes_mod_order(self.p_x.clone());
+        let x = self.x;
+        let p_x = self.p_x.iter().map(|b| FP::from_bytes_mod_order(b.clone())).collect();
         Share {
-            x: self.x,
-            p_x
+            x, p_x
         }
     }
 }
@@ -99,15 +108,16 @@ impl Polynomial {
 
 }
 
-/// Splits the secret into `n` shares, needing `k` shares to re-construct
-pub fn create_share(secret: FP, k: u64, n: u64) -> Vec<Share> {
+/// Splits the secret(encoded as a vector of finite field elements) into `n` shares(of same length), needing `k` shares to re-construct
+pub fn create_share(secret: impl IntoIterator<Item = FP>, k: u64, n: u64) -> Vec<Share> {
     assert!(k <= n, "number of shares can't be bigger than n");
     assert!(k >= 1, "number of shares must be at least 1");
 
     // A polynomial of degree 'k-1' requires at least 'k' points to re-construct
-    let pol = Polynomial::encode_secret(secret, k-1);
+    let pols = secret.into_iter().map(|secret| Polynomial::encode_secret(secret, k-1)).collect::<Vec<_>>();
+    assert_eq!(pols.len(), NUM_POLYS);
     (1 ..= n).into_iter().map(|x| {
-        let p_x = pol.evaluate(x);
+        let p_x = pols.iter().map(|pol| pol.evaluate(x)).collect();
         Share {
             x: x.into(),
             p_x
@@ -115,26 +125,27 @@ pub fn create_share(secret: FP, k: u64, n: u64) -> Vec<Share> {
     }).collect()
 }
 
-/// Reconstructs a secret from a given list of secret shares, assuming secret was split to a (k,n) threshold scheme for some n
-/// requiring at least 'k' shares (polynomial of degree k-1)
-pub fn reconstruct_secret(shares: &[Share], k: u64) -> FP {
+pub fn reconstruct_secret(shares: &[Share], k: u64) -> Vec<FP> {
     assert!(shares.len() >= k as usize, "need at least k different points");
     assert_eq!(shares.iter().map(|s| s.x).collect::<BTreeSet<_>>().len(), shares.len(),
                "all shares must have unique 'x' values");
-
-    // perform langrange interpolation for p(0), where p is a polynomial of degree 'k-1'
-    let mut result = FP::zero();
-
-    for (j, Share { x: xj, p_x: p_xj}) in (0..).into_iter().zip(shares.iter().take(k as usize)) {
-        let mut el_j = FP::one();
-        for m in (0 .. k).into_iter().filter(|&m| m != j) {
-            let xm = FP::from(shares[m as usize].x);
-            let xj = FP::from(*xj);
-            el_j *= xm * (xm - xj).invert();
+    let mut results = Vec::new();
+    for poly_num in 0 .. NUM_POLYS {
+        let mut result = FP::zero();
+        // perform lagrange interpolation for p(0), where `p` is a polynomial of degree `k-1`
+        for j in 0 .. k {
+            let xj = FP::from(shares[j as usize].x);
+            let p_xj = &shares[j as usize].p_x[poly_num];
+            let mut el_j = FP::one();
+            for m in (0 .. k).into_iter().filter(|&m| m != j) {
+                let xm = FP::from(shares[m as usize].x);
+                el_j *= xm * (xm - xj).invert();
+            }
+            result += (*p_xj) * el_j;
         }
-        result += (*p_xj) * el_j;
+        results.push(result);
     }
-    return result;
+    results
 }
 
 #[derive(Serialize, Deserialize)]
@@ -143,7 +154,8 @@ struct ValueAndHash<V> {
     hash: u64
 }
 
-pub fn encode_secret<S: Serialize + Hash>(data: S) -> Result<FP, anyhow::Error> {
+/// Encodes some arbitrary serializable structure as elements of a finite field
+pub fn encode_secret<S: Serialize + Hash>(data: S) -> Result<Vec<FP>, anyhow::Error> {
     let mut value_and_hash = ValueAndHash {
         value: data,
         hash: 0
@@ -151,24 +163,44 @@ pub fn encode_secret<S: Serialize + Hash>(data: S) -> Result<FP, anyhow::Error> 
     let mut hasher = DefaultHasher::new();
     value_and_hash.value.hash(&mut hasher);
     value_and_hash.hash = hasher.finish();
-    let bytes = bincode::serialize(&value_and_hash)?;
-    if bytes.len() > 31 {
-        return Err(anyhow::anyhow!("Need more than 31 bytes to safely store value, does not fit into secret"));
+    let mut bytes = bincode::serialize(&value_and_hash)?;
+    if bytes.len() > 31 * NUM_POLYS {
+        return Err(anyhow::anyhow!("Value cannot be encoded as secret, has length of {} bytes, but the maximal amount of bytes is {}", bytes.len(), 31 * NUM_POLYS));
+    }
+    bytes.resize(31 * NUM_POLYS, 0);
+
+    let mut result = Vec::new();
+    for byte_chunk in bytes.chunks_exact(31) {
+        let mut bytes_arr = [0u8; 32];
+        bytes_arr[ .. byte_chunk.len()].copy_from_slice(byte_chunk);
+
+        let secret = FP::from_canonical_bytes(bytes_arr).context(
+            "Couldn't create secret from value & hash, encoded value is probably too big"
+        )?;
+
+        assert_eq!(secret.as_bytes()[31], 0, "Last FP byte should be unused");
+        result.push(secret)
     }
 
-    let mut bytes_arr = [0u8; 32];
-    bytes_arr[ .. bytes.len()].copy_from_slice(&bytes);
-
-    let secret = FP::from_canonical_bytes(bytes_arr).context(
-        "Couldn't create secret from value & hash, encoded value is probably too big"
-    )?;
-
-    return Ok(secret)
+    assert_eq!(result.len(), NUM_POLYS);
+    return Ok(result)
 
 }
 
-pub fn encode_zero_secret() -> FP {
-    0u64.into()
+pub fn encode_zero_secret() -> Vec<FP> {
+    vec![FP::zero(); NUM_POLYS]
+}
+
+
+pub fn secret_to_bytes(secret: &[FP]) -> [u8; 31 * NUM_POLYS] {
+    assert_eq!(secret.len(), NUM_POLYS);
+    let mut result = [0u8; 31 * NUM_POLYS];
+    for i in 0 .. NUM_POLYS {
+        let chunk = secret[i].as_bytes();
+        assert_eq!(chunk[31], 0, "Last FP byte should be unused");
+        result[i * 31 .. i * 31 + 31].copy_from_slice(&chunk[ .. 31]);
+    }
+    result
 }
 
 /// Given a secret(or what we suspect is a secret), tries to deserialize its contents
@@ -176,13 +208,12 @@ pub fn encode_zero_secret() -> FP {
 ///
 /// Note, if the secret is the result of a collision, then it's likely that de-serialization will fail(depends
 /// on the format) - if not, then it's extremely likely that hash check will fail. If not, you should buy a lottery ticket
-pub fn decode_secret<S: DeserializeOwned + Hash>(secret: FP) -> Result<Option<S>, anyhow::Error> {
+pub fn decode_secret<S: DeserializeOwned + Hash>(secret: Vec<FP>) -> Result<Option<S>, anyhow::Error> {
+    let bytes = secret_to_bytes(&secret);
 
-    if secret == 0u64.into() {
+    if bytes.iter().all(|b| *b == 0) {
         return Ok(None)
     }
-
-    let bytes = secret.to_bytes();
 
     let value_and_hash = bincode::deserialize::<ValueAndHash<S>>(&bytes)?;
     let mut hasher = DefaultHasher::new();
@@ -194,16 +225,24 @@ pub fn decode_secret<S: DeserializeOwned + Hash>(secret: FP) -> Result<Option<S>
     Ok(Some(value_and_hash.value))
 }
 
+/// Adds two shares for the same X coordinate
 pub fn add_shares(share1: &Share, share2: &Share) -> Share {
     assert_eq!(share1.x, share2.x, "Cannot add shares with different X coordinates");
+    assert_eq!(share1.p_x.len(), share2.p_x.len());
+    assert_eq!(share1.p_x.len(), NUM_POLYS);
     return Share {
         x: share1.x,
-        p_x: share1.p_x + share2.p_x
+        p_x: share1.p_x.iter().zip(share2.p_x.iter()).map(|(&fp1, &fp2)| fp1 + fp2).collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use quickcheck::{Gen, QuickCheck};
+    use rand::{distributions::{Standard, Uniform}, prelude::Distribution};
+    // use quickcheck::quickcheck;
+    use quickcheck_macros::quickcheck;
+
     use super::*;
 
     #[test]
@@ -216,8 +255,8 @@ mod tests {
     }
 
     // #[test]
-    fn test_secret_share(k: u64, n: u64, secret: FP) {
-        let mut shares = create_share(secret, k, n);
+    fn test_secret_share(k: u64, n: u64, secret: Vec<FP>) {
+        let mut shares = create_share(secret.clone(), k, n);
 
         shares.shuffle(&mut rand::thread_rng());
 
@@ -231,7 +270,7 @@ mod tests {
             for secret in &[
                 0u64, 1, 100, 1337, 420, 0xCAFEBABE
             ] {
-                test_secret_share(*k, *n, FP::from(*secret));
+                test_secret_share(*k, *n, vec![FP::from(*secret); NUM_POLYS]);
             }
         }
     }
@@ -245,6 +284,16 @@ mod tests {
 
 
     #[test]
+    fn can_encode_and_decode_binary_secret() {
+        fn test(payload: Vec<u8>) -> bool {
+            let secret = encode_secret(payload.clone()).unwrap();
+            let decoded = decode_secret::<Vec<u8>>(secret).unwrap();
+            Some(payload) == decoded
+        }
+        QuickCheck::gen(QuickCheck::new(), Gen::new(NUM_POLYS * 31 - 16)).quickcheck(test as fn(Vec<u8>) -> bool);
+    }
+
+    #[test]
     fn decode_flow_no_collision() {
         let secret_a = encode_secret("shalom").unwrap();
         let secret_b = encode_secret("bye").unwrap();
@@ -253,11 +302,11 @@ mod tests {
 
         // say A wants to send over channel A (and 0 over rest)
         let client_a_chan_a = create_share(secret_a, 2, 2);
-        let client_a_chan_b = create_share(zero_secret, 2, 2);
+        let client_a_chan_b = create_share(zero_secret.clone(), 2, 2);
 
         // and B wants to send over channel B (and 0 over rest)
 
-        let client_b_chan_a = create_share(zero_secret, 2, 2);
+        let client_b_chan_a = create_share(zero_secret.clone(), 2, 2);
         let client_b_chan_b = create_share(secret_b, 2, 2);
 
         // note that both server A and B would have an idetnical view of the following share vector by now
@@ -288,12 +337,12 @@ mod tests {
 
         // say A wants to send over channel A (and 0 over rest)
         let client_a_chan_a = create_share(secret_a, 2, 2);
-        let client_a_chan_b = create_share(zero_secret, 2, 2);
+        let client_a_chan_b = create_share(zero_secret.clone(), 2, 2);
 
         // and B wants to send over channel A as well
 
         let client_b_chan_a = create_share(secret_b, 2, 2);
-        let client_b_chan_b = create_share(zero_secret, 2, 2);
+        let client_b_chan_b = create_share(zero_secret.clone(), 2, 2);
 
 
         // note that both server A and B would have an idetnical view of the following share vector by now
@@ -319,7 +368,7 @@ mod tests {
     fn share_bytes_conversion_works() {
         let share = Share {
             x: 1337u64,
-            p_x: 35125135u64.into()
+            p_x: vec![7331u64.into(); NUM_POLYS]
         };
         let bytes = share.to_bytes();
         let share2 = bytes.to_share();

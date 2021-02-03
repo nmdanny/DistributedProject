@@ -201,15 +201,15 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
         // note that thread_rng is crypto-secure
         let val_channel = Uniform::new(0, self.config.num_channels).sample(&mut rand::thread_rng());
         let secret_val = encode_secret(value)?;
+        let zero_val = encode_zero_secret();
 
 
         // create 'd' collections of shares, one for each server
         let chan_secrets = (0.. self.config.num_channels).map(|chan| {
-            let secret = if chan == val_channel { secret_val } else { encode_zero_secret() };
+            let secret = if chan == val_channel { &secret_val } else { &zero_val };
             let threshold = self.config.threshold as u64;
             let num_nodes = self.config.num_nodes as u64;
-            create_share(secret, threshold, num_nodes)
-
+            create_share(secret.clone(), threshold, num_nodes)
         }).collect::<Vec<_>>();
 
 
