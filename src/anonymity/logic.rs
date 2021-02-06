@@ -663,6 +663,7 @@ mod tests {
     const NUM_CHANNELS: usize = 1;
 
     #[tokio::test]
+    #[ignore]
     pub async fn test_simulation() {
         crate::consensus::logging::setup_logging().unwrap();
 
