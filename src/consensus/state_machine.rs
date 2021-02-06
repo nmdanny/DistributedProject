@@ -16,19 +16,13 @@ use tracing_futures::{Instrument};
 
 pub type ForceApply<V> = (ClientForceApplyRequest<V>, oneshot::Sender<Result<ClientForceApplyResponse<V>, RaftError>>);
 
-#[async_trait(?Send)]
-pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
-    /// Updates the state machine state. While this is async for convenience, updates 
-    /// are performed sequentially - the state machine won't process the next value before finishing with
-    /// the current one
-    ///
-    /// Be careful not to trigger deadlocks, for example, if the state machines submits a value to the log
-    /// and awaits a result(in the same task of `apply`) - the result will never arrive, as the value needs
-    /// to be processed by the state machine - the same machine waiting for the result.
-    async fn apply(&mut self, entry: &V) -> V::Result;
+#[async_trait]
+pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Send {
+    /// Updates the state machine state.
+    fn apply(&mut self, entry: &V) -> V::Result;
 
-    type HookEvent;
-    type HookStream: Stream<Item = Self::HookEvent>;
+    type HookEvent: Send;
+    type HookStream: Stream<Item = Self::HookEvent> + Send;
     type PublishedEvent: Clone + Send + Debug + Serialize;
 
     /// Allows hooking into the state machine lifecycle and applying operations
@@ -49,9 +43,9 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
     fn spawn(mut self, mut entry_rx: mpsc::UnboundedReceiver<CommitEntry<V>>,
              mut force_apply_rx: mpsc::UnboundedReceiver<ForceApply<V>>,
              res_tx: broadcast::Sender<(CommitEntry<V>, V::Result)>) -> JoinHandle<()> {
-        let jh = task::spawn_local(async move {
+        let hook_stream = self.create_hook_stream();
+        let jh = tokio::spawn(async move {
             let mut last_applied: Option<usize> = None;
-            let hook_stream = self.create_hook_stream();
             tokio::pin!(hook_stream);
             loop {
                 tokio::select! {
@@ -63,7 +57,7 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
                         info!("handling SM change {:?}", entry);
                         let new_last_applied = last_applied.map(|i| i + 1).unwrap_or(0);
                         assert_eq!(new_last_applied, entry.index, "Commit entry index should equal new last applied");
-                        let out = self.apply(&entry.value).await;
+                        let out = self.apply(&entry.value);
                         res_tx.send((entry, out)).unwrap_or_else(|_e| {
                             // this is normal for a non-leader node
                             trace!("Couldn't broadcast result of state machine, no one is subscribed");
@@ -72,7 +66,7 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
                         last_applied = Some(new_last_applied);
                     },
                     Some(force_apply) = force_apply_rx.recv() => {
-                        let result = self.apply(&force_apply.0.value).await;
+                        let result = self.apply(&force_apply.0.value);
                         let resp = ClientForceApplyResponse { result };
                         force_apply.1.send(Ok(resp)).unwrap_or_else(|_e| {
                             error!("Couldn't send force apply result to client");
@@ -80,8 +74,8 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized {
                     }
                 }
             }
-        }.instrument(info_span!("state machine")).instrument(info_span!("state machine")));
-        jh
+        });
+    jh
     }
 }
 
@@ -90,7 +84,7 @@ pub struct NoopStateMachine();
 
 
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V: Value, T: Transport<V>> StateMachine<V, T> for NoopStateMachine  where V::Result : Default {
 
     type HookEvent = ();
@@ -99,7 +93,7 @@ impl <V: Value, T: Transport<V>> StateMachine<V, T> for NoopStateMachine  where 
 
 
 
-    async fn apply(&mut self, _entry: &V) -> V::Result {
+    fn apply(&mut self, _entry: &V) -> V::Result {
        Default::default() 
     }
 

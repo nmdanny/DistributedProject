@@ -593,9 +593,9 @@ impl <V: Value> NewRound<V> {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<AnonymityMessage<V>>> StateMachine<AnonymityMessage<V>, T> for AnonymousLogSM<V, C> {
-    async fn apply(&mut self, entry: &AnonymityMessage<V>) -> () {
+    fn apply(&mut self, entry: &AnonymityMessage<V>) -> () {
         match entry {
             AnonymityMessage::ClientShare { channel_shares, client_name, round} => { self.handle_client_share(client_name.to_owned(), channel_shares.as_slice(), *round) },
             AnonymityMessage::ClientNotifyLive { client_name, round} => { self.handle_client_live_notification(client_name.to_owned(), *round) }
