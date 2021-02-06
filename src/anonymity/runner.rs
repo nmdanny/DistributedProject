@@ -71,39 +71,39 @@ async fn main_in_localset() -> Result<(), anyhow::Error> {
     let options = CLIConfig::parse();
 
     let grpc_config = GRPCConfig::default_for_nodes(options.config.num_nodes);
-    // let transport: GRPCTransport<AnonymityMessage<String>> = match &options.mode {
-    //     Mode::Server(cfg) => { 
-    //         GRPCTransport::new(Some(cfg.node_id), grpc_config).await?
-    //     }
-    //     Mode::Client(_cfg) => {
-    //         GRPCTransport::new(None, grpc_config).await?
-    //     }
-    // };
+    let transport: GRPCTransport<AnonymityMessage<String>> = match &options.mode {
+        Mode::Server(cfg) => { 
+            GRPCTransport::new(Some(cfg.node_id), grpc_config).await?
+        }
+        Mode::Client(_cfg) => {
+            GRPCTransport::new(None, grpc_config).await?
+        }
+    };
 
     let shared_cfg = Arc::new(options.config.clone());
     match &options.mode {
         Mode::Server(cfg) => {
-            // let mut node = Node::new(cfg.node_id, options.config.num_nodes, transport.clone());
-            // let _comm = NodeCommunicator::from_node(&mut node).await;
-            // let sm = AnonymousLogSM::<String, _>::new(shared_cfg, cfg.node_id, transport);
-            // node.attach_state_machine(sm);
+            let mut node = Node::new(cfg.node_id, options.config.num_nodes, transport.clone());
+            let _comm = NodeCommunicator::from_node(&mut node).await;
+            let sm = AnonymousLogSM::<String, _>::new(shared_cfg, cfg.node_id, transport);
+            node.attach_state_machine(sm);
 
-            // node.run_loop()
-            //     .instrument(tracing::info_span!("node-loop", node.id = cfg.node_id))
-            //     .await
-            //     .unwrap_or_else(|e| error!("Error running node {}: {:?}", cfg.node_id, e));
+            node.run_loop()
+                .instrument(tracing::info_span!("node-loop", node.id = cfg.node_id))
+                .await
+                .unwrap_or_else(|e| error!("Error running node {}: {:?}", cfg.node_id, e));
         }
         Mode::Client(cfg) => {
-            // let sm_events = futures::future::join_all((0 .. shared_cfg.num_nodes).map(|node_id| {
-            //     let stream = transport.get_sm_event_stream::<NewRound<String>>(node_id);
-            //     async move {
-            //         stream.await.unwrap()
-            //     }
+            let sm_events = futures::future::join_all((0 .. shared_cfg.num_nodes).map(|node_id| {
+                let stream = transport.get_sm_event_stream::<NewRound<String>>(node_id);
+                async move {
+                    stream.await.unwrap()
+                }
                 
-            // })).await;
+            })).await;
 
-            // let recv = combined_subscriber(sm_events.into_iter());
-            // let anonym = AnonymousClient::new(transport, shared_cfg, format!("Client {}", cfg.client_id), recv);
+            let recv = combined_subscriber(sm_events.into_iter());
+            let anonym = AnonymousClient::new(transport, shared_cfg, format!("Client {}", cfg.client_id), recv);
             gui::App::run(Settings::default()).unwrap();
         }
     }
