@@ -45,6 +45,13 @@ pub struct PeerReplicationStream<V: Value, T: Transport<V>, S: StateMachine<V, T
     /// Used to notify leader of match index updates
     pub match_index_sender: mpsc::Sender<(Id, usize)>,
 
+    /// Term of leader
+    pub leader_term: usize,
+
+    /// Used to send AEs to peer
+    #[derivative(Debug="ignore")]
+    pub transport: T,
+
     #[derivative(Debug="ignore")]
     phantom: std::marker::PhantomData<V>
 
@@ -95,19 +102,24 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
 
         // at first, assume the peer is completely synchronized, so `next_index` points to one past
         // the last element
-        let next_index = node.borrow().storage.len();
+        let node_b = node.borrow();
+        let next_index = node_b.storage.len();
+        let leader_term = node_b.current_term;
+        let transport = node_b.transport.clone();
+        drop(node_b);
         let match_index = None;
         PeerReplicationStream {
-            node, id, next_index, match_index, tick_receiver, match_index_sender, phantom: Default::default()
+            node, id, next_index, match_index, tick_receiver, match_index_sender,
+            leader_term, transport, phantom: Default::default()
         }
     }
 
     #[instrument]
     /// Sends an AE, treating network errors or stale responses as errors, and conflict or successful
     /// responses as success.
-    async fn send_ae(&self, transport: &T, current_term: usize, req: AppendEntries<V>) -> Result<AppendEntriesResponse, ReplicationLoopError>
+    async fn send_ae(&self, current_term: usize, req: AppendEntries<V>) -> Result<AppendEntriesResponse, ReplicationLoopError>
     {
-        let res = transport.send_append_entries(self.id, req).await;
+        let res = self.transport.send_append_entries(self.id, req).await;
         trace!("send_ae, res: {:?}", res);
         let res = res .map_err(ReplicationLoopError::PeerError)?;
         match res.meaning(current_term) {
@@ -124,8 +136,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
     pub async fn try_replication(&mut self) -> Result<(), ReplicationLoopError>
     {
         let node = self.node.borrow();
-        let current_term = node.current_term;
-        let transport = node.transport.clone();
+        let current_term = self.leader_term;
 
         /* Note, it's possible that during an await point, a concurrent client write request will cause
            the storage to increase, but for simplicity, we will not synchronize in call values
@@ -162,7 +173,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
             assert_eq!(req.entries.len(), node.storage.len() - self.next_index);
 
             drop(node);
-            let res = self.send_ae(&transport, current_term, req).await?;
+            let res = self.send_ae(current_term, req).await?;
             let node = self.node.borrow();
             let span = info_span!("whileLoopEnd",
                                   peer_id=?self.id,
