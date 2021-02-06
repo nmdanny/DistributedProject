@@ -18,6 +18,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 
 use anyhow::Context;
 use super::pb::{GenericMessage, TypeConversionError, raft_client::RaftClient, raft_server::{Raft, RaftServer}, raft_to_tonic, tonic_to_raft, tonic_stream_to_raft};
+use std::fmt::Debug;
 
 const STARTUP_TIME: tokio::time::Duration = tokio::time::Duration::from_secs(0u64);
 const RECONNECT_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(2u64);
@@ -134,9 +135,12 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
         }
 
         let mut client = inner.clients.get(&to).expect("invalid 'to' id").clone();
+        debug!(trans=true, "(req-out) sending AE to {}: {:?}", to, msg);
         let msg: GenericMessage = msg.try_into().context("While serializing AppendEntries").map_err(RaftError::InternalError)?;
         let res = client.append_entries_rpc(msg).await;
-        tonic_to_raft(res, to)
+        let res = tonic_to_raft(res, to);
+        debug!(trans=true, "(res-in) sent AE to {}: {:?}", to, res);
+        res
     }
 
     async fn send_request_vote(&self, to: Id, msg: RequestVote) -> Result<RequestVoteResponse, RaftError> {
@@ -147,9 +151,12 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
         }
 
         let mut client = inner.clients.get(&to).expect("invalid 'to' id").clone();
+        debug!(trans=true, "(req-out) sending RV to {}: {:?}", to, msg);
         let msg: GenericMessage = msg.try_into().context("While serializing RequestVote").map_err(RaftError::InternalError)?;
         let res = client.vote_request_rpc(msg).await;
-        tonic_to_raft(res, to)
+        let res = tonic_to_raft(res, to);
+        debug!(trans=true, "(res-in) sent RV to {}: {:?}", to, res);
+        res
     }
 
     #[instrument]
@@ -251,7 +258,7 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
 pub struct RaftService<V: Value> { communicator: NodeCommunicator<V> }
 
 impl <V: Value> RaftService<V> {
-    pub async fn do_op<Req, Res, F: Future<Output = Result<Res, RaftError>>>(&self, desc: &'static str,
+    pub async fn do_op<Req: Debug, Res: Debug, F: Future<Output = Result<Res, RaftError>>>(&self, desc: &'static str,
         request: tonic::Request<GenericMessage>,
         op: impl Fn(Req) -> F) 
         -> Result<tonic::Response<GenericMessage>, tonic::Status>
@@ -259,7 +266,9 @@ impl <V: Value> RaftService<V> {
     {
         let request = Req::try_from(request.into_inner()).context(format!("serializing request for {}", desc)).map_err(|e| 
             tonic::Status::internal(e.to_string()))?;
+        debug!(trans=true, "(req-in) GRPC handler for {}, got request {:?}", desc, request);
         let res: Result<Res, RaftError> = op(request).await;
+        debug!(trans=true, "(res-out) GRPC handler for {}, got response {:?} ", desc, res);
         raft_to_tonic(res)
     }
 }

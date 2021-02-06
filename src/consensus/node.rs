@@ -206,10 +206,18 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
             let node = Rc::new(RefCell::new(self));
 
             loop {
-                let id = node.borrow().id;
-                let state = node.borrow().state;
-                info!(state = ?state, id = ?id, log=?node.borrow().storage, "@@@@@@@@ Node {} switching to state {:?} @@@@@@@",
-                    id, state);
+                let state = {
+                    let node = node.borrow();
+                    let id = node.id;
+                    let state = node.state;
+                    let storage = &node.storage;
+                    let term = &node.current_term;
+                    let commit_index = &node.commit_index;
+                    info!(state = ?state, id = ?id, log=?storage, term=?term, commit_index=?commit_index,
+                          important=true, "@@@@ Node {} switching to state {:?}",
+                          id, state);
+                    state
+                };
                 match state {
                     ServerState::Follower => FollowerState::new(&mut node.borrow_mut()).run_loop().await?,
                     ServerState::Candidate => CandidateState::new(&mut node.borrow_mut()).run_loop().await?,
@@ -316,7 +324,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
     }
 
     /// Invoked by any node upon receiving a request to append entries
-    #[instrument]
+    #[instrument(level="warn")]
     pub fn on_receive_append_entry(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
 
         assert_ne!(req.leader_id, self.id, "A leader cannot send append entry to himself");
@@ -340,15 +348,18 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
             let (prev_log_index, prev_log_term) = req.prev_log_index_term.0.unwrap();
             match self.storage.get(prev_log_index) {
                 None => {
-                    warn!("mismatching prev_log_term for index {}. my log is too short, their term: {}",
-                          prev_log_index, prev_log_term);
+                    warn!(
+                        req=?req,
+                        "mismatching prev_log_term for index {}, term of entry: {}. My log is too short(len: {})",
+                          prev_log_index, prev_log_term, self.storage.len());
                           
                     self.observe_leader_commit(req.leader_commit);
                     return Ok(AppendEntriesResponse::failed(self.current_term));
                 }
                 Some(entry) => {
                     if entry.term != prev_log_term {
-                        warn!("mismatching prev_log_term for index {}. mine: {}, their: {}",
+                        warn!(req=?req,
+                            "mismatching prev_log_term for index {}. mine: {}, their: {}",
                             prev_log_index, entry.term, prev_log_term);
                         self.observe_leader_commit(req.leader_commit);
                         return Ok(AppendEntriesResponse::failed(self.current_term));

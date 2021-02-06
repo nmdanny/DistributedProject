@@ -88,7 +88,8 @@ impl RequestVoteResponse {
 
 
 /// Invoked by leader to replicate log entries, also used as heartbeat
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Derivative, Clone, Serialize, Deserialize)]
+#[derivative(Debug)]
 pub struct AppendEntries<V: Value> {
     /// Leader's term
     pub term: usize,
@@ -100,6 +101,7 @@ pub struct AppendEntries<V: Value> {
     pub prev_log_index_term: IndexTerm,
 
     #[serde(bound = "V: Value")]
+    #[derivative(Debug="ignore")]
     /// New entries to store (empty for heartbeat)
     pub entries: Vec<LogEntry<V>>,
 

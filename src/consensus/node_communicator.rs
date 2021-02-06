@@ -184,26 +184,27 @@ pub(in crate::consensus) trait CommandHandler<V: Value> {
     fn handle_force_apply(&mut self, force_apply: ForceApply<V>);
 
     /// Handles a command sent from `NodeCommunicator`
+    #[instrument(skip(self), level="error")]
     fn handle_command(&mut self, cmd: NodeCommand<V>) {
         match cmd {
             NodeCommand::AE(ae, res) => {
                 res.send(self.handle_append_entries(ae)).unwrap_or_else(|e| {
-                    error!("Couldn't send response: {:?}", e);
+                    error!("Couldn't send response to NodeCommunicator: {:?}", e);
                 });
             },
             NodeCommand::RV(rv, res) => {
                 res.send(self.handle_request_vote(rv)).unwrap_or_else(|e| {
-                    error!("Couldn't send response: {:?}", e);
+                    error!("Couldn't send response to NodeCommunicator: {:?}", e);
                 });
             }
             NodeCommand::ClientWriteRequest(req, res) => {
                 res.send(self.handle_client_write_request(req)).unwrap_or_else(|e| {
-                    error!("Couldn't send response: {:?}", e);
+                    error!("Couldn't send response to NodeCommunicator: {:?}", e);
                 });
             }
             NodeCommand::ClientReadRequest(req, res) => {
                 res.send(self.handle_client_read_request(req)).unwrap_or_else(|e| {
-                    error!("Couldn't send response: {:?}", e);
+                    error!("Couldn't send response to NodeCommunicator: {:?}", e);
                 });
             }
             NodeCommand::ClientForceApplyRequest(req, res) => {

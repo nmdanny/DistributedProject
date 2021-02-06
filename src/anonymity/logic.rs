@@ -168,6 +168,7 @@ pub enum AnonymityMessage<V: Value> {
     ReconstructResult {
         /// Maps each channel to the client's secret, or None upon collision
         #[serde(bound = "V: Value")]
+        #[derivative(Debug="ignore")]
         results: Vec<Result<V, ReconstructError>>,
         round: usize
     }
@@ -409,7 +410,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         }
     }
 
-    #[instrument]
+    #[instrument(skip(batch))]
     pub fn on_receive_reconstruct_share(&mut self, batch: &[ShareBytes], _from_node: Id, round: usize) {
         if self.round != round {
             return;
