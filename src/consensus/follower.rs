@@ -1,6 +1,6 @@
 use crate::consensus::types::*;
 use crate::consensus::transport::Transport;
-use crate::consensus::node::{Node, ServerState};
+use crate::consensus::node::{Node, ServerState, ChangeStateReason};
 use crate::consensus::state_machine::StateMachine;
 use crate::consensus::node_communicator::CommandHandler;
 use std::{pin::Pin, time::Instant};

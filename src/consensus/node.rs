@@ -178,6 +178,12 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum ChangeStateReason {
+    WonElection { yes: usize, no: usize},
+    FollowerTimeout { timeout_duration: std::time::Duration },
+    SawHigherTerm { my_term: usize, new_term: usize, new_term_leader: Option<Id>}
+}
 
 /* Following block contains logic shared with all states of a raft node */
 impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
@@ -215,7 +221,9 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
 
     /// Changes the state of the node
     #[instrument]
-    pub fn change_state(&mut self, new_state: ServerState) {
+    pub fn change_state(&mut self, new_state: ServerState, change_reason: ChangeStateReason) {
+        info!(important=true, "!!! changing state from {:?} at term {} to {:?}, reason: {:?}",
+              self.state, self.current_term, new_state, change_reason);
         self.state = new_state;
     }
 
@@ -263,10 +271,12 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
     #[instrument]
     pub fn try_update_term(&mut self, term: usize, leader: Option<Id>) -> bool {
         if term > self.current_term {
+            let old_term = self.current_term;
             self.current_term = term;
-            self.change_state(ServerState::Follower);
+            self.change_state(ServerState::Follower, ChangeStateReason::SawHigherTerm {
+                my_term: old_term, new_term: term, new_term_leader: leader
+            });
             self.leader_id = leader;
-            info!("found newer term {} with leader {:?}, becoming follower.", term, leader);
             return true
         }
         return false

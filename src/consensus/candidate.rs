@@ -3,7 +3,7 @@ use crate::consensus::types::*;
 use crate::consensus::state_machine::{StateMachine, ForceApply};
 use tokio::sync::mpsc::UnboundedReceiver;
 use crate::consensus::transport::Transport;
-use crate::consensus::node::{Node, ServerState};
+use crate::consensus::node::{Node, ServerState, ChangeStateReason};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use crate::consensus::node_communicator::CommandHandler;
@@ -191,7 +191,10 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                             ElectionResult::Won => {
                                 assert!(!_lost, "Cannot win election after losing(sanity check)");
                                 info!("won election, results: {:?}", election_state);
-                                self.node.change_state(ServerState::Leader);
+                                self.node.change_state(ServerState::Leader,
+                                    ChangeStateReason::WonElection {
+                                      yes: election_state.yes, no: election_state.no
+                                  });
                                 return Ok(())
                             }
                             ElectionResult::Undecided => {
