@@ -12,6 +12,7 @@ use rand::distributions::{Distribution, Uniform};
 use tokio_stream::StreamMap;
 use tracing_futures::Instrument;
 use derivative;
+use std::sync::Arc;
 
 
 /// Combines NewRound streams(ideally from many servers) onto a single stream, allowing to handle events
@@ -47,10 +48,10 @@ struct AnonymousClientInner<V: Value + Hash, CT: ClientTransport<AnonymityMessag
     mut_client: Client<CT, AnonymityMessage<V>>,
 
     #[derivative(Debug="ignore")]
-    client: Rc<Client<CT, AnonymityMessage<V>>>,
+    client: Arc<Client<CT, AnonymityMessage<V>>>,
 
     #[derivative(Debug="ignore")]
-    config: Rc<Config>,
+    config: Arc<Config>,
 
     #[derivative(Debug="ignore")]
     phantom: std::marker::PhantomData<V>,
@@ -118,7 +119,7 @@ fn was_value_committed<V: Value>(new_round: &NewRound<V>, last_sent: &ToBeCommit
 
 impl <V: Value + Hash> AnonymousClient<V> {
     pub fn new<CT: ClientTransport<AnonymityMessage<V>>>(client_transport: CT, 
-        config: Rc<Config>, client_name: String, 
+        config: Arc<Config>, client_name: String,
         mut event_recv: Pin<Box<dyn Stream<Item = NewRound<V>>>>) -> Self 
     {
         let mut client = AnonymousClientInner::new(client_transport, config, client_name.clone());
@@ -212,10 +213,10 @@ impl <V: Value + Hash> AnonymousClient<V> {
 }
 
 impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClientInner<V, CT> {
-    fn new(client_transport: CT, config: Rc<Config>, client_name: String) -> Self {
+    fn new(client_transport: CT, config: Arc<Config>, client_name: String) -> Self {
         AnonymousClientInner {
             mut_client: Client::new(client_name.clone(), client_transport.clone(), config.num_nodes),
-            client: Rc::new(Client::new(client_name.clone(), client_transport, config.num_nodes)),
+            client: Arc::new(Client::new(client_name.clone(), client_transport, config.num_nodes)),
             config,
             phantom: Default::default(),
             client_name

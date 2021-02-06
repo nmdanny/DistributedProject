@@ -13,10 +13,11 @@ use tokio::time::timeout;
 use derivative;
 use futures::{Stream, TryFutureExt};
 use std::{pin::Pin, rc::Rc};
+use std::sync::Arc;
 
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait(?Send)]
-pub trait ClientTransport<V: Value> : 'static + Clone {
+pub trait ClientTransport<V: Value> : 'static + Clone + Send {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError>;
 
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
@@ -29,14 +30,14 @@ pub trait ClientTransport<V: Value> : 'static + Clone {
 #[derive(Clone)]
 pub struct SingleProcessClientTransport<V: Value>
 {
-    communicators: Rc<Vec<NodeCommunicator<V>>>,
+    communicators: Arc<Vec<NodeCommunicator<V>>>,
     timeout_duration: Duration
 }
 
 impl <V: Value> SingleProcessClientTransport<V> {
     pub fn new(communicators: Vec<NodeCommunicator<V>>) -> Self {
         SingleProcessClientTransport {
-            communicators: Rc::new(communicators),
+            communicators: Arc::new(communicators),
             timeout_duration: CLIENT_TIMEOUT
         }
     }

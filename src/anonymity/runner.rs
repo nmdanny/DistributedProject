@@ -17,6 +17,7 @@ use iced::{Application, Settings};
 use rand::{distributions::{Standard, Uniform}, prelude::Distribution};
 use tracing_futures::Instrument;
 use clap::Clap;
+use std::sync::Arc;
 
 mod gui;
 
@@ -79,7 +80,7 @@ async fn main_in_localset() -> Result<(), anyhow::Error> {
     //     }
     // };
 
-    let shared_cfg = Rc::new(options.config.clone());
+    let shared_cfg = Arc::new(options.config.clone());
     match &options.mode {
         Mode::Server(cfg) => {
             // let mut node = Node::new(cfg.node_id, options.config.num_nodes, transport.clone());

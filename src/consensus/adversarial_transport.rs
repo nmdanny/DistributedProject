@@ -2,6 +2,7 @@ use crate::consensus::transport::Transport;
 use crate::consensus::client::ClientTransport;
 use crate::consensus::types::*;
 
+use parking_lot::RwLock as PRwLock;
 use tokio::sync::RwLock;
 use std::{pin::Pin, sync::Arc};
 use std::collections::BTreeMap;
@@ -184,6 +185,13 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
     }
 }
 
+struct AdversaryClientTransportInner {
+
+    omission_chance: BTreeMap<Id, f64>,
+    request_omission_chance: f64,
+    response_omission_chance: f64
+}
+
 /// The client adversary allows setting omission probabilities(between 0 to 1) per node,as well
 /// as setting a default omission chance for all nodes.
 /// In addition, clones of the adversary client transport retain the same omission probabilities - thus you
@@ -192,27 +200,44 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
 pub struct AdversaryClientTransport<V: Value, T: ClientTransport<V>>
 {
     transport: T,
-    pub omission_chance: Rc<RefCell<BTreeMap<Id, f64>>>,
-    pub request_omission_chance: Rc<Cell<f64>>,
-    pub response_omission_chance: Rc<Cell<f64>>,
+    inner: Arc<PRwLock<AdversaryClientTransportInner>>,
     phantom: std::marker::PhantomData<V>,
 }
 
 impl <V: Value, T: ClientTransport<V>> AdversaryClientTransport<V, T> {
     pub fn new(transport: T) -> Self {
+        let inner = AdversaryClientTransportInner {
+            omission_chance: BTreeMap::new(),
+            request_omission_chance: 0.0,
+            response_omission_chance: 0.0
+        };
         AdversaryClientTransport {
             transport,
-            omission_chance: Rc::new(RefCell::new(BTreeMap::new())),
-            request_omission_chance: Rc::new(Cell::new(0.0)),
-            response_omission_chance: Rc::new(Cell::new(0.0)),
+            inner: Arc::new(PRwLock::new(inner)),
             phantom: Default::default()
         }
     }
 
     pub fn set_omission_chance(&self, id: Id, chance: f64) {
-        *self.omission_chance.borrow_mut().entry(id).or_default() = chance;
+        let mut inner = self.inner.write();
+        *inner.omission_chance.entry(id).or_default() = chance;
     }
 
+
+    pub fn set_default_req_omission_chance(&self, chance: f64) {
+        self.inner.write().request_omission_chance = chance;
+    }
+
+    pub fn set_default_res_omission_chance(&self, chance: f64) {
+        self.inner.write().response_omission_chance = chance;
+    }
+
+    fn get_req_and_res_omission_chance(&self, node_id: Id) -> (f64, f64) {
+        let inner = self.inner.read();
+        let req_chance = inner.omission_chance.get(&node_id).cloned().unwrap_or(inner.request_omission_chance);
+        let res_chance = inner.omission_chance.get(&node_id).cloned().unwrap_or(inner.response_omission_chance);
+        (req_chance, res_chance)
+    }
 }
 
 async fn adversary_request_response<R>(req_omission_chance: f64,
@@ -243,8 +268,7 @@ async fn adversary_request_response<R>(req_omission_chance: f64,
 #[async_trait(?Send)]
 impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTransport<V, T> {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>, RaftError> {
-        let req_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.request_omission_chance.get());
-        let res_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.response_omission_chance.get());
+        let (req_chance, res_chance) = self.get_req_and_res_omission_chance(node_id);
         adversary_request_response(req_chance,
                                    res_chance,
                                    node_id, async move {
@@ -253,8 +277,7 @@ impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTra
     }
 
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
-        let req_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.request_omission_chance.get());
-        let res_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.response_omission_chance.get());
+        let (req_chance, res_chance) = self.get_req_and_res_omission_chance(node_id);
         adversary_request_response(req_chance,
                                    res_chance,
                                    node_id, async move {
@@ -263,8 +286,7 @@ impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTra
     }
 
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
-        let req_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.request_omission_chance.get());
-        let res_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.response_omission_chance.get());
+        let (req_chance, res_chance) = self.get_req_and_res_omission_chance(node_id);
         adversary_request_response(req_chance,
                                    res_chance,
                                    node_id, async move {
@@ -274,8 +296,8 @@ impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTra
 
 
     async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
-        let omit_chance = self.omission_chance.borrow().get(&node_id).cloned().unwrap_or(self.response_omission_chance.get());
-        let res_ber =  Bernoulli::new(omit_chance).expect("Invalid omission chance");
+        let (_, res_chance) = self.get_req_and_res_omission_chance(node_id);
+        let res_ber =  Bernoulli::new(res_chance).expect("Invalid omission chance");
         let stream = self.transport.get_sm_event_stream(node_id).await?;
         let res_stream = stream.filter(move |_| {
             if res_ber.sample(&mut rand::thread_rng()) {

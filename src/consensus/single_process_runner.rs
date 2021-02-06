@@ -14,8 +14,6 @@ use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryCl
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
 use std::collections::btree_map::Entry;
-use std::rc::Rc;
-use std::cell::Cell;
 
 /// Used for testing the consistency of entries committed by multiple logs
 struct ConsistencyCheck<V: Value> {
@@ -188,8 +186,8 @@ pub async fn main() -> Result<(), Error> {
             let name = client.client_name.clone();
             let handle = tokio::task::spawn_local(async move {
 
-                client.transport.request_omission_chance = Rc::new(Cell::new(0.292));
-                client.transport.response_omission_chance = Rc::new(Cell::new(0.292));
+                client.transport.set_default_req_omission_chance(0.292);
+                client.transport.set_default_res_omission_chance(0.292);
 
                 client_message_loop(&mut client).await;
             }.instrument(info_span!("Client-loop", name=?name)));

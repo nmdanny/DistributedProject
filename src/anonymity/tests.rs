@@ -44,7 +44,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
 
         let num_nodes = config.num_nodes;
 
-        let config = Rc::new(config);
+        let config = Arc::new(config);
 
         let grpc_config = GRPCConfig::default_for_nodes(num_nodes);
         let (mut nodes, communicators) = futures::future::join_all(
@@ -126,7 +126,7 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> SingleProce
         let num_nodes = config.num_nodes;
         let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
 
-        let config = Rc::new(config);
+        let config = Arc::new(config);
 
         let (mut nodes, communicators) = futures::future::join_all(
             (0 .. num_nodes).map(|id| {
@@ -297,13 +297,11 @@ async fn client_crash_only() {
         a_transport.set_omission_chance(2, 1.0);
 
         register_client_send_callback(Box::new(move |_name, _round, node_id| {
-            let omission_chance = &a_transport.request_omission_chance;
-
             // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
             if node_id.is_none() {
-                omission_chance.set(1.0);
+                a_transport.set_default_req_omission_chance(1.0);
             } else {
-                omission_chance.set(0.0);
+                a_transport.set_default_req_omission_chance(0.0);
             }
 
 
@@ -358,13 +356,11 @@ async fn client_crash_server_drop() {
         scenario.server_transport.set_omission_chance(0, 0.5).await;
 
         register_client_send_callback(Box::new(move |_name, _round, node_id| {
-            let omission_chance = &a_transport.request_omission_chance;
-
             // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
             if node_id.is_none() {
-                omission_chance.set(1.0);
+                a_transport.set_default_req_omission_chance(1.0);
             } else {
-                omission_chance.set(0.0);
+                a_transport.set_default_req_omission_chance(0.0);
             }
 
 
@@ -422,13 +418,11 @@ async fn client_crash_server_crash() {
         scenario.client_transports[1].set_omission_chance(0, 1.0);
 
         register_client_send_callback(Box::new(move |_name, _round, node_id| {
-            let omission_chance = &a_transport.request_omission_chance;
-
             // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
             if node_id.is_none() {
-                omission_chance.set(1.0);
+                a_transport.set_default_req_omission_chance(1.0);
             } else {
-                omission_chance.set(0.0);
+                a_transport.set_default_req_omission_chance(0.0);
             }
 
 

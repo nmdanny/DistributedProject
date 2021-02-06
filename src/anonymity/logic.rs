@@ -218,6 +218,7 @@ const NEW_ROUND_CHAN_SIZE: usize = 1024;
 use tokio::fs::{File};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
+use std::sync::Arc;
 
 struct Metrics {
     share_tx: mpsc::UnboundedSender<(usize, usize, Share)>,
@@ -226,7 +227,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(node_id: usize, config: Rc<Config>) -> Self {
+    fn new(node_id: usize, config: Arc<Config>) -> Self {
         let (share_tx, mut share_rx) = mpsc::unbounded_channel::<(usize, usize, Share)>();
         let (decode_tx, mut decode_rx) = mpsc::unbounded_channel::<(usize, usize, bool)>();
 
@@ -291,7 +292,7 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
     pub id: Id,
     
     #[derivative(Debug="ignore")]
-    pub config: Rc<Config>,
+    pub config: Arc<Config>,
 
     pub state: Phase,
 
@@ -321,7 +322,7 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
 
 
 impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<V, CT> {
-    pub fn new(config: Rc<Config>, id: usize, client_transport: CT) -> AnonymousLogSM<V, CT> {
+    pub fn new(config: Arc<Config>, id: usize, client_transport: CT) -> AnonymousLogSM<V, CT> {
         assert!(id < config.num_nodes, "Invalid node ID");
         let client = SMSender::new(id, Client::new(format!("SM-{}-cl", id), client_transport, config.num_nodes));
         let state = Phase::ClientSharing {
@@ -664,7 +665,7 @@ mod tests {
     pub async fn test_simulation() {
         crate::consensus::logging::setup_logging().unwrap();
 
-        let config = Rc::new(Config {
+        let config = Arc::new(Config {
             threshold: THRESHOLD,
             num_channels: NUM_CHANNELS,
             num_nodes: NUM_NODES,
