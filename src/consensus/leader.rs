@@ -1,22 +1,27 @@
-use crate::consensus::types::*;
-use crate::consensus::state_machine::StateMachine;
-use crate::consensus::transport::Transport;
+use std::{cell::{Cell, RefCell}, sync::Arc};
+use std::collections::BTreeMap;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use anyhow::Context;
+use async_trait::async_trait;
+use crossbeam::atomic::AtomicCell;
+use futures::{Future, FutureExt, TryFutureExt};
+use thiserror::Error;
+use tokio::task::JoinHandle;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::watch::Ref;
+use tokio::task;
+use tokio_stream::StreamExt;
+use tracing_futures::Instrument;
+
+use crate::consensus::logging::TimeOp;
 use crate::consensus::node::{Node, ServerState};
 use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, watch, broadcast};
-use tokio_stream::StreamExt;
-use futures::{TryFutureExt, FutureExt};
-use tracing_futures::Instrument;
-use std::collections::BTreeMap;
-use async_trait::async_trait;
-use anyhow::Context;
-use std::rc::Rc;
-use std::cell::{Cell, RefCell};
-use tokio::sync::watch::Ref;
-use thiserror::Error;
-use tokio::task;
+use crate::consensus::state_machine::StateMachine;
 use crate::consensus::timing::HEARTBEAT_INTERVAL;
+use crate::consensus::transport::Transport;
+use crate::consensus::types::*;
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -51,6 +56,9 @@ pub struct PeerReplicationStream<V: Value, T: Transport<V>, S: StateMachine<V, T
     /// Used to send AEs to peer
     #[derivative(Debug="ignore")]
     pub transport: T,
+
+    /// Time at which last AE (heartbeat/data) was sent
+    pub last_ae_send: Arc<AtomicCell<Instant>>,
 
     #[derivative(Debug="ignore")]
     phantom: std::marker::PhantomData<V>
@@ -94,6 +102,22 @@ pub enum ReplicationLoopError {
     PeerError(RaftError),
 }
 
+#[instrument]
+/// Sends an AE, treating network errors or stale responses as errors, and conflict or successful
+/// responses as success.
+async fn send_ae<V: Value, T: Transport<V>>(transport: &T, to: Id, current_term: usize, req: AppendEntries<V>) 
+    -> Result<AppendEntriesResponse, ReplicationLoopError> 
+{
+    let res = transport.send_append_entries(to, req).await;
+    let res = res .map_err(ReplicationLoopError::PeerError)?;
+    match res.meaning(current_term) {
+        AEResponseMeaning::Ok => Ok(res),
+        AEResponseMeaning::Conflict => Ok(res),
+        AEResponseMeaning::Stale { newer_term } =>
+            Err(ReplicationLoopError::StaleLeaderError(StaleLeader { newer_term })),
+    }
+}
+
 impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V, T, S> {
     pub fn new(node: Rc<RefCell<Node<V, T, S>>>, id: Id,
                tick_receiver: watch::Receiver<()>,
@@ -110,23 +134,8 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
         let match_index = None;
         PeerReplicationStream {
             node, id, next_index, match_index, tick_receiver, match_index_sender,
-            leader_term, transport, phantom: Default::default()
-        }
-    }
-
-    #[instrument]
-    /// Sends an AE, treating network errors or stale responses as errors, and conflict or successful
-    /// responses as success.
-    async fn send_ae(&self, current_term: usize, req: AppendEntries<V>) -> Result<AppendEntriesResponse, ReplicationLoopError>
-    {
-        let res = self.transport.send_append_entries(self.id, req).await;
-        trace!("send_ae, res: {:?}", res);
-        let res = res .map_err(ReplicationLoopError::PeerError)?;
-        match res.meaning(current_term) {
-            AEResponseMeaning::Ok => Ok(res),
-            AEResponseMeaning::Conflict => Ok(res),
-            AEResponseMeaning::Stale { newer_term } =>
-                Err(ReplicationLoopError::StaleLeaderError(StaleLeader { newer_term })),
+            leader_term, transport, phantom: Default::default(),
+            last_ae_send: Arc::new(AtomicCell::new(Instant::now()))
         }
     }
 
@@ -136,7 +145,6 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
     pub async fn try_replication(&mut self) -> Result<(), ReplicationLoopError>
     {
         let node = self.node.borrow();
-        let current_term = self.leader_term;
 
         /* Note, it's possible that during an await point, a concurrent client write request will cause
            the storage to increase, but for simplicity, we will not synchronize in call values
@@ -173,7 +181,8 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
             assert_eq!(req.entries.len(), node.storage.len() - self.next_index);
 
             drop(node);
-            let res = self.send_ae(current_term, req).await?;
+            let res = send_ae(&self.transport, self.id, self.leader_term, req).await?;
+            self.last_ae_send.store(Instant::now());
             let node = self.node.borrow();
             let span = info_span!("whileLoopEnd",
                                   peer_id=?self.id,
@@ -208,6 +217,54 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
 
     }
 
+    /// Creates a loop which sends heartbeats. While `run_replication_loop` can also send
+    /// heartbeats, it can hang when sending large AEs. This ensures heartbeats will still be sent.
+    pub fn spawn_heartbeat_loop(&self, stale_sender: mpsc::Sender<StaleLeader>) -> JoinHandle<()> {
+        let transport = self.transport.clone();
+        let id = self.id.clone();
+        let last_ae_send = self.last_ae_send.clone();
+        let term = self.leader_term;
+        let leader_commit = self.node.borrow().commit_index;
+        let leader_id = self.node.borrow().id;
+        tokio::spawn(async move {
+            let delay = tokio::time::sleep(HEARTBEAT_INTERVAL);
+            tokio::pin!(delay);
+            loop {
+                delay.as_mut().await;
+                // in case the replication task already sent a heartbeat/message before
+                
+                let last_sent = last_ae_send.load();
+                if Instant::now() - last_sent < HEARTBEAT_INTERVAL {
+                    delay.as_mut().reset((last_sent + HEARTBEAT_INTERVAL).into());
+                    continue;
+                }
+                let transport = transport.clone();
+                let res = send_ae(&transport, id, term, AppendEntries {
+                    entries: Vec::new(),
+                    leader_commit,
+                    term,
+                    leader_id,
+                    prev_log_index_term: IndexTerm::no_entry()
+                }).await;
+                let now = Instant::now();
+                last_ae_send.store(now);
+                delay.as_mut().reset((now + HEARTBEAT_INTERVAL).into());
+                match res {
+                    Ok(_) => {},
+                    Err(ReplicationLoopError::PeerError(_e)) => 
+                        error!(trans=true, net_err=true, "Received IO error during heartbeat stream for {}, will try again later: {}",
+                               id, _e),
+                    Err(ReplicationLoopError::StaleLeaderError(stale)) => {
+                        stale_sender.send(stale).unwrap_or_else(|e| {
+                            error!("heartbeat stream couldn't send StaleLeader message {:?}", e)
+                        }).await;
+                        return;
+                    }
+                }
+            }
+        })
+    }
+
     #[instrument(skip(stale_sender))]
     /// To run concurrently as long as the leader is active.
     pub async fn run_replication_loop(mut self, stale_sender: mpsc::Sender<StaleLeader>) {
@@ -216,7 +273,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
             match self.try_replication().await {
                 Ok(_) => {},
                 Err(ReplicationLoopError::PeerError(e)) => {
-                    trace!(net_err=true, "Received IO error during replication stream for {}, will try again later: {}",
+                    error!(trans=true, net_err=true, "Received IO error during replication stream for {}, will try again later: {}",
                            self.id, e);
                 },
                 Err(ReplicationLoopError::StaleLeaderError(stale)) => {
@@ -439,6 +496,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
         let all_other_nodes = node.all_other_nodes().collect::<Vec<_>>();
         drop(node);
 
+
         let replication_streams = all_other_nodes
             .into_iter()
             .map(|id| PeerReplicationStream::new(self.node.clone(), id,
@@ -448,6 +506,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
 
         let ls = task::LocalSet::new();
 
+        for stream in replication_streams.iter() {
+            stream.spawn_heartbeat_loop(stale_sender.clone());
+        }
 
         // A replication loop will only be resolved if we detect we are stale, regardless,
         // We don't care about it much as stale notification leaders are sent via channel

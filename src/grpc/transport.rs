@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tonic::{IntoRequest, Response};
 use tracing_futures::Instrument;
-use std::{convert::{TryInto, TryFrom}, pin::Pin, sync::Arc};
+use std::{convert::{TryInto, TryFrom}, pin::Pin, sync::Arc, unimplemented};
 
 use std::collections::HashMap;
 use serde::Serialize;
@@ -74,41 +74,35 @@ pub struct GRPCTransportInner<V: Value> {
     clients_init: bool
 }
 
-impl <V: Value> GRPCTransportInner<V> {
-    /// Attempts to connect to all raft nodes, returns with an error if any connection fails
-    /// 
-    /// Note that 
-    #[instrument]
-    pub async fn connect_to_nodes(&mut self) -> Result<(), anyhow::Error> {
-        let my_id = self.my_id;
-        for (id, url) in self.config.nodes.clone().into_iter().filter(|(id, _)| Some(*id) != my_id) {
-            let mut attempts = 0;
-            let client = loop {
-                attempts += 1;
-                let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
-                let endpoint2 = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
-                info!("Connecting to {}", url);
-                let res = tokio::try_join!(
-                    RaftClient::connect(endpoint), RaftClient::connect(endpoint2)
-                );
-                match res {
-                    Ok(clients) => break clients,
-                    Err(e) => {
-                        error!("Attempt {}/{} - Couldn't connect to node: {:?}", attempts, MAX_RECONNECTS, e);
-                        if attempts >= MAX_RECONNECTS {
-                            return Err(e.into())
-                        }
-                        tokio::time::sleep(RECONNECT_DELAY).await;
+/// Attempts to connect to all raft nodes(except my own node, in case we are a node), returns with an error if any connection fails
+#[instrument]
+pub async fn connect_to_nodes(my_id: Option<Id>, config: &GRPCConfig) -> Result<HashMap<usize, (Client, Client)>, anyhow::Error> {
+    let mut clients = HashMap::new();
+    for (id, url) in config.nodes.clone().into_iter().filter(|(id, _)| Some(*id) != my_id) {
+        let mut attempts = 0;
+        let client = loop {
+            attempts += 1;
+            let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
+            let endpoint2 = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
+            info!("Connecting to {}", url);
+            let res = tokio::try_join!(
+                RaftClient::connect(endpoint), RaftClient::connect(endpoint2)
+            );
+            match res {
+                Ok(clients) => break clients,
+                Err(e) => {
+                    error!("Attempt {}/{} - Couldn't connect to node: {:?}", attempts, MAX_RECONNECTS, e);
+                    if attempts >= MAX_RECONNECTS {
+                        return Err(e.into())
                     }
-
+                    tokio::time::sleep(RECONNECT_DELAY).await;
                 }
-            };
-            self.clients.insert(id, client);
-        }
-        self.clients_init = true;
-        info!("Connected to all raft nodes successfully");
-        Ok(())
+
+            }
+        };
+        clients.insert(id, client);
     }
+    Ok(clients)
 }
 
 #[derive(Debug, Clone)]
@@ -126,91 +120,115 @@ impl <V: Value> GRPCTransport<V> {
             clients_init: false
         };
         if my_id.is_none() {
-            inner.connect_to_nodes().await?;
+            inner.clients = connect_to_nodes(my_id, &inner.config).await?;
+            inner.clients_init = true;
         }
         Ok(Self {
             inner: Arc::new(RwLock::new(inner))
         })
     }
 
+    /* note, due to https://github.com/rust-lang/rust/issues/57017
+       code will turn to be somewhat ugly 
+    */
+
+    pub async fn connect_to_nodes(&self) {
+        let (my_id, config) = {
+            let inner = self.inner.read();
+            let my_id = inner.my_id;
+            if inner.clients_init {
+                return;
+            }
+            let config = inner.config.clone();
+            (my_id, config)
+        };
+        let clients = connect_to_nodes(my_id, &config).await.unwrap();
+
+        let mut inner = self.inner.write();
+        inner.clients = clients;
+        inner.clients_init = true;
+    }
+
+    /// Performs a request, either using a node communicator(if sending message to ourself)
+    /// or a GRPC client, in which case we can choose to use an alternative client(for hearbeats,
+    /// see below)
+    pub async fn do_request<
+        Req: 'static + Send + Debug + TryInto<GenericMessage, Error=TypeConversionError>, 
+        Res: Debug + TryFrom<GenericMessage, Error=TypeConversionError>,
+        F1: Send + Future<Output = Result<Res, RaftError>>,
+        F2: Send + Future<Output = Result<tonic::Response<GenericMessage>, tonic::Status>>>(&self, 
+            to: Id,
+            msg: Req,
+            desc: &str,
+            comm_handler: impl Fn(Req, NodeCommunicator<V>) -> F1,
+            client_handler: impl Fn(GenericMessage, Client) -> F2,
+            use_alt_client: impl Fn(&Req) -> bool
+        ) -> Result<Res, RaftError> {
+        let use_client = {
+            let inner = self.inner.read();
+            assert!(inner.clients_init, "Node connections must be attached to transport before doing requests");
+            Some(to) == inner.my_id
+        };
+        if use_client {
+            let comm = self.inner.read().my_node.clone().unwrap();
+            comm_handler(msg, comm).await
+        } else {
+            debug!(trans=true, "(req-out) serializing {} to {}: {:?}", desc, to, msg);
+            let use_alt_client = use_alt_client(&msg);
+            let msg: GenericMessage =
+                tokio::task::spawn_blocking(move || msg.try_into().context("While serializing message").map_err(RaftError::InternalError))
+                    .await.unwrap()?;
+            let client = {
+                let inner = self.inner.read();
+                let (client, client_alt) = inner.clients.get(&to).expect("invalid 'to' id");
+                if use_alt_client { client_alt.clone() } else { client.clone() }
+            };
+            debug!(trans=true, "(req-out) sending {} to {} of {} bytes {}", desc, to, msg.buf.len(),
+                 if use_alt_client { "via alt client" } else { "via normal client" }
+            );
+            let res = client_handler(msg, client).await;
+            let res = tonic_to_raft(res, to);
+            debug!(trans=true, "(res-in) response of sending {} to {}: {:?}", desc, to, res);
+            res
+        }
+    }
 }
 
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V: Value> Transport<V> for GRPCTransport<V> {
     async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
-        let inner = self.inner.read();
-        assert!(inner.clients_init, "Not initialized, didn't connect to clients yet");
-        if Some(to) == inner.my_id {
-           return inner.my_node.as_ref().unwrap().append_entries(msg).await;
-        }
-
-        let mut client = inner.clients.get(&to).expect("invalid 'to' id").0.clone();
-
-        /* Sending large messages(many/big log entries) may take a long time, so send heartbeats
-           (which are much smaller) in parallel.
-           These will be sent over a separate connection, to prevent TCP flow control/congestion control
+        /* Sending large messages(many/big log entries) may take a long time, so heartbeats(which are much smaller) are
+           sent in parallel - see leader implementation.
+           
+           We'll send heartbeats over a separate connection(a different GRPC client), to prevent TCP flow control/congestion control
            mechanisms from preventing heartbeats from reaching the target, because otherwise large AE entries
            could hog the entire connection, causing followers to miss the heartbeats and start a new election
         */
-        let mut hb_client = inner.clients.get(&to).expect("invalid 'to' id").1.clone();
-        let heartbeat: AppendEntries<V> = AppendEntries {
-            leader_commit: msg.leader_commit,
-            term: msg.term,
-            entries: Vec::new(),
-            prev_log_index_term: IndexTerm::no_entry(),
-            leader_id: msg.leader_id
-        };
-        let heartbeat_sender = tokio::spawn(async move {
-            let mut i = 0;
-            let mut send_heartbeat = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(HEARTBEAT_INTERVAL))
-                .skip(1); // skip first heartbeat in case the message we're sending arrives in enough time
-            while let Some(_) = send_heartbeat.next().await {
-                let msg: GenericMessage = heartbeat.clone().try_into().context("While serializing AppendEntries").map_err(RaftError::InternalError).unwrap();
-                i += 1;
-                debug!(trans=true, "sending heartbeat {}", i);
-                let res = hb_client.append_entries_rpc(msg).await;
-                let res = tonic_to_raft::<AppendEntriesResponse>(res, to);
-                debug!(trans=true, "heartbeat {} sent, res: {:?}", i, res);
-            }
-        });
-
-        debug!(trans=true, "(req-out) serializing AE to {}: {:?}", to, msg);
-        let msg: GenericMessage =
-            tokio::task::spawn_blocking(move || msg.try_into().context("While serializing AppendEntries").map_err(RaftError::InternalError))
-                .await.unwrap()?;
-        debug!(trans=true, "(req-out) sending AE to {} of {} bytes", to, msg.buf.len());
-        let res = client.append_entries_rpc(msg).await;
-        heartbeat_sender.abort();
-        debug!(trans=true, "(res-in) sent AE to {}", to);
-        let res = tonic_to_raft(res, to);
-        debug!(trans=true, "(res-in) converted tonic to raft {}: {:?}", to, res);
-        res
+        self.do_request(to, msg, "AE",
+        |msg, comm| async move { comm.append_entries(msg).await },
+        |msg, mut client| async move { client.append_entries_rpc(msg).await },
+        |msg| msg.entries.is_empty()
+        ).await
     }
 
     async fn send_request_vote(&self, to: Id, msg: RequestVote) -> Result<RequestVoteResponse, RaftError> {
-        let inner = self.inner.read();
-        assert!(inner.clients_init, "Not initialized, didn't connect to clients yet");
-        if Some(to) == inner.my_id {
-           return inner.my_node.as_ref().unwrap().request_vote(msg).await;
-        }
-
-        let mut client = inner.clients.get(&to).expect("invalid 'to' id").0.clone();
-        debug!(trans=true, "(req-out) sending RV to {}: {:?}", to, msg);
-        let msg: GenericMessage = msg.try_into().context("While serializing RequestVote").map_err(RaftError::InternalError)?;
-        let res = client.vote_request_rpc(msg).await;
-        let res = tonic_to_raft(res, to);
-        debug!(trans=true, "(res-in) sent RV to {}: {:?}", to, res);
-        res
+        self.do_request(to, msg, "RV",
+        |msg, comm| async move { comm.request_vote(msg).await },
+        |msg, mut client| async move { client.vote_request_rpc(msg).await },
+        |_msg| false
+        ).await
     }
 
     #[instrument]
     async fn on_node_communicator_created(&mut self, id: Id, comm: &mut NodeCommunicator<V>) {
 
-        let mut inner = self.inner.write();
-        inner.my_id = Some(id);
-        inner.my_node = Some(comm.clone());
-        let addr = inner.config.nodes.get(&id).unwrap().parse().unwrap();
+        let addr = {
+            let mut inner = self.inner.write();
+            inner.my_id = Some(id);
+            inner.my_node = Some(comm.clone());
+            inner.config.nodes.get(&id).unwrap().parse().unwrap()
+        };
 
         let communicator = comm.clone();
         tokio::spawn(async move {
@@ -225,7 +243,7 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
 
         tokio::time::sleep(STARTUP_TIME).await;
 
-        inner.connect_to_nodes().await.unwrap();
+        self.connect_to_nodes().await;
 
         info!("Setup grpc transport for node {}", id);
     }

@@ -3,6 +3,8 @@ use std::sync::Once;
 use tracing_error::ErrorLayer;
 use tracing_futures::WithSubscriber;
 use tracing_subscriber::layer::SubscriberExt;
+use std::mem::drop;
+
 static LOGGING: Once = Once::new();
 
 pub fn setup_logging() -> Result<(), anyhow::Error> {
@@ -28,4 +30,29 @@ pub fn setup_logging() -> Result<(), anyhow::Error> {
         color_eyre::install().unwrap();
     });
     Ok(())
+}
+
+pub struct TimeOp {
+    start: std::time::Instant,
+    desc: String
+}
+
+impl TimeOp {
+    pub fn new(desc: impl Into<String>) -> Self {
+        TimeOp {
+            start: std::time::Instant::now(),
+            desc: desc.into()
+        }
+    }
+
+    pub fn finish(self) {
+        drop(self)
+    }
+}
+
+impl Drop for TimeOp {
+    fn drop(&mut self) {
+        let delta = std::time::Instant::now() - self.start;
+        warn!(time_trace=true, "{} finished in {} ms", self.desc, delta.as_millis());
+    }
 }

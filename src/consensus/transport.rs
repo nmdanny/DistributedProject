@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// Used for sending and receiving Raft messages
 /// Should be cheap to clone
-#[async_trait(?Send)]
+#[async_trait]
 pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
     async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError>;
 
@@ -35,7 +35,7 @@ pub trait Transport<V : Value> : Debug + Clone + Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct NoopTransport();
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V : Value> Transport<V> for NoopTransport {
     async fn send_append_entries(&self, _: usize, _: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         loop {
@@ -80,7 +80,7 @@ impl <V: Value> ThreadTransport<V> {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V: Value> Transport<V> for ThreadTransport<V> {
     #[instrument]
     async fn send_append_entries(&self, to: usize, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {

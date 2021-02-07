@@ -124,7 +124,7 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
 // Since we assume synchrony, to simulate dropping requests/responses, the `send_` methods will
 // return an error - this is the same as a timeout duration. In fact, I could send this
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V: Value, T: Transport<V>> Transport<V> for AdversaryTransport<V, T> {
     async fn send_append_entries(&self, to: Id, msg: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
         self.adversary_request_response(msg.leader_id, to, async move {
@@ -151,14 +151,13 @@ impl <V: Value, T: Transport<V>> Transport<V> for AdversaryTransport<V, T> {
 
 impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
     async fn adversary_request_response<R>(&self, from: Id, to: Id,
-                                           do_request: impl Future<Output = Result<R, RaftError>>) -> Result<R, RaftError>
+                                           do_request: impl Future<Output = Result<R, RaftError>> + Send) -> Result<R, RaftError>
     {
-        let mut rng = rand::thread_rng();
         let state = self.state.read().await;
         let req_omission = state.omission_chance.get(&from).copied().unwrap_or(0.0);
-        let req_delay =  state.delay_dist.get(&from).map(|dist| dist.sample(&mut rng)).unwrap_or(0);
+        let req_delay =  state.delay_dist.get(&from).map(|dist| dist.sample(&mut rand::thread_rng())).unwrap_or(0);
         let res_omission = state.omission_chance.get(&to).copied().unwrap_or(0.0);
-        let res_delay =  state.delay_dist.get(&to).map(|dist| dist.sample(&mut rng)).unwrap_or(0);
+        let res_delay =  state.delay_dist.get(&to).map(|dist| dist.sample(&mut rand::thread_rng())).unwrap_or(0);
         std::mem::drop(state);
 
 
@@ -167,15 +166,16 @@ impl <V: Value, T: Transport<V>> AdversaryTransport<V, T> {
 
         tokio::time::sleep(Duration::from_millis(req_delay)).await;
 
-        if requester_omission.sample(&mut rng) || responder_omission.sample(&mut rng) {
+        if requester_omission.sample(&mut rand::thread_rng()) || responder_omission.sample(&mut rand::thread_rng()) {
             return Err(RaftError::NetworkError(
                 anyhow::anyhow!("omission of request from peer {} to peer {}", from, to)));
         }
+
         let res = do_request.await;
 
         tokio::time::sleep(Duration::from_millis(res_delay)).await;
 
-        if responder_omission.sample(&mut rng) || responder_omission.sample(&mut rng) {
+        if responder_omission.sample(&mut rand::thread_rng()) || responder_omission.sample(&mut rand::thread_rng()) {
             return Err(RaftError::NetworkError(
                 anyhow::anyhow!("omission of response from peer {} to peer {}", to, from)));
         }
