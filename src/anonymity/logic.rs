@@ -48,23 +48,6 @@ pub struct Config {
 
 type ClientId = String;
 
-/// Maps each server ID to the set of clients who sent him shares
-/// This is maintained by each node during the share phase
-type ContactGraph = Vec<HashSet<ClientId>>;
-
-fn create_contact_graph(num_nodes: usize) -> ContactGraph {
-    (0 .. num_nodes).into_iter().map(|_| HashSet::new()).collect()
-}
-
-/// Given names of live clients, that is, clients that didn't crash after sending all their shares, 
-/// and a contact graph, finds the maximal set of servers who contacted all said clients.
-fn find_reconstruction_group(live_clients: &HashSet<ClientId>, contact_graph: &ContactGraph) -> HashSet<Id> {
-    return (0 .. contact_graph.len()).zip(contact_graph).filter_map(|(node_id, contacted_clients)| {
-        if live_clients.is_subset(contacted_clients) { Some(node_id) } else { None }
-    }).collect()
-}
-
-
 /// Given a list of clients who are 'live', that is, didn't crash before sending all their shares,
 /// and all of the node's shares, sums shares from those channels
 fn mix_shares_from(my_id: Id, live_clients: &HashSet<ClientId>, shares_view: &Vec<Vec<(Share, ClientId)>>) -> Option<Vec<ShareBytes>> {
@@ -106,10 +89,6 @@ pub enum Phase {
     ClientSharing {
         last_share_at: time::Instant,
 
-        #[derivative(Debug="ignore")]
-        /// Synchronized among all nodes, identifies which servers got shares from which clients
-        contact_graph: ContactGraph,
-
         /// Synchronized among all nodes, identifies clients that didn't crash after sending all their shares
         live_clients: HashSet<ClientId>,
 
@@ -146,12 +125,6 @@ pub enum AnonymityMessage<V: Value> {
     /// This is necessary to know which client shares to mix before proceeding to reconstruct.
     /// This message is synchronized
     ClientNotifyLive {
-        client_name: ClientId,
-        round: usize
-    },
-    /// Sent whenever a server obtains a share, used to update 
-    ServerNotifyGotShare {
-        node_id: Id,
         client_name: ClientId,
         round: usize
     },
@@ -329,7 +302,6 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         let state = Phase::ClientSharing {
             last_share_at: Instant::now(),
             live_clients: HashSet::new(),
-            contact_graph: create_contact_graph(config.num_nodes),
             shares: vec![Vec::new(); config.num_channels]
         };
         let (nr_tx, _nr_rx) = broadcast::channel(NEW_ROUND_CHAN_SIZE);
@@ -360,8 +332,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         }
         match &mut self.state {
             Phase::Reconstructing { .. } => trace!("Got client share too late (while in reconstruct phase)"),
-            Phase::ClientSharing { last_share_at, shares, 
-                                   contact_graph, .. } => {
+            Phase::ClientSharing { last_share_at, shares, .. } => {
                 assert_eq!(shares.len(), batch.len() , "client batch size mismatch with expected channels");
                 let batch = batch.into_iter().map(|s| s.to_share()).collect::<Vec<_>>();
                 assert!(shares.iter().map(|chan| chan.len()).sum::<usize>() <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
@@ -375,19 +346,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 }
 
                 *last_share_at = Instant::now();
-                contact_graph[self.id].insert(client_name);
             }
-        }
-    }
-
-    pub fn handle_got_share_notification(&mut self, node_id: Id, client_name: &str, round: usize) {
-        if round != self.round {
-            return
-        }
-        if let Phase::ClientSharing {contact_graph, .. } = &mut self.state {
-            contact_graph[node_id].insert(client_name.to_owned());
-        } else {
-            error!("Got share notification too late");
         }
     }
 
@@ -514,11 +473,9 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 error!("Begin client sharing while already sharing");
             }
             Phase::Reconstructing { .. } => {
-                let num_nodes = self.config.num_nodes;
                 self.state = Phase::ClientSharing { 
                     last_share_at: Instant::now(), 
                     live_clients: HashSet::new(), 
-                    contact_graph: create_contact_graph(num_nodes),
                     shares: vec![Vec::new(); self.config.num_channels] 
                 };
                 self.round = round;
@@ -600,7 +557,6 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
             AnonymityMessage::ClientShare { channel_shares, client_name, round} => { self.handle_client_share(client_name.to_owned(), channel_shares.as_slice(), *round) },
             AnonymityMessage::ClientNotifyLive { client_name, round} => { self.handle_client_live_notification(client_name.to_owned(), *round) }
             AnonymityMessage::ServerReconstructShare { channel_shares, node_id, round} => {  self.on_receive_reconstruct_share(channel_shares.as_slice(), *node_id, *round) }
-            AnonymityMessage::ServerNotifyGotShare { node_id, client_name, round } => { self.handle_got_share_notification(*node_id, client_name, *round) }
             AnonymityMessage::ReconstructResult { results, round } => { self.handle_reconstruct_result(&results, *round) }
             AnonymityMessage::ServerBeginReconstruct { initiator, round } => { self.begin_reconstructing(*initiator, *round) }
         }
