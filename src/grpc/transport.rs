@@ -254,62 +254,42 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
 }
 
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
     #[instrument]
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError> {
-        let inner = self.inner.read();
-        let value = ClientWriteRequest { value };
-        trace!("submit_value, node_id: {}", node_id);
-
-        if Some(node_id) == inner.my_id {
-            return inner.my_node.as_ref().unwrap().submit_value(value).await;
-        }
-
-        let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").0.clone();
-        let msg: GenericMessage = value.try_into().context("While serializing ClientWriteRequest").map_err(RaftError::InternalError)?;
-        let res = client.client_write_request(msg).await;
-        tonic_to_raft(res, node_id)
+        let msg = ClientWriteRequest { value };
+        self.do_request(node_id, msg, "SubmitValue",
+        |msg, comm| async move { comm.submit_value(msg).await },
+        |msg, mut client| async move { client.client_write_request(msg).await },
+        |_msg| false
+        ).await
     }
 
     #[instrument]
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError> {
-        let inner = self.inner.read();
-        let value = ClientReadRequest { from, to };
-        trace!("request_values, node_id: {}", node_id);
-
-        if Some(node_id) == inner.my_id {
-            return inner.my_node.as_ref().unwrap().request_values(value).await;
-        }
-
-        let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").0.clone();
-        let msg: GenericMessage = value.try_into().context("While serializing ClientReadRequest").map_err(RaftError::InternalError)?;
-        let res = client.client_read_request(msg).await;
-        tonic_to_raft(res, node_id)
+        let msg = ClientReadRequest { from, to };
+        self.do_request(node_id, msg, "ClientReadRequest",
+        |msg, comm| async move { comm.request_values(msg).await },
+        |msg, mut client| async move { client.client_read_request(msg).await },
+        |_msg| false
+        ).await
     }
 
     #[instrument]
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError> {
-        let inner = self.inner.read();
-        let value = ClientForceApplyRequest { value };
-        trace!("force_apply, node_id: {}", node_id);
-
-        if Some(node_id) == inner.my_id {
-            return inner.my_node.as_ref().unwrap().force_apply(value).await;
-        }
-
-        let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").0.clone();
-        let msg: GenericMessage = value.try_into().context("While serializing ClientForceApplyRequest").map_err(RaftError::InternalError)?;
-        let res = client.client_force_apply_request(msg).await;
-        tonic_to_raft(res, node_id)
+        let msg  = ClientForceApplyRequest { value };
+        self.do_request(node_id, msg, "ClientForceApplyRequest",
+        |msg, comm| async move { comm.force_apply(msg).await },
+        |msg, mut client| async move { client.client_force_apply_request(msg).await },
+        |_msg| false
+        ).await
     }
 
     #[instrument]
     async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
-        let inner = self.inner.read();
         trace!("get_sm_event_stream, node_id: {}", node_id);
-
-        let mut client = inner.clients.get(&node_id).expect("invalid 'node_id'").0.clone();
+        let mut client = self.inner.read().clients.get(&node_id).expect("invalid 'node_id'").0.clone();
         let stream = client.state_machine_updates(tonic::Request::new(GenericMessage {
             buf: Vec::new()
         })).await;

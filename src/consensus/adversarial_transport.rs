@@ -243,21 +243,19 @@ impl <V: Value, T: ClientTransport<V>> AdversaryClientTransport<V, T> {
 async fn adversary_request_response<R>(req_omission_chance: f64,
                                        res_omission_chance: f64,
                                        to: Id,
-                                       do_request: impl Future<Output = Result<R, RaftError>>) -> Result<R, RaftError>
+                                       do_request: impl Send + Future<Output = Result<R, RaftError>>)
+    -> Result<R, RaftError>
 {
-    let mut rng = rand::thread_rng();
-
     let req_ber =  Bernoulli::new(req_omission_chance).expect("Invalid omission chance");
     let res_ber =  Bernoulli::new(res_omission_chance).expect("Invalid omission chance");
 
-
-    if req_ber.sample(&mut rng) {
+    if req_ber.sample(&mut rand::thread_rng()) {
         return Err(anyhow::anyhow!("omission of client request to node {}", to))
-            .map_err(RaftError::NetworkError)
+            .map_err(RaftError::NetworkError);
     }
     let res = do_request.await;
 
-    if res_ber.sample(&mut rng) {
+    if res_ber.sample(&mut rand::thread_rng()) {
         return Err(anyhow::anyhow!("omission of node {} response to client", to))
             .map_err(RaftError::NetworkError);
     }
@@ -265,7 +263,7 @@ async fn adversary_request_response<R>(req_omission_chance: f64,
     res
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTransport<V, T> {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>, RaftError> {
         let (req_chance, res_chance) = self.get_req_and_res_omission_chance(node_id);

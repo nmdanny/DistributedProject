@@ -16,8 +16,8 @@ use std::{pin::Pin, rc::Rc};
 use std::sync::Arc;
 
 /// Responsible for communicating between a client and a `NodeCommunicator`
-#[async_trait(?Send)]
-pub trait ClientTransport<V: Value> : 'static + Clone + Send {
+#[async_trait]
+pub trait ClientTransport<V: Value> : 'static + Clone + Send + Sync {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError>;
 
     async fn request_values(&self, node_id: usize, from: Option<usize>, to: Option<usize>) -> Result<ClientReadResponse<V>, RaftError>;
@@ -43,7 +43,7 @@ impl <V: Value> SingleProcessClientTransport<V> {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
     async fn submit_value(&self, node_id: usize, value: V) -> Result<ClientWriteResponse<V>,RaftError> {
         let fut = self.communicators.get(node_id).expect("Invalid node ID").submit_value(ClientWriteRequest {
