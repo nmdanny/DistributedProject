@@ -5,7 +5,7 @@ use crate::consensus::client::{Client, ClientTransport};
 use crate::anonymity::secret_sharing::*;
 use serde::{Serialize, Deserialize};
 use time::Instant;
-use std::{boxed::Box, convert::TryInto};
+use std::{boxed::Box, collections::BTreeMap, convert::TryInto};
 use std::hash::Hash;
 use std::rc::Rc;
 use std::time;
@@ -107,7 +107,16 @@ pub enum Phase {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReconstructError {
-    Collision, NoValue, Timeout
+    Collision
+}
+
+/// Results of reconstruct phase
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReconstructionResults<V> {
+    TimedOut,
+    Some {
+        chan_to_val: BTreeMap<usize, Result<V, ReconstructError>>
+    }
 }
 
 #[derive(Derivative, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,10 +148,9 @@ pub enum AnonymityMessage<V: Value> {
         round: usize
     },
     ReconstructResult {
-        /// Maps each channel to the client's secret, or None upon collision
         #[serde(bound = "V: Value")]
         #[derivative(Debug="ignore")]
-        results: Vec<Result<V, ReconstructError>>,
+        results: ReconstructionResults<V>,
         round: usize
     }
 }
@@ -394,24 +402,24 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
             // try decoding all channels once we passed the threshold
             if shares[0].len() >= self.config.threshold {
-                let mut results = Vec::new();
+                let mut results = BTreeMap::new();
                 for (channel_num, channel) in (0..).zip(shares) {
-                    let result = match decode_secret::<V>(reconstruct_secret(&channel[ .. self.config.threshold],
+                    match decode_secret::<V>(reconstruct_secret(&channel[ .. self.config.threshold],
                                                                              self.config.threshold as u64)) {
-                        Ok(None) => { 
-                            Err(ReconstructError::NoValue)
-                        },
+                        Ok(None) => {},
                         Ok(Some(decoded)) => {
-                            Ok(decoded)
-                        }
+                            results.insert(channel_num, Ok(decoded));
+                        },
                         Err(e) => { 
                             error!("Error while decoding channel {}: {:?}", channel_num, e);
-                            Err(ReconstructError::Collision)
+                            results.insert(channel_num, Err(ReconstructError::Collision));
                         }
                     };
-                    results.push(result);
                 }
-                self.submit_message(AnonymityMessage::ReconstructResult { results, round: self.round });
+                self.submit_message(AnonymityMessage::ReconstructResult { 
+                    results: ReconstructionResults::Some { chan_to_val: results },
+                    round: self.round 
+                });
             }
         }
     }
@@ -484,35 +492,38 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
     }
 
     #[instrument(skip(self))]
-    pub fn handle_reconstruct_result(&mut self, results: &[Result<V, ReconstructError>], round: usize) {
+    pub fn handle_reconstruct_result(&mut self, results: &ReconstructionResults<V>, round: usize) {
         // TODO how to handle this? how is this even possible
         assert!(round <= self.round, "got reconstruct message from the future");
         if round < self.round {
             return
         }
-        for (chan, result) in (0..).zip(results) {
-            match result {
-                Ok(val) => {
-                    trace!(round=?self.round, "Node committed value {:?} via channel {} into index {}", val, chan, self.committed_messages.len());
-                    self.committed_messages.push(val.clone());
-                    self.metrics.report_decode_result(self.round, chan, false);
-                },
-                Err(ReconstructError::Collision) => {
-                    trace!("Node detected collision at channel {}", chan);
-                    self.metrics.report_decode_result(self.round, chan, true);
-                },
-                Err(ReconstructError::NoValue) => {}
-                Err(ReconstructError::Timeout) => {
-                    trace!("Saw that reconstruct for round {} has timed out, not enough valid servers", round);
-                    break;
+        match results {
+            ReconstructionResults::TimedOut => {
+                trace!("Saw that reconstruct for round {} has timed out, not enough valid servers", round);
+            }
+            ReconstructionResults::Some { chan_to_val } => {
+                for (&chan, res) in chan_to_val {
+                    match res {
+                        Ok(val) => {
+                            trace!(round=?self.round, "Node committed value {:?} via channel {} into index {}", val, chan, self.committed_messages.len());
+                            self.committed_messages.push(val.clone());
+                            self.metrics.report_decode_result(self.round, chan, false);
+                        }
+                        Err(_) => {
+                            trace!("Node detected collision at channel {}", chan);
+                            self.metrics.report_decode_result(self.round, chan, true);
+                        }
+                    }
                 }
             }
         }
+        let new_round = self.round + 1;
         self.begin_client_sharing(self.round + 1);
         
         self.new_round_sender.send(NewRound {
-            round: self.round,
-            last_reconstruct_results: Some(results.iter().cloned().collect())
+            round: new_round,
+            last_reconstruct_results: results.clone()
         }).unwrap_or_else(|_e| {
             error!("No one to notify of new round");
             0
@@ -534,20 +545,14 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
     }
 }
 
+/// Pushed to clients every round, indicating a new round as well
+/// as containing the results of the previous round(unless this is
+/// the first round)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(bound = "V: Value")]
 pub struct NewRound<V: Value> {
     pub round: usize,
-    pub last_reconstruct_results: Option<Vec<Result<V, ReconstructError>>>
-}
-
-impl <V: Value> NewRound<V> {
-    fn new(round: usize) -> Self {
-        NewRound {
-            round,
-            last_reconstruct_results: None
-        }
-    }
+    pub last_reconstruct_results: ReconstructionResults<V>
 }
 
 #[async_trait]
@@ -589,10 +594,9 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
                 if (now - *last_share_at) > self.config.phase_length {
                     trace!("Reconstructing time out at round {}", self.round);
 
-                    let results = vec![Err(ReconstructError::Timeout); self.config.num_channels];
                     let msg = AnonymityMessage::ReconstructResult {
                         round: self.round,
-                        results
+                        results: ReconstructionResults::TimedOut
                     };
                     self.submit_message(msg);
                 }
