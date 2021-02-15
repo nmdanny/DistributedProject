@@ -95,7 +95,13 @@ impl <V: Value> NodeCommunicator<V> {
             while let Ok(sm_bytes) = rec.recv().await {
                 let event = serde_json::from_slice::<E>(&sm_bytes);
                 match event {
-                    Ok(event) => { tx.send(event).unwrap() }
+                    Ok(event) => { 
+                        let res = tx.send(event);
+                        if let Err(_) = res {
+                            error!("SM output receiver was dropped");
+                            return;
+                        }
+                    }
                     Err(err) => {
                         panic!("Couldn't deserialize JSON: {:?}\n", err);
                     }
@@ -111,7 +117,11 @@ impl <V: Value> NodeCommunicator<V> {
         let mut rec = self.sm_event_sender.subscribe();
         tokio::spawn(async move {
             while let Ok(sm_bytes) = rec.recv().await {
-                tx.send(sm_bytes).unwrap();
+                let res = tx.send(sm_bytes);
+                if let Err(_) = res {
+                    error!("Raw SM output receiver was dropped");
+                    return;
+                }
             }
         });
         rx

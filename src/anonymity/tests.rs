@@ -209,8 +209,8 @@ async fn simple_scenario() {
 
         }).await;
 
-        let mut client_a = scenario.clients.pop().unwrap();
-        let mut client_b = scenario.clients.pop().unwrap();
+        let client_a = scenario.clients.pop().unwrap();
+        let client_b = scenario.clients.pop().unwrap();
 
         let handle_a = task::spawn_local(async move {
             let _res = client_a.send_anonymously(1337u64).await.unwrap();
@@ -244,7 +244,7 @@ async fn many_rounds() {
         }).await;
 
 
-        let handles = (0..).zip(scenario.clients.drain(..)).map(|(num, mut client)| {
+        let handles = (0..).zip(scenario.clients.drain(..)).map(|(num, client)| {
             task::spawn_local(async move {
                 let mut sends = 0;
                 loop {
@@ -252,7 +252,7 @@ async fn many_rounds() {
                     match res {
                         Ok(CommitResult { round, channel}) => { 
                             println!("CL{}|V={}  was committed via channel {} at round {}", num, sends, channel, round)}
-                        Err(e) => { panic!("Client {} failed to send shares: {}", client.client_name, e) }
+                        Err(e) => { panic!("Client {} failed to send shares: {}", client.client_name(), e) }
                     }
                     sends += 1;
                     if sends == VALS_TO_COMMIT {
@@ -287,8 +287,8 @@ async fn client_crash_only() {
 
         }).await;
 
-        let mut client_b = scenario.clients.pop().unwrap();
-        let mut client_a = scenario.clients.pop().unwrap();
+        let client_b = scenario.clients.pop().unwrap();
+        let client_a = scenario.clients.pop().unwrap();
 
         let a_transport = Rc::new(scenario.client_transports[0].clone());
 
@@ -343,8 +343,8 @@ async fn client_crash_server_drop() {
 
         }).await;
 
-        let mut client_b = scenario.clients.pop().unwrap();
-        let mut client_a = scenario.clients.pop().unwrap();
+        let client_b = scenario.clients.pop().unwrap();
+        let client_a = scenario.clients.pop().unwrap();
 
         let a_transport = Rc::new(scenario.client_transports[0].clone());
 
@@ -403,8 +403,8 @@ async fn client_crash_server_crash() {
 
         }).await;
 
-        let mut client_b = scenario.clients.pop().unwrap();
-        let mut client_a = scenario.clients.pop().unwrap();
+        let client_b = scenario.clients.pop().unwrap();
+        let client_a = scenario.clients.pop().unwrap();
 
         let a_transport = Rc::new(scenario.client_transports[0].clone());
 

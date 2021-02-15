@@ -3,10 +3,10 @@ use crate::anonymity::logic::*;
 use crate::anonymity::callbacks::*;
 use crate::consensus::client::{ClientTransport, Client};
 use crate::consensus::types::*;
-use std::{hash::Hash, pin::Pin, rc::Rc};
+use std::{cell::RefCell, hash::Hash, pin::Pin, rc::Rc};
 use std::collections::{VecDeque, HashMap};
-use futures::{Stream, StreamExt};
-use tokio::sync::{watch, mpsc, oneshot};
+use futures::{Future, Stream, StreamExt, channel::mpsc::Receiver};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use rand::distributions::{Distribution, Uniform};
 use tokio_stream::StreamMap;
@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 /// Combines NewRound streams(ideally from at least a majority of the servers) onto a single stream, allowing to handle events
 /// from many servers in case some are faulty
-pub fn combined_subscriber<V: Value>(receivers: impl Iterator<Item = Pin<Box<dyn Stream<Item = NewRound<V>>>>>) 
-    -> Pin<Box<dyn Stream<Item = NewRound<V>>>> {
+pub fn combined_subscriber<V: Value>(receivers: impl Iterator<Item = Pin<Box<dyn Send + Stream<Item = NewRound<V>>>>>) 
+    -> Pin<Box<dyn Send + Stream<Item = NewRound<V>>>> {
 
     let mut stream_map = StreamMap::new();
 
@@ -53,9 +53,6 @@ struct AnonymousClientInner<V: Value + Hash, CT: ClientTransport<AnonymityMessag
     #[derivative(Debug="ignore")]
     config: Arc<Config>,
 
-    #[derivative(Debug="ignore")]
-    phantom: std::marker::PhantomData<V>,
-
     pub client_name: String
 
 }
@@ -69,10 +66,17 @@ pub struct AnonymousClient<V: Value + Hash> {
     #[derivative(Debug="ignore")]
     send_anonym_queue: mpsc::UnboundedSender<(V, CommitResolver)>,
 
-    pub client_name: String,
+    client_name: String,
+
+    receiver: RefCell<Option<mpsc::UnboundedReceiver<NewRound<V>>>>,
+
+    config: Arc<Config>
+
 
 }
 
+impl <V: Value + Hash> AnonymousClient<V> {
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommitResult { 
@@ -118,16 +122,17 @@ fn was_value_committed<V: Value + PartialEq>(new_round: &NewRound<V>, last_sent:
 impl <V: Value + Hash> AnonymousClient<V> {
     pub fn new<CT: ClientTransport<AnonymityMessage<V>>>(client_transport: CT, 
         config: Arc<Config>, client_name: String,
-        mut event_recv: Pin<Box<dyn Stream<Item = NewRound<V>>>>) -> Self 
+        mut event_recv: Pin<Box<dyn Send + Stream<Item = NewRound<V>>>>) -> Self 
     {
-        let mut client = AnonymousClientInner::new(client_transport, config, client_name.clone());
+        let mut client = AnonymousClientInner::new(client_transport, config.clone(), client_name.clone());
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
+        let (v_sender, v_recv) = mpsc::unbounded_channel();
 
         let orig_tx = tx.clone();
 
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // contains values in the order they were 
             let mut uncommited_queue = VecDeque::<ToBeCommitted<V>>::new();
             let mut round = 0usize;
@@ -181,10 +186,15 @@ impl <V: Value + Hash> AnonymousClient<V> {
                            let (channel, round) = tbc.channel_and_round.unwrap();
                            info!("My value {:?} was committed at channel {} and round {}", tbc.value, channel, round);
                            tbc.resolver.send(CommitResult { round, channel}).unwrap();
-                       }
+                       } 
 
 
                        round = new_round.round;
+
+                        v_sender.send(new_round).unwrap_or_else(|_e| 
+                            error!("Receiver of NewRound channel has been dropped")
+                        );
+
                        // try sending an uncommitted value
                        notify.send(()).unwrap();
                    }
@@ -195,18 +205,36 @@ impl <V: Value + Hash> AnonymousClient<V> {
         AnonymousClient {
             handle,
             send_anonym_queue: orig_tx,
-            client_name
+            client_name,
+            receiver: RefCell::new(Some(v_recv)),
+            config
         }
 
     }
 
 
     #[instrument]
-    pub async fn send_anonymously(&mut self, value: V) -> Result<CommitResult, anyhow::Error> {
+    pub fn send_anonymously(&self, value: V) -> impl Future<Output = Result<CommitResult, anyhow::Error>> {
         let (tx, rx) = oneshot::channel();
-        self.send_anonym_queue.send((value, tx))?;
-        let res = rx.await.unwrap();
-        Ok(res)
+        self.send_anonym_queue.send((value, tx)).expect("AnonymousClient send receiver dropped early");
+        async move {
+            let res = rx.await.expect("AnonymousClient resolver dropped");
+            Ok(res)
+        }
+    }
+
+    /// Can be used to be notified of new rounds(& reconstructed values) seen by the client.
+    /// Should only be called once
+    pub fn event_stream(&self) -> Option<impl Stream<Item = NewRound<V>> + 'static> {
+        self.receiver.borrow_mut().take().map(tokio_stream::wrappers::UnboundedReceiverStream::new)
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn client_name(&self) -> &str {
+        &self.client_name
     }
 }
 
@@ -216,7 +244,6 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             mut_client: Client::new(client_name.clone(), client_transport.clone(), config.num_nodes),
             client: Arc::new(Client::new(client_name.clone(), client_transport, config.num_nodes)),
             config,
-            phantom: Default::default(),
             client_name
         }
     }
@@ -264,29 +291,24 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
         });
 
         info!("Client {} beginning to send shares for round {} via channel {}", self.client_name, round, val_channel);
-        let ls = tokio::task::LocalSet::new();
-        let succ_nodes = ls.run_until(async move {
-            let mut handles = batch_futs.into_iter().map(|f| tokio::task::spawn_local(f)).collect::<Vec<_>>();
-            let mut succ_nodes = Vec::new();
-            while !handles.is_empty() {
-                match futures::future::select_all(handles).await {
-                    (Ok((Err(e), node_id)), _index, remaining) => {
-                        trace!("Got an error while sending shares to servers {}: {:?}", node_id, e);
-                        handles = remaining;
-                    },
-                    (Err(e), _index, remaining) => {
-                        error!("Got an error while joining send-share task: {:?}", e);
-                        handles = remaining;
-                    },
-                    (Ok((Ok(_res), node_id)), _index, remaining) => {
-                        succ_nodes.push(node_id);
-                        handles = remaining;
-                    }
+        let mut handles = batch_futs.into_iter().map(|f| tokio::task::spawn(f)).collect::<Vec<_>>();
+        let mut succ_nodes = Vec::new();
+        while !handles.is_empty() {
+            match futures::future::select_all(handles).await {
+                (Ok((Err(e), node_id)), _index, remaining) => {
+                    trace!("Got an error while sending shares to servers {}: {:?}", node_id, e);
+                    handles = remaining;
+                },
+                (Err(e), _index, remaining) => {
+                    error!("Got an error while joining send-share task: {:?}", e);
+                    handles = remaining;
+                },
+                (Ok((Ok(_res), node_id)), _index, remaining) => {
+                    succ_nodes.push(node_id);
+                    handles = remaining;
                 }
             }
-            return succ_nodes;
-        }).await;
-
+        }
 
         on_anonym_client_send(&self.client_name, round, None);
         info!("Node {} submitting liveness for round {}", self.client_name, round);

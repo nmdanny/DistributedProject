@@ -39,7 +39,9 @@ derivative = "2.1.1"
 curve25519-dalek = "3"
 lazy_static = "1.4.0"
 chrono = "0.4"
-iced = { version = "0.2", features = ["tokio"] }
+iced = { git = "https://github.com/hecrj/iced", rev = "9f5c2eb0c43daa61b19769322cf3692b29e0ac0f", features = ["tokio"] }
+iced_futures = { git = "https://github.com/hecrj/iced", rev = "9f5c2eb0c43daa61b19769322cf3692b29e0ac0f", features = ["tokio"] }
+# iced_futures = { version = "0.2"}
 
 # grpc
 tonic = { version = "0.4", features = ["default", "tls"] }
@@ -65,3 +67,6 @@ tokio-test = "0.4.0"
 
 [build-dependencies]
 tonic-build = "0.4"
+
+
+ [profile.release] 

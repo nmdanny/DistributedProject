@@ -196,8 +196,8 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     self.set_leader(None);
                 }
             }
-            time::sleep(Duration::from_millis(self.retry_delay_ms.sample(
-                &mut rand::thread_rng()))).await;
+            let delay_ms = self.retry_delay_ms.sample(&mut rand::thread_rng());
+            time::sleep(Duration::from_millis(delay_ms)).await;
             attempt += 1;
         }
         Err(anyhow::anyhow!("Couldn't ensure value is not committed after maximal number of retries"))
@@ -241,8 +241,8 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     self.set_leader(None);
                 }
             }
-            time::sleep(Duration::from_millis(self.retry_delay_ms.sample(
-                &mut rand::thread_rng()))).await;
+            let delay_ms = self.retry_delay_ms.sample(&mut rand::thread_rng());
+            time::sleep(Duration::from_millis(delay_ms)).await;
             attempt += 1;
         }
         Err(anyhow::anyhow!("Couldn't submit value after maximal number of retries"))
@@ -264,8 +264,8 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     return Ok(res.result)
                 }
             }
-            time::sleep(Duration::from_millis(self.retry_delay_ms.sample(
-                &mut rand::thread_rng()))).await;
+            let retry_duration = self.retry_delay_ms.sample(&mut rand::thread_rng());
+            time::sleep(Duration::from_millis(retry_duration)).await;
             attempt += 1;
         }
         Err(anyhow::anyhow!("Couldn't apply value after maximal number of retries"))
