@@ -21,6 +21,8 @@ use std::collections::btree_map::Entry;
 use std::cell::{RefCell, Cell};
 use std::rc::Rc;
 
+use super::client::EventStream;
+
 #[derive(Debug, Clone)]
 pub struct AdversaryState {
     /// Maps nodes to a number in [0,1] indicating the probability of a message(request/response)
@@ -293,7 +295,7 @@ impl <V: Value, T: ClientTransport<V>> ClientTransport<V> for AdversaryClientTra
     }
 
 
-    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
+    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<EventStream<EventType>, RaftError> {
         let (_, res_chance) = self.get_req_and_res_omission_chance(node_id);
         let res_ber =  Bernoulli::new(res_chance).expect("Invalid omission chance");
         let stream = self.transport.get_sm_event_stream(node_id).await?;

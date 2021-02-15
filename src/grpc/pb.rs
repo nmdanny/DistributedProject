@@ -12,6 +12,7 @@ mod inner {
 }
 
 use crate::consensus::types::*;
+use crate::consensus::client::EventStream;
 
 pub use inner::*;
 
@@ -100,7 +101,7 @@ pub fn tonic_to_raft<T: TryFrom<inner::GenericMessage, Error = TypeConversionErr
 
 
 pub fn tonic_stream_to_raft<EventType: Value>(tonic_result: Result<tonic::Response<tonic::Streaming<inner::GenericMessage>>, tonic::Status>) 
-    -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
+    -> Result<EventStream<EventType>, RaftError> {
     match tonic_result {
         Ok(res) => {
             Ok(Box::pin(res.into_inner().filter_map(|res| {

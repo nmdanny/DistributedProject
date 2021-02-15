@@ -1,4 +1,4 @@
-use crate::consensus::{client::ClientTransport, types::*};
+use crate::consensus::{client::{ClientTransport, EventStream}, types::*};
 use crate::consensus::transport::Transport;
 use crate::consensus::node_communicator::NodeCommunicator;
 use crate::consensus::timing::HEARTBEAT_INTERVAL;
@@ -287,7 +287,7 @@ impl <V: Value> ClientTransport<V> for GRPCTransport<V> {
     }
 
     #[instrument]
-    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
+    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<EventStream<EventType>, RaftError> {
         trace!("get_sm_event_stream, node_id: {}", node_id);
         let mut client = self.inner.read().clients.get(&node_id).expect("invalid 'node_id'").0.clone();
         let stream = client.state_machine_updates(tonic::Request::new(GenericMessage {

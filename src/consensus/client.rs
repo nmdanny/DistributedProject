@@ -15,6 +15,8 @@ use futures::{Stream, TryFutureExt};
 use std::{pin::Pin, rc::Rc};
 use std::sync::Arc;
 
+pub type EventStream<EventType> = Pin<Box<dyn Send + Stream<Item = EventType>>>;
+
 /// Responsible for communicating between a client and a `NodeCommunicator`
 #[async_trait]
 pub trait ClientTransport<V: Value> : 'static + Clone + Send + Sync {
@@ -24,7 +26,7 @@ pub trait ClientTransport<V: Value> : 'static + Clone + Send + Sync {
 
     async fn force_apply(&self, node_id: usize, value: V) -> Result<ClientForceApplyResponse<V>, RaftError>;
 
-    async fn get_sm_event_stream<EventType: Value>(&self, _node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError>;
+    async fn get_sm_event_stream<EventType: Value>(&self, _node_id: usize) -> Result<EventStream<EventType>, RaftError>;
 }
 
 #[derive(Clone)]
@@ -73,7 +75,7 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
         )).await?
     }
 
-    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<Pin<Box<dyn Stream<Item = EventType>>>, RaftError> {
+    async fn get_sm_event_stream<EventType: Value>(&self, node_id: usize) -> Result<EventStream<EventType>, RaftError> {
         let event_rec = self.communicators.get(node_id).expect("Invlid node ID").state_machine_output_channel::<EventType>();
         let event_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rec);
         Ok(Box::pin(event_stream))
