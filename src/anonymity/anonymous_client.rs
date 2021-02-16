@@ -1,4 +1,4 @@
-use crate::anonymity::secret_sharing::*;
+use crate::{anonymity::secret_sharing::*, consensus::client::EventStream};
 use crate::anonymity::logic::*;
 use crate::anonymity::callbacks::*;
 use crate::consensus::client::{ClientTransport, Client};
@@ -78,13 +78,13 @@ pub struct AnonymousClient<V: Value + Hash> {
 impl <V: Value + Hash> AnonymousClient<V> {
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct CommitResult { 
     pub round: usize,
     pub channel: usize
 }
 
-type CommitResolver = oneshot::Sender<CommitResult>;
+type CommitResolver = oneshot::Sender<Result<CommitResult, anyhow::Error>>;
 
 /// Contains a value sent/enqueued by the client but not yet committed
 #[derive(Derivative)]
@@ -158,12 +158,18 @@ impl <V: Value + Hash> AnonymousClient<V> {
                            if sent_for_round < round as i64 {
                                 sent_for_round = round as i64;
                                 info!("Found that its time to submit my value {:?}, at round {}", tbc, round);
-                                if let Ok((sec_channel, succ_nodes)) = client.send_anonymously(tbc.value.clone(), round).await {
+                                let send_res = client.send_anonymously(tbc.value.clone(), round).await;
+                                match send_res {
+                                    Ok((sec_channel, succ_nodes)) => {
                                         tbc.channel_and_round = Some((sec_channel, round));
                                         let succ_count = succ_nodes.len();
                                         info!("Sent {:?} for round {} via channel {} to {} nodes: {:?}", tbc.value, round, sec_channel, succ_count, succ_nodes);
-                                } else {
-                                    error!("Client Couldn't send {:?}", tbc.value);
+                                    },
+                                    Err(e) => {
+                                        error!("Client Couldn't send {:?} due to error {:?}", tbc.value, e);
+                                        let tbc = uncommited_queue.pop_front().unwrap();
+                                        tbc.resolver.send(Err(e)).unwrap();
+                                    }
                                 }
                            }
                        } else {
@@ -185,7 +191,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
                            let tbc = uncommited_queue.pop_front().unwrap();
                            let (channel, round) = tbc.channel_and_round.unwrap();
                            info!("My value {:?} was committed at channel {} and round {}", tbc.value, channel, round);
-                           tbc.resolver.send(CommitResult { round, channel}).unwrap();
+                           tbc.resolver.send(Ok(CommitResult { round, channel})).unwrap();
                        } 
 
 
@@ -218,15 +224,17 @@ impl <V: Value + Hash> AnonymousClient<V> {
         let (tx, rx) = oneshot::channel();
         self.send_anonym_queue.send((value, tx)).expect("AnonymousClient send receiver dropped early");
         async move {
-            let res = rx.await.expect("AnonymousClient resolver dropped");
+            let res = rx.await.expect("AnonymousClient resolver dropped")?;
             Ok(res)
         }
     }
 
     /// Can be used to be notified of new rounds(& reconstructed values) seen by the client.
     /// Should only be called once
-    pub fn event_stream(&self) -> Option<impl Stream<Item = NewRound<V>> + 'static> {
-        self.receiver.borrow_mut().take().map(tokio_stream::wrappers::UnboundedReceiverStream::new)
+    pub fn event_stream(&self) -> Option<EventStream<NewRound<V>>> {
+        self.receiver.borrow_mut().take().map(|rec| {
+            tokio_stream::wrappers::UnboundedReceiverStream::new(rec).boxed()
+        })
     }
 
     pub fn config(&self) -> &Config {
