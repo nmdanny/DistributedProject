@@ -55,7 +55,6 @@ struct CLIConfig {
 }
 
 fn main() -> Result<(), anyhow::Error> {
-    setup_logging()?;
     let options = CLIConfig::parse();
     match &options.mode {
         Mode::Server(server_cfg) => {
@@ -65,6 +64,7 @@ fn main() -> Result<(), anyhow::Error> {
                 .build()
                 .unwrap()
                 .block_on(async move {
+                    setup_logging().unwrap();
                     let ls = tokio::task::LocalSet::new();
                     ls.run_until(async move {
                         run_server(&options.config, server_cfg).await
@@ -72,6 +72,7 @@ fn main() -> Result<(), anyhow::Error> {
                 });
         }
         Mode::Client(client_cfg) => {
+            setup_logging()?;
             run_client(&options.config, client_cfg)?;
         }
     }
