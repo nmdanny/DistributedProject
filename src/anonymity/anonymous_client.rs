@@ -158,7 +158,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
                            if sent_for_round < round as i64 {
                                 sent_for_round = round as i64;
                                 info!("Found that its time to submit my value {:?}, at round {}", tbc, round);
-                                let send_res = client.send_anonymously(tbc.value.clone(), round).await;
+                                let send_res = client.send_anonymously(Some(tbc.value.clone()), round).await;
                                 match send_res {
                                     Ok((sec_channel, succ_nodes)) => {
                                         tbc.channel_and_round = Some((sec_channel, round));
@@ -166,14 +166,17 @@ impl <V: Value + Hash> AnonymousClient<V> {
                                         info!("Sent {:?} for round {} via channel {} to {} nodes: {:?}", tbc.value, round, sec_channel, succ_count, succ_nodes);
                                     },
                                     Err(e) => {
-                                        error!("Client Couldn't send {:?} due to error {:?}", tbc.value, e);
+                                        error!("Client couldn't send {:?} due to error {:?}", tbc.value, e);
                                         let tbc = uncommited_queue.pop_front().unwrap();
                                         tbc.resolver.send(Err(e)).unwrap();
                                     }
                                 }
                            }
                        } else {
-                           // TODO: send a zero value instead
+                            let send_res = client.send_anonymously(None, round).await;
+                            if let Err(e) = send_res {
+                                error!("Client couldn't send zero value: {:?}", e);
+                            }
 
                        }
                    },
@@ -259,10 +262,10 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
 
     /// Sends a value anonymously, returning the channel via it was sent and the nodes that got the shares
     #[instrument]
-    async fn send_anonymously(&mut self, value: V, round: usize) -> Result<(usize, Vec<Id>), anyhow::Error> {
+    async fn send_anonymously(&mut self, value: Option<V>, round: usize) -> Result<(usize, Vec<Id>), anyhow::Error> {
         // note that thread_rng is crypto-secure
         let val_channel = Uniform::new(0, self.config.num_channels).sample(&mut rand::thread_rng());
-        let secret_val = encode_secret(value)?;
+        let secret_val = if let Some(value) = value { encode_secret(value)? } else { encode_zero_secret() };
         let zero_val = encode_zero_secret();
 
 
