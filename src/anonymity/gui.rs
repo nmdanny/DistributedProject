@@ -257,7 +257,7 @@ impl Application for App {
             })).await;
 
             let recv = combined_subscriber(sm_events.into_iter());
-            let anonym = AnonymousClient::new(transport, shared_cfg, format!("Client {}", flags.client_id), recv);
+            let anonym = AnonymousClient::new(transport, shared_cfg, flags.client_id, recv);
             info!("Anonym client created");
             AppMessage::InitComplete(anonym)
         });

@@ -53,7 +53,7 @@ struct AnonymousClientInner<V: Value + Hash, CT: ClientTransport<AnonymityMessag
     #[derivative(Debug="ignore")]
     config: Arc<Config>,
 
-    pub client_name: String
+    pub client_id: Id
 
 }
 
@@ -66,7 +66,7 @@ pub struct AnonymousClient<V: Value + Hash> {
     #[derivative(Debug="ignore")]
     send_anonym_queue: mpsc::UnboundedSender<(V, CommitResolver)>,
 
-    client_name: String,
+    id: Id,
 
     receiver: RefCell<Option<mpsc::UnboundedReceiver<NewRound<V>>>>,
 
@@ -121,10 +121,10 @@ fn was_value_committed<V: Value + PartialEq>(new_round: &NewRound<V>, last_sent:
 
 impl <V: Value + Hash> AnonymousClient<V> {
     pub fn new<CT: ClientTransport<AnonymityMessage<V>>>(client_transport: CT, 
-        config: Arc<Config>, client_name: String,
+        config: Arc<Config>, id: Id,
         mut event_recv: Pin<Box<dyn Send + Stream<Item = NewRound<V>>>>) -> Self 
     {
-        let mut client = AnonymousClientInner::new(client_transport, config.clone(), client_name.clone());
+        let mut client = AnonymousClientInner::new(client_transport, config.clone(), id);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -206,12 +206,12 @@ impl <V: Value + Hash> AnonymousClient<V> {
                    }
                } 
             }
-        }.instrument(info_span!("anonym_client_loop", name=?client_name.clone())));
+        }.instrument(info_span!("anonym_client_loop", id=?id)));
 
         AnonymousClient {
             handle,
             send_anonym_queue: orig_tx,
-            client_name,
+            id,
             receiver: RefCell::new(Some(v_recv)),
             config
         }
@@ -241,18 +241,19 @@ impl <V: Value + Hash> AnonymousClient<V> {
         &self.config
     }
 
-    pub fn client_name(&self) -> &str {
-        &self.client_name
+    pub fn client_id(&self) -> Id {
+        self.id
     }
 }
 
 impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClientInner<V, CT> {
-    fn new(client_transport: CT, config: Arc<Config>, client_name: String) -> Self {
+    fn new(client_transport: CT, config: Arc<Config>, client_id: Id) -> Self {
+        let client_name = format!("Client {}", client_id);
         AnonymousClientInner {
             mut_client: Client::new(client_name.clone(), client_transport.clone(), config.num_nodes),
-            client: Arc::new(Client::new(client_name.clone(), client_transport, config.num_nodes)),
+            client: Arc::new(Client::new(client_name, client_transport, config.num_nodes)),
             config,
-            client_name
+            client_id
         }
     }
 
@@ -284,11 +285,11 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             }).collect();
 
             let client = client.clone();
-            let client_name = self.client_name.clone();
+            let client_id = self.client_id.clone();
             async move {
-                on_anonym_client_send(&client_name, round, Some(node_id));
+                on_anonym_client_send(client_id, round, Some(node_id));
                 let submit_fut = client.submit_without_commit(node_id, AnonymityMessage::ClientShare {
-                    channel_shares: batch, client_name, round
+                    channel_shares: batch, client_id, round
                 }); //.await.map_err(|e| e.context(format!("while sending to server ID {}", node_id)));
                 let res = tokio::time::timeout(timeout_duration, submit_fut).await;
                 (match res {
@@ -298,7 +299,7 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             }
         });
 
-        info!("Client {} beginning to send shares for round {} via channel {}", self.client_name, round, val_channel);
+        info!("Client {} beginning to send shares for round {} via channel {}", self.client_id, round, val_channel);
         let mut handles = batch_futs.into_iter().map(|f| tokio::task::spawn(f)).collect::<Vec<_>>();
         let mut succ_nodes = Vec::new();
         while !handles.is_empty() {
@@ -318,9 +319,9 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
             }
         }
 
-        on_anonym_client_send(&self.client_name, round, None);
-        info!("Node {} submitting liveness for round {}", self.client_name, round);
-        match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_name: self.client_name.clone(), round: round }).await {
+        on_anonym_client_send(self.client_id, round, None);
+        info!("Node {} submitting liveness for round {}", self.client_id, round);
+        match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_id: self.client_id.clone(), round: round }).await {
             Ok(_) => {}
             Err(e) => { error!("Couldn't notify that I am live to some servers for round {}: {:?}", round, e) }
         }

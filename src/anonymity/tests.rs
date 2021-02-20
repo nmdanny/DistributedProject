@@ -105,7 +105,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
             info!("obtained server event streams");
 
             let recv = combined_subscriber(sm_events.into_iter());
-            let client = AnonymousClient::new(client_transport, config.clone(), format!("AnonymClient {}", i), recv);
+            let client = AnonymousClient::new(client_transport, config.clone(), i, recv);
             clients.push(client);
         }
 
@@ -164,7 +164,7 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> SingleProce
             })).await;
 
             let recv = combined_subscriber(sm_events.into_iter());
-            let client = AnonymousClient::new(client_transport, config.clone(), format!("AnonymClient {}", i), recv);
+            let client = AnonymousClient::new(client_transport, config.clone(), i, recv);
             clients.push(client);
         }
 
@@ -252,7 +252,7 @@ async fn many_rounds() {
                     match res {
                         Ok(CommitResult { round, channel}) => { 
                             println!("CL{}|V={}  was committed via channel {} at round {}", num, sends, channel, round)}
-                        Err(e) => { panic!("Client {} failed to send shares: {}", client.client_name(), e) }
+                        Err(e) => { panic!("Client {} failed to send shares: {}", client.client_id(), e) }
                     }
                     sends += 1;
                     if sends == VALS_TO_COMMIT {
