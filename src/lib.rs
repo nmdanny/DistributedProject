@@ -11,3 +11,5 @@ pub mod consensus;
 pub mod anonymity;
 
 pub mod grpc;
+
+pub mod crypto;

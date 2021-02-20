@@ -37,6 +37,7 @@ anyhow = "1.0"
 thiserror = "1.0.22"
 derivative = "2.1.1"
 curve25519-dalek = "3"
+sodiumoxide = "0.2.6"
 lazy_static = "1.4.0"
 chrono = "0.4"
 iced = { git = "https://github.com/hecrj/iced", rev = "9f5c2eb0c43daa61b19769322cf3692b29e0ac0f", features = ["tokio"] }
@@ -59,6 +60,9 @@ path = "src/anonymity/runner.rs"
 name = "raft"
 path = "src/consensus/single_process_runner.rs"
 
+[[bin]]
+name = "cert_gen"
+path = "src/crypto/generator.rs"
 
 [dev-dependencies]
 quickcheck = "1"
