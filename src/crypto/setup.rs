@@ -5,11 +5,12 @@ use crate::{anonymity::logic::Config, consensus::types::Id};
 use std::{fmt::Debug, path::{Path, PathBuf}};
 
 
+#[derive(Debug, Clone)]
 pub struct PKISettings {
-    clients_keys: Vec<(PublicKey, PrecomputedKey)>,
-    servers_keys: Vec<(PublicKey, PrecomputedKey)>,
-    my_key: SecretKey,
-    my_pkey: PublicKey
+    pub clients_keys: Vec<(PublicKey, PrecomputedKey)>,
+    pub servers_keys: Vec<(PublicKey, PrecomputedKey)>,
+    pub my_key: SecretKey,
+    pub my_pkey: PublicKey
 }
 
 pub fn read_public_key<A: AsRef<Path>>(path: A) -> PublicKey {

@@ -4,3 +4,4 @@ pub mod logic;
 pub mod tests;
 pub mod anonymous_client;
 pub mod callbacks;
+pub mod private_messaging;

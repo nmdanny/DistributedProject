@@ -1,8 +1,8 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, hash::{Hash, Hasher}, ops::Sub, pin::Pin, sync::Arc};
 
-use dist_lib::{anonymity::{anonymous_client::{AnonymousClient, CommitResult, combined_subscriber}, logic::{AnonymityMessage, Config, NewRound, ReconstructionResults}}, consensus::{client::{ClientTransport, EventStream}, types::RaftError}, grpc::transport::{GRPCConfig, GRPCTransport}};
+use dist_lib::{anonymity::{anonymous_client::{AnonymousClient, CommitResult, combined_subscriber}, logic::{AnonymityMessage, Config, NewRound, ReconstructionResults}, private_messaging::{PMClient, PMEvent}}, consensus::{client::{ClientTransport, EventStream}, types::{Id, RaftError}}, crypto::PKIBuilder, grpc::transport::{GRPCConfig, GRPCTransport}};
 use futures::{Stream, StreamExt, stream::BoxStream};
-use iced::{Application, Background, Button, Color, Column, Command, Container, Element, Font, Length, Scrollable, Subscription, Text, TextInput, button, executor, keyboard::Event, scrollable};
+use iced::{Application, Background, Button, Color, Column, Command, Container, Element, Font, Length, PickList, Row, Scrollable, Subscription, Text, TextInput, button, executor, keyboard::Event, pick_list, scrollable};
 use iced::text_input;
 
 use derivative;
@@ -47,6 +47,7 @@ impl iced::container::StyleSheet for ChatMessageState {
 
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
+    from: Id,
     contents: String,
     state: ChatMessageState
 }
@@ -73,9 +74,11 @@ struct ChatState {
     input_msg: String,
     input: text_input::State,
     scrollable_state: scrollable::State,
-    client: AnonymousClient<String>,
+    pick_list_state: pick_list::State<Id>,
+    input_recipient: Id,
+    client: PMClient<String>,
     round: usize,
-    event_stream: RefCell<Option<EventStream<NewRound<String>>>>
+    event_stream: RefCell<Option<EventStream<PMEvent<String>>>>
 
 }
 
@@ -85,13 +88,14 @@ pub enum Message {
     SendChatMessage,
     SendChatMessageResult(usize, Result<CommitResult, String>),
     InputMessageChanged(String),
-    NewRoundEvent(NewRound<String>)
+    RecipientChanged(Id),
+    NewEvent(PMEvent<String>)
 }
 
 const MSG_FONT_SIZE: u16 = 14;
 
 impl ChatState {
-    pub fn new(client: AnonymousClient<String>) -> Self {
+    pub fn new(client: PMClient<String>) -> Self {
         let event_stream = client.event_stream().expect("AnonymousClient should have event_stream at first call");
         let event_stream = RefCell::new(Some(event_stream));
 
@@ -101,6 +105,8 @@ impl ChatState {
             input_msg: String::new(),
             input: Default::default(),
             scrollable_state: Default::default(),
+            pick_list_state: Default::default(),
+            input_recipient: 0,
             client,
             round: 0,
             event_stream
@@ -114,11 +120,12 @@ impl ChatState {
                 std::mem::swap(&mut self.input_msg, &mut message);
 
                 self.messages.push(ChatMessage {
+                    from: self.client.client_id(),
                     contents: message.clone(),
                     state: ChatMessageState::Sent
                 });
                 let message_ix = self.messages.len() - 1;
-                let fut = self.client.send_anonymously(message);
+                let fut = self.client.send_anonymously(self.input_recipient, message);
                 let cmd = Command::from(async move {
                     let res = fut.await
                         .map_err(|e| format!("{:?}", e));
@@ -127,25 +134,26 @@ impl ChatState {
                 return cmd;
             }
             Message::InputMessageChanged(new_input) => {
-                self.input_msg = new_input
+                self.input_msg = new_input;
             }
-            Message::NewRoundEvent(new_round) => {
-                self.round = new_round.round;
-
-                if let ReconstructionResults::Some { chan_to_val } = new_round.last_reconstruct_results {
-                    let round = self.round - 1;
-
-                    for (channel, res) in chan_to_val.into_iter() {
-                        let commit_res = CommitResult {
-                            channel, round
-                        };
-                        let contents = res.expect("SM event channel shouldn't transmit collision entries");
+            Message::RecipientChanged(new_recipient) => {
+                self.input_recipient = new_recipient;
+            }
+            Message::NewEvent(event) => {
+                match event {
+                    PMEvent::NewRoundEvent { new_round } => {
+                        self.round = new_round;
+                    }
+                    PMEvent::DecipheredMessage { message, channel, round } => {
                         self.messages.push(ChatMessage {
-                            contents, state: ChatMessageState::Received(commit_res)
+                            from: message.from,
+                            contents: message.contents,
+                            state: ChatMessageState::Received(CommitResult {
+                                channel, round
+                            })
                         });
                     }
-
-                }
+                } 
             }
             Message::SendChatMessageResult(message_ix, res) => {
                 self.messages[message_ix].state = match res {
@@ -167,20 +175,30 @@ impl ChatState {
 
         let container = Container::new(scrollable_msgs).height(Length::Fill).width(Length::Fill);
 
+
+        let options = (0 .. self.client.config().num_clients).collect::<Vec<_>>();
+        let input_line = Row::new()
+            .push(Text::new("Recipient: "))
+            .push(
+                PickList::new(&mut self.pick_list_state, options, Some(self.input_recipient), Message::RecipientChanged)
+            )
+            .push(
+                TextInput::new(&mut self.input, "", &self.input_msg, |s| Message::InputMessageChanged(s) )
+            ).push(
+                Button::new(&mut self.send, Text::new("Send"))
+                .on_press(Message::SendChatMessage)
+            );
+
         Column::new()
             .push(Text::new(format!("Round {}", self.round)))
             .push(container)
-            .push(TextInput::new(&mut self.input, "", &self.input_msg, |s| Message::InputMessageChanged(s) ))
-            .push(
-                Button::new(&mut self.send, Text::new("Send"))
-                .on_press(Message::SendChatMessage)
-            )
+            .push(input_line)
             .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
         let stream = self.event_stream.borrow_mut().take()
-            .map(|stream| stream.map(Message::NewRoundEvent));
+            .map(|stream| stream.map(Message::NewEvent));
         Subscription::from_recipe(StreamRecipe {
             stream
         })
@@ -220,7 +238,7 @@ pub struct AppFlags {
 #[derive(Debug)]
 pub enum AppMessage {
     Message(Message),
-    InitComplete(AnonymousClient<String>)
+    InitComplete(PMClient<String>)
 }
 
 enum AppState {
@@ -247,9 +265,13 @@ impl Application for App {
             info!("cmd starting");
             let grpc_config = GRPCConfig::default_for_nodes(flags.config.num_nodes);
             let shared_cfg = Arc::new(flags.config.clone());
-            let transport: GRPCTransport<AnonymityMessage<String>> = GRPCTransport::new(None, grpc_config).await.unwrap();
+
+            let pki = PKIBuilder::new(
+                shared_cfg.num_nodes, shared_cfg.num_clients
+            ).for_client(flags.client_id).build();
+            let transport = GRPCTransport::new(None, grpc_config).await.unwrap();
             let sm_events = futures::future::join_all((0 .. shared_cfg.num_nodes).map(|node_id| {
-                let stream = transport.get_sm_event_stream::<NewRound<String>>(node_id);
+                let stream = transport.get_sm_event_stream::<NewRound<_>>(node_id);
                 async move {
                     stream.await.unwrap()
                 }
@@ -257,9 +279,9 @@ impl Application for App {
             })).await;
 
             let recv = combined_subscriber(sm_events.into_iter());
-            let anonym = AnonymousClient::new(transport, shared_cfg, flags.client_id, recv);
-            info!("Anonym client created");
-            AppMessage::InitComplete(anonym)
+            let client = PMClient::new(transport, shared_cfg, Arc::new(pki), flags.client_id, recv);
+            info!("PM client created");
+            AppMessage::InitComplete(client)
         });
         (App {
             state: AppState::Initializing,

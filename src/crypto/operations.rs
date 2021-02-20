@@ -6,6 +6,7 @@ use serde::{Serialize, Deserialize};
 use sodiumoxide::crypto::box_::{NONCEBYTES, Nonce, PrecomputedKey, PublicKey, SecretKey};
 use sodiumoxide::crypto::box_;
 use sodiumoxide::crypto::sealedbox;
+use derivative;
 
 
 
@@ -13,14 +14,18 @@ use crate::consensus::types::Id;
 
 pub use super::setup::*;
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Derivative, Serialize, Deserialize, PartialEq, Eq, Clone, Hash)]
+#[derivative(Debug)]
 pub struct HybEncrypted {
+    #[derivative(Debug="ignore")]
     ciphertext: Vec<u8>,
     nonce: Vec<u8>
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Derivative, Serialize, Deserialize, PartialEq, Eq, Clone, Hash)]
+#[derivative(Debug)]
 pub struct AsymEncrypted {
+    #[derivative(Debug="ignore")]
     ciphertext: Vec<u8>
 }
 

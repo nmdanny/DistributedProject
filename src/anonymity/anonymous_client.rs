@@ -75,9 +75,6 @@ pub struct AnonymousClient<V: Value + Hash> {
 
 }
 
-impl <V: Value + Hash> AnonymousClient<V> {
-}
-
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct CommitResult { 
     pub round: usize,
@@ -282,14 +279,14 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
         // create tasks for sending batches of channels for every server
         let client = self.client.clone();
         let timeout_duration = self.config.phase_length / 2;
-        let batch_futs = (0.. self.config.num_nodes).map(|node_id| {
+        let mut batch_futs = (0.. self.config.num_nodes).map(|node_id| {
             let batch = chan_secrets.iter().map(|chan_shares| {
                 chan_shares[node_id].to_bytes()
             }).collect();
 
             let client = client.clone();
             let client_id = self.client_id.clone();
-            async move {
+            tokio::spawn(async move {
                 on_anonym_client_send(client_id, round, Some(node_id));
                 let submit_fut = client.submit_without_commit(node_id, AnonymityMessage::ClientShare {
                     channel_shares: batch, client_id, round
@@ -299,31 +296,30 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
                     Ok(inner) => { inner }
                     Err(_elapsed) => { Err(anyhow::anyhow!("Timeout of duration {:?} elapsed while sending to {}", timeout_duration, node_id)) }
                 }, node_id)
-            }
-        });
+            }.instrument(info_span!("send_share", round=?round, to=?node_id)))
+        }).collect::<Vec<_>>();
 
-        info!("Client {} beginning to send shares for round {} via channel {}", self.client_id, round, val_channel);
-        let mut handles = batch_futs.into_iter().map(|f| tokio::task::spawn(f)).collect::<Vec<_>>();
+        debug!("Client {} beginning to send shares for round {} via channel {}", self.client_id, round, val_channel);
         let mut succ_nodes = Vec::new();
-        while !handles.is_empty() {
-            match futures::future::select_all(handles).await {
+        while !batch_futs.is_empty() {
+            match futures::future::select_all(batch_futs).await {
                 (Ok((Err(e), node_id)), _index, remaining) => {
-                    trace!("Got an error while sending shares to servers {}: {:?}", node_id, e);
-                    handles = remaining;
+                    error!("Got an error while sending shares to server {}: {:?}", node_id, e);
+                    batch_futs = remaining;
                 },
                 (Err(e), _index, remaining) => {
                     error!("Got an error while joining send-share task: {:?}", e);
-                    handles = remaining;
+                    batch_futs = remaining;
                 },
                 (Ok((Ok(_res), node_id)), _index, remaining) => {
                     succ_nodes.push(node_id);
-                    handles = remaining;
+                    batch_futs  = remaining;
                 }
             }
         }
 
         on_anonym_client_send(self.client_id, round, None);
-        info!("Node {} submitting liveness for round {}", self.client_id, round);
+        debug!("Node {} submitting liveness for round {}", self.client_id, round);
         match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_id: self.client_id.clone(), round: round }).await {
             Ok(_) => {}
             Err(e) => { error!("Couldn't notify that I am live to some servers for round {}: {:?}", round, e) }

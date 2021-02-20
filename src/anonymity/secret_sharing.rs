@@ -215,7 +215,8 @@ pub fn decode_secret<S: DeserializeOwned + Hash>(secret: Vec<FP>) -> Result<Opti
         return Ok(None)
     }
 
-    let value_and_hash = bincode::deserialize::<ValueAndHash<S>>(&bytes)?;
+    let value_and_hash = bincode::deserialize::<ValueAndHash<S>>(&bytes).context(format!("Deserializing {:?}", bytes))?;
+
     let mut hasher = DefaultHasher::new();
     value_and_hash.value.hash(&mut hasher);
     let computed_hash = hasher.finish();
@@ -240,7 +241,6 @@ pub fn add_shares(share1: &Share, share2: &Share) -> Share {
 mod tests {
     use quickcheck::{Gen, QuickCheck};
     use rand::{distributions::{Standard, Uniform}, prelude::Distribution};
-    // use quickcheck::quickcheck;
     use quickcheck_macros::quickcheck;
 
     use super::*;
@@ -291,6 +291,49 @@ mod tests {
             Some(payload) == decoded
         }
         QuickCheck::gen(QuickCheck::new(), Gen::new(NUM_POLYS * 31 - 16)).quickcheck(test as fn(Vec<u8>) -> bool);
+    }
+
+    #[test]
+    fn qc_decode_flow_encrypted_content() {
+        // the purpose of this test is basically to ensure
+        // secret sharing works with more random looking values(ciphertext, etc)
+
+        use crate::crypto::{asym_encrypt, asym_decrypt, AsymEncrypted};
+        use crate::anonymity::private_messaging::PrivateMessage;
+        use sodiumoxide::crypto::box_::gen_keypair;
+        fn test(plaintext: Vec<u8>) -> bool {
+            let (pk, _sk) = gen_keypair();
+            let plaintext = bincode::serialize(&PrivateMessage {
+                from: 1337, contents: plaintext
+            }).unwrap();
+            let enc = asym_encrypt(&pk, &plaintext);
+
+            // sent by client a
+            let secret = encode_secret(enc.clone()).unwrap();
+
+            let client_a_chan_a = create_share(secret, 2, 2);
+            let client_a_chan_b = create_share(encode_zero_secret(), 2, 2);
+
+            let client_b_chan_a = create_share(encode_zero_secret(), 2, 2);
+            let client_b_chan_b = create_share(encode_zero_secret(), 2, 2);
+
+
+            let server_chan_a = vec![
+                add_shares(&client_a_chan_a[0], &client_b_chan_a[0]),
+                add_shares(&client_a_chan_a[1], &client_b_chan_a[1]),
+            ];
+
+            let server_chan_b = vec![
+                add_shares(&client_a_chan_b[0], &client_b_chan_b[0]),
+                add_shares(&client_a_chan_b[1], &client_b_chan_b[1]),
+            ];
+
+            let decoded_a = decode_secret::<AsymEncrypted>(reconstruct_secret(server_chan_a.as_slice(), 2)).unwrap();
+            let decoded_b = decode_secret::<AsymEncrypted>(reconstruct_secret(server_chan_b.as_slice(), 2)).unwrap();
+
+            Some(enc) == decoded_a && None == decoded_b
+        }
+        QuickCheck::gen(QuickCheck::new(), Gen::new(32)).quickcheck(test as fn(Vec<u8>) -> bool);
     }
 
     #[test]

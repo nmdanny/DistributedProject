@@ -42,7 +42,7 @@ pub struct Config {
     pub num_channels: usize,
 
     #[clap(short='l', long = "phase_length", about = "Length of a phase(share/recover) in miliseconds", 
-           parse(try_from_str = parse_phase_length), default_value = "500")]
+           parse(try_from_str = parse_phase_length), default_value = "1000")]
     pub phase_length: std::time::Duration
 }
 
@@ -548,8 +548,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 /// as containing the results of the previous round(unless this is
 /// the first round)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(bound = "V: Value")]
-pub struct NewRound<V: Value> {
+pub struct NewRound<V> {
     pub round: usize,
     pub last_reconstruct_results: ReconstructionResults<V>
 }
