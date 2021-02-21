@@ -48,7 +48,7 @@ impl <V: Value + Hash> PMClient<V> {
         config: Arc<Config>, pki: Arc<PKISettings>, id: Id,
         event_recv: Pin<Box<dyn Send + Stream<Item = NewRound<AsymEncrypted>>>>) -> Self 
     {
-        let anonym_client = AnonymousClient::new(client_transport, config, id, event_recv);
+        let anonym_client = AnonymousClient::new(client_transport, config, pki.clone(), id, event_recv);
 
         let (tx, rx) = mpsc::unbounded_channel();
         let mut event_stream = anonym_client.event_stream().expect("Event stream shouldn't be none");

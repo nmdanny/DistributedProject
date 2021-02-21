@@ -10,6 +10,7 @@ use crate::consensus::transport::{ThreadTransport};
 use crate::anonymity::logic::*;
 use crate::anonymity::anonymous_client::{AnonymousClient, CommitResult, combined_subscriber};
 use crate::anonymity::callbacks::*;
+use crate::crypto::PKIBuilder;
 use futures::{Future, Stream, StreamExt, future::join, future::join_all};
 use parking_lot::RwLock;
 use rand::distributions::{Distribution, Uniform};
@@ -64,11 +65,15 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
 
         info!("setup - created nodes");
             
+        let mut pki_builder = PKIBuilder::new(config.num_nodes, config.num_clients);
 
         for node in &mut nodes {
             // used for communicating with other nodes
             let client_transport = node.transport.get_inner().clone();
-            let sm = AnonymousLogSM::<V, _>::new(config.clone(), node.id, client_transport);
+            let pki= Arc::new(
+                    pki_builder.for_server(node.id).build()
+            );
+            let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
             node.attach_state_machine(sm);
         }
 
@@ -105,7 +110,8 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
             info!("obtained server event streams");
 
             let recv = combined_subscriber(sm_events.into_iter());
-            let client = AnonymousClient::new(client_transport, config.clone(), i, recv);
+            let pki = Arc::new(pki_builder.for_client(i).build());
+            let client = AnonymousClient::new(client_transport, config.clone(), pki, i, recv);
             clients.push(client);
         }
 
@@ -139,11 +145,13 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> SingleProce
             ).await.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
 
             
+        let mut pki_builder = PKIBuilder::new(config.num_nodes, config.num_clients);
 
         for node in &mut nodes {
             // used for communicating with other nodes
             let client_transport = SingleProcessClientTransport::new(communicators.clone());
-            let sm = AnonymousLogSM::<V, _>::new(config.clone(), node.id, client_transport);
+            let pki = Arc::new(pki_builder.for_server(node.id).build());
+            let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
             node.attach_state_machine(sm);
         }
 
@@ -164,7 +172,8 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> SingleProce
             })).await;
 
             let recv = combined_subscriber(sm_events.into_iter());
-            let client = AnonymousClient::new(client_transport, config.clone(), i, recv);
+            let pki = Arc::new(pki_builder.for_client(i).build());
+            let client = AnonymousClient::new(client_transport, config.clone(), pki, i, recv);
             clients.push(client);
         }
 

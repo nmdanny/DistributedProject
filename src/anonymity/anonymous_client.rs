@@ -1,4 +1,4 @@
-use crate::{anonymity::secret_sharing::*, consensus::client::EventStream};
+use crate::{anonymity::secret_sharing::*, consensus::client::EventStream, crypto::PKISettings};
 use crate::anonymity::logic::*;
 use crate::anonymity::callbacks::*;
 use crate::consensus::client::{ClientTransport, Client};
@@ -13,6 +13,7 @@ use tokio_stream::StreamMap;
 use tracing_futures::Instrument;
 use derivative;
 use std::sync::Arc;
+use anyhow::Context;
 
 
 /// Combines NewRound streams(ideally from at least a majority of the servers) onto a single stream, allowing to handle events
@@ -45,13 +46,13 @@ pub fn combined_subscriber<V: Value>(receivers: impl Iterator<Item = Pin<Box<dyn
 /// Handles logic of sending a value anonymously
 struct AnonymousClientInner<V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> {
     #[derivative(Debug="ignore")]
-    mut_client: Client<CT, AnonymityMessage<V>>,
-
-    #[derivative(Debug="ignore")]
-    client: Arc<Client<CT, AnonymityMessage<V>>>,
+    client: Client<CT, AnonymityMessage<V>>,
 
     #[derivative(Debug="ignore")]
     config: Arc<Config>,
+
+    #[derivative(Debug="ignore")]
+    pki: Arc<PKISettings>,
 
     pub client_id: Id
 
@@ -118,10 +119,10 @@ fn was_value_committed<V: Value + PartialEq>(new_round: &NewRound<V>, last_sent:
 
 impl <V: Value + Hash> AnonymousClient<V> {
     pub fn new<CT: ClientTransport<AnonymityMessage<V>>>(client_transport: CT, 
-        config: Arc<Config>, id: Id,
+        config: Arc<Config>, pki: Arc<PKISettings>, id: Id,
         mut event_recv: Pin<Box<dyn Send + Stream<Item = NewRound<V>>>>) -> Self 
     {
-        let mut client = AnonymousClientInner::new(client_transport, config.clone(), id);
+        let mut client = AnonymousClientInner::new(client_transport, config.clone(), pki, id);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -157,10 +158,9 @@ impl <V: Value + Hash> AnonymousClient<V> {
                                 info!("Found that its time to submit my value {:?}, at round {}", tbc, round);
                                 let send_res = client.send_anonymously(Some(tbc.value.clone()), round).await;
                                 match send_res {
-                                    Ok((sec_channel, succ_nodes)) => {
+                                    Ok(sec_channel) => {
                                         tbc.channel_and_round = Some((sec_channel, round));
-                                        let succ_count = succ_nodes.len();
-                                        info!("Sent {:?} for round {} via channel {} to {} nodes: {:?}", tbc.value, round, sec_channel, succ_count, succ_nodes);
+                                        info!("Sent {:?} for round {} via channel {}", tbc.value, round, sec_channel);
                                     },
                                     Err(e) => {
                                         error!("Client couldn't send {:?} due to error {:?}", tbc.value, e);
@@ -247,84 +247,42 @@ impl <V: Value + Hash> AnonymousClient<V> {
 }
 
 impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClientInner<V, CT> {
-    fn new(client_transport: CT, config: Arc<Config>, client_id: Id) -> Self {
+    fn new(client_transport: CT, config: Arc<Config>, pki: Arc<PKISettings>, client_id: Id) -> Self {
         let client_name = format!("Client {}", client_id);
         AnonymousClientInner {
-            mut_client: Client::new(client_name.clone(), client_transport.clone(), config.num_nodes),
-            client: Arc::new(Client::new(client_name, client_transport, config.num_nodes)),
+            client: Client::new(client_name, client_transport, config.num_nodes),
             config,
+            pki,
             client_id
         }
     }
 
     /// Sends a value anonymously, returning the channel via it was sent and the nodes that got the shares
     #[instrument]
-    async fn send_anonymously(&mut self, value: Option<V>, round: usize) -> Result<(usize, Vec<Id>), anyhow::Error> {
+    async fn send_anonymously(&mut self, value: Option<V>, round: usize) -> Result<usize, anyhow::Error> {
         // note that thread_rng is crypto-secure
         let val_channel = Uniform::new(0, self.config.num_channels).sample(&mut rand::thread_rng());
         let secret_val = if let Some(value) = value { encode_secret(value)? } else { encode_zero_secret() };
         let zero_val = encode_zero_secret();
 
 
-        // create 'd' collections of shares, one for each server
-        let chan_secrets = (0.. self.config.num_channels).map(|chan| {
+        // create 'd' collections of encrypted shares, each containing `num_servers` encrypted shares
+        let shares = (0.. self.config.num_channels).map(|chan| {
             let secret = if chan == val_channel { &secret_val } else { &zero_val };
             let threshold = self.config.threshold as u64;
             let num_nodes = self.config.num_nodes as u64;
-            create_share(secret.clone(), threshold, num_nodes)
+            let shares = create_share(secret.clone(), threshold, num_nodes);
+            (0 .. ).zip(shares).map(|(node_id, share)| share.encrypt(&self.pki.servers_keys[node_id].1)).collect::<Vec<_>>()
         }).collect::<Vec<_>>();
 
 
+        let timeout_duration = self.config.phase_length;
+        let res = tokio::time::timeout(timeout_duration, self.client.submit_value(AnonymityMessage::ClientShare {
+            client_id: self.client_id, round, shares
+        })).await;
 
-        // create tasks for sending batches of channels for every server
-        let client = self.client.clone();
-        let timeout_duration = self.config.phase_length / 2;
-        let mut batch_futs = (0.. self.config.num_nodes).map(|node_id| {
-            let batch = chan_secrets.iter().map(|chan_shares| {
-                chan_shares[node_id].clone()
-            }).collect();
-
-            let client = client.clone();
-            let client_id = self.client_id.clone();
-            tokio::spawn(async move {
-                on_anonym_client_send(client_id, round, Some(node_id));
-                let submit_fut = client.submit_without_commit(node_id, AnonymityMessage::ClientShare {
-                    channel_shares: batch, client_id, round
-                }); //.await.map_err(|e| e.context(format!("while sending to server ID {}", node_id)));
-                let res = tokio::time::timeout(timeout_duration, submit_fut).await;
-                (match res {
-                    Ok(inner) => { inner }
-                    Err(_elapsed) => { Err(anyhow::anyhow!("Timeout of duration {:?} elapsed while sending to {}", timeout_duration, node_id)) }
-                }, node_id)
-            }.instrument(info_span!("send_share", round=?round, to=?node_id)))
-        }).collect::<Vec<_>>();
-
-        debug!("Client {} beginning to send shares for round {} via channel {}", self.client_id, round, val_channel);
-        let mut succ_nodes = Vec::new();
-        while !batch_futs.is_empty() {
-            match futures::future::select_all(batch_futs).await {
-                (Ok((Err(e), node_id)), _index, remaining) => {
-                    error!("Got an error while sending shares to server {}: {:?}", node_id, e);
-                    batch_futs = remaining;
-                },
-                (Err(e), _index, remaining) => {
-                    error!("Got an error while joining send-share task: {:?}", e);
-                    batch_futs = remaining;
-                },
-                (Ok((Ok(_res), node_id)), _index, remaining) => {
-                    succ_nodes.push(node_id);
-                    batch_futs  = remaining;
-                }
-            }
-        }
-
-        on_anonym_client_send(self.client_id, round, None);
-        debug!("Node {} submitting liveness for round {}", self.client_id, round);
-        match self.mut_client.submit_value(AnonymityMessage::ClientNotifyLive { client_id: self.client_id.clone(), round: round }).await {
-            Ok(_) => {}
-            Err(e) => { error!("Couldn't notify that I am live to some servers for round {}: {:?}", round, e) }
-        }
-
-        Ok((val_channel, succ_nodes))
+        let res = res.map_err(|_| anyhow::format_err!("Timeout when sending value during round {}", round))?;
+        let _ = res.context(format!("While sending value during round {}", round))?;
+        Ok(val_channel)
     }
 }

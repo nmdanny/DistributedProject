@@ -1,4 +1,4 @@
-use crate::consensus::{node, types::*};
+use crate::{consensus::{node, types::*}, crypto::PKISettings};
 use crate::consensus::state_machine::StateMachine;
 use crate::consensus::transport::Transport;
 use crate::consensus::client::{Client, ClientTransport};
@@ -49,33 +49,22 @@ pub struct Config {
 
 /// Given a list of clients who are 'live', that is, didn't crash before sending all their shares,
 /// and all of the node's shares, sums shares from those channels
-fn mix_shares_from(my_id: Id, live_clients: &HashSet<Id>, shares_view: &Vec<Vec<(Share, Id)>>) -> Option<Vec<Share>> {
-    let condensed_view = shares_view[0].iter().map(|s| &s.1).collect::<Vec<_>>();
-    info!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, condensed_view);
 
-    // A faulty node will disagree on live clients yet proceed to reconstruct stage
-    // TODO: maybe this is not enough? 
-    // if live_clients.is_empty() {
-    //     return None;
-    // }
+// Mixes shares of several clients for each channel, returning a share per channel,
+// or None if no shares were seen
+fn mix_shares(my_id: Id, shares_view: &Vec<Vec<(Share, Id)>>) -> Option<Vec<Share>> {
+    let clients = shares_view[0].iter().map(|s| &s.1).collect::<Vec<_>>();
+    info!("node {} is trying to mix his shares from clients {:?}", my_id, clients);
 
-    if !shares_view.into_iter().all(|chan| {
-        chan.iter().map(|(_, client_id)| client_id)
-            .cloned()
-            .collect::<HashSet<_>>()
-            .is_superset(live_clients)
-    }) {
+    if clients.len() == 0 {
         return None;
     }
+
     Some(shares_view.iter().map(|chan| {
         chan.iter()
             .inspect(|(share, _)| assert_eq!(share.x, my_id as u64 + 1))
-            .fold(Share::new(my_id as u64 + 1), |acc, (share, from_client)| {
-                if live_clients.contains(from_client) {
-                    add_shares(&acc, share)
-                } else {
-                    acc
-                }
+            .fold(Share::new(my_id as u64 + 1), |acc, (share, _from_client)| {
+                add_shares(&acc, share)
             })
     }).collect())
 }
@@ -86,9 +75,6 @@ fn mix_shares_from(my_id: Id, live_clients: &HashSet<Id>, shares_view: &Vec<Vec<
 pub enum Phase {
     ClientSharing {
         last_share_at: time::Instant,
-
-        /// Synchronized among all nodes, identifies clients that didn't crash after sending all their shares
-        live_clients: HashSet<Id>,
 
         // Contains 'd' channels, each channel containing shares from many clients
         #[derivative(Debug="ignore")]
@@ -122,16 +108,9 @@ pub enum ReconstructionResults<V> {
 pub enum AnonymityMessage<V: Value> {
     /// Note that the following message is not synchronized
     ClientShare { 
-        // A client must always send 'num_channels` shares to a particular server
+        /// A vector of `num_channels` vectors of `num_nodes` shares
         #[derivative(Debug="ignore")]
-        channel_shares: Vec<Share>,
-        client_id: Id,
-        round: usize
-    },
-    /// Used by the client after he sent(or at least, tried and failed) all his shares.
-    /// This is necessary to know which client shares to mix before proceeding to reconstruct.
-    /// This message is synchronized
-    ClientNotifyLive {
+        shares: Vec<Vec<EncryptedShare>>,
         client_id: Id,
         round: usize
     },
@@ -274,6 +253,9 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
     #[derivative(Debug="ignore")]
     pub config: Arc<Config>,
 
+    #[derivative(Debug="ignore")]
+    pub pki: Arc<PKISettings>,
+
     pub state: Phase,
 
     pub round: usize,
@@ -285,7 +267,7 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
     /// Maps rounds from the future to a list of clients along with their shares
     /// This is used to handle share requests from future rounds
     #[derivative(Debug="ignore")]
-    pub round_to_shares: HashMap<usize, Vec<(Id, Vec<Share>)>>,
+    pub round_to_shares: HashMap<usize, Vec<(Id, Vec<Vec<EncryptedShare>>)>>,
 
     /// Likewise for liveness notifications from the future
     #[derivative(Debug="ignore")]
@@ -302,17 +284,16 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
 
 
 impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<V, CT> {
-    pub fn new(config: Arc<Config>, id: usize, client_transport: CT) -> AnonymousLogSM<V, CT> {
+    pub fn new(config: Arc<Config>, pki: Arc<PKISettings>, id: usize, client_transport: CT) -> AnonymousLogSM<V, CT> {
         assert!(id < config.num_nodes, "Invalid node ID");
         let client = SMSender::new(id, Client::new(format!("SM-{}-cl", id), client_transport, config.num_nodes));
         let state = Phase::ClientSharing {
             last_share_at: Instant::now(),
-            live_clients: HashSet::new(),
             shares: vec![Vec::new(); config.num_channels]
         };
         let (nr_tx, _nr_rx) = broadcast::channel(NEW_ROUND_CHAN_SIZE);
         AnonymousLogSM {
-            committed_messages: Vec::new(), client, id, config: config.clone(), state, round: 0, 
+            committed_messages: Vec::new(), client, id, config: config.clone(), pki, state, round: 0, 
             new_round_sender: nr_tx,
             round_to_shares: HashMap::new(),
             round_to_live: HashMap::new(),
@@ -322,8 +303,8 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         
     }
 
-    #[instrument(skip(batch))]
-    pub fn handle_client_share(&mut self, client_id: Id, batch: &[Share], round: usize) {
+    #[instrument(skip(encrypted_shares))]
+    pub fn handle_client_share(&mut self, client_id: Id, encrypted_shares: &Vec<Vec<EncryptedShare>>, round: usize) {
         // with bad enough timing, this might be possible
         // assert!(round <= self.round + 1, "Cannot receive share from a round bigger than 1 from the current one");
         if round < self.round {
@@ -332,13 +313,20 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         }
         if round > self.round {
             let entries = self.round_to_shares.entry(round).or_default();
-            entries.push((client_id, batch.iter().cloned().collect()));
+            entries.push((client_id, encrypted_shares.clone()));
             debug!("Got share from the next round {} while current round is {}, enqueuing", round, self.round);
             return;
         }
         match &mut self.state {
             Phase::Reconstructing { .. } => trace!("Got client share too late (while in reconstruct phase)"),
             Phase::ClientSharing { last_share_at, shares, .. } => {
+
+                let key = &self.pki.clone().clients_keys[client_id].1;
+                let id = self.id;
+                let batch = encrypted_shares.iter()
+                    .map(|chan| chan[id].decrypt(key).expect("Should be able to decrypt shares meant for us"))
+                    .collect::<Vec<_>>();
+
                 assert_eq!(shares.len(), batch.len() , "client batch size mismatch with expected channels");
                 assert!(shares.iter().map(|chan| chan.len()).sum::<usize>() <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
 
@@ -347,30 +335,11 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
                     self.metrics.report_share(round, chan, share.clone());
-                    shares[chan].push((share.clone(), client_id.clone()));
+                    shares[chan].push((share, client_id));
                 }
 
                 *last_share_at = Instant::now();
             }
-        }
-    }
-
-    pub fn handle_client_live_notification(&mut self, client_id: Id, round: usize) {
-        if round < self.round {
-            warn!("Node {} Got old round live notification {} from client {}", self.id, round, client_id);
-            return;
-        }
-        if round > self.round {
-            let entries = self.round_to_live.entry(round).or_default();
-            warn!("Client {:} sent liveness notification for old round: {}, I'm at round {}", client_id, round, self.round);
-            entries.insert(client_id.clone());
-            return;
-        }
-        if let Phase::ClientSharing { live_clients, .. } = &mut self.state {
-            info!("node {} at round {} is aware that {} is live", self.id ,round, client_id);
-            live_clients.insert(client_id);
-        } else {
-            error!("Got client live notification from {} of round {} at wrong phase", client_id, round);
         }
     }
 
@@ -447,8 +416,8 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         }
 
         let shares = match &self.state {
-            Phase::ClientSharing { live_clients, shares, .. } => {
-                mix_shares_from(self.id, &live_clients, shares)
+            Phase::ClientSharing { shares, .. } => {
+                mix_shares(self.id, shares)
             },
             _ => { panic!("Begin reconstructing twice in a row") }
         };
@@ -480,7 +449,6 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             Phase::Reconstructing { .. } => {
                 self.state = Phase::ClientSharing { 
                     last_share_at: Instant::now(), 
-                    live_clients: HashSet::new(), 
                     shares: vec![Vec::new(); self.config.num_channels] 
                 };
                 self.round = round;
@@ -532,13 +500,6 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 self.handle_client_share(client, &batch, self.round);
             }
         }
-        if let Some(entries) = self.round_to_live.remove(&self.round) {
-            for client in entries {
-                debug!("Handling delayed liveness note from client {}", client);
-                self.handle_client_live_notification(client, self.round);
-
-            }
-        }
     }
 }
 
@@ -555,8 +516,7 @@ pub struct NewRound<V> {
 impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<AnonymityMessage<V>>> StateMachine<AnonymityMessage<V>, T> for AnonymousLogSM<V, C> {
     fn apply(&mut self, entry: &AnonymityMessage<V>) -> () {
         match entry {
-            AnonymityMessage::ClientShare { channel_shares, client_id, round} => { self.handle_client_share(client_id.to_owned(), channel_shares.as_slice(), *round) },
-            AnonymityMessage::ClientNotifyLive { client_id, round} => { self.handle_client_live_notification(client_id.to_owned(), *round) }
+            AnonymityMessage::ClientShare { shares, client_id, round} => { self.handle_client_share(client_id.to_owned(), shares, *round) },
             AnonymityMessage::ServerReconstructShare { channel_shares, node_id, round} => {  self.on_receive_reconstruct_share(channel_shares.as_slice(), *node_id, *round) }
             AnonymityMessage::ReconstructResult { results, round } => { self.handle_reconstruct_result(&results, *round) }
             AnonymityMessage::ServerBeginReconstruct { initiator, round } => { self.begin_reconstructing(*initiator, *round) }

@@ -72,7 +72,7 @@ impl PKIBuilder {
         }
     }
 
-    pub fn for_server(mut self, server_id: Id) -> Self {
+    pub fn for_server(&mut self, server_id: Id) -> &mut Self {
         self.my_skey = Some(read_private_key(path_for_key(Peer::Server, KeyType::Private, server_id)));
         self.my_pkey = Some(read_public_key(path_for_key(Peer::Server, KeyType::Public, server_id)));
         assert_eq!(&self.my_skey.as_ref().unwrap().public_key(), self.my_pkey.as_ref().unwrap(), 
@@ -80,7 +80,7 @@ impl PKIBuilder {
         self
     }
 
-    pub fn for_client(mut self, client_id: Id) -> Self {
+    pub fn for_client(&mut self, client_id: Id) -> &mut Self {
         self.my_skey = Some(read_private_key(path_for_key(Peer::Client, KeyType::Private, client_id)));
         self.my_pkey = Some(read_public_key(path_for_key(Peer::Client, KeyType::Public, client_id)));
         assert_eq!(&self.my_skey.as_ref().unwrap().public_key(), self.my_pkey.as_ref().unwrap(), 

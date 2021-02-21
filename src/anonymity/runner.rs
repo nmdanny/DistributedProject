@@ -7,7 +7,7 @@ extern crate dist_lib;
 
 use std::rc::Rc;
 
-use dist_lib::{anonymity::private_messaging::PrivateMessage, consensus::{node::Node, node_communicator::NodeCommunicator}, crypto::AsymEncrypted, grpc::transport::{GRPCConfig, GRPCTransport}};
+use dist_lib::{anonymity::private_messaging::PrivateMessage, consensus::{node::Node, node_communicator::NodeCommunicator}, crypto::{AsymEncrypted, PKIBuilder}, grpc::transport::{GRPCConfig, GRPCTransport}};
 use dist_lib::consensus::types::*;
 use dist_lib::anonymity::logic::*;
 use dist_lib::anonymity::anonymous_client::{AnonymousClient, CommitResult, combined_subscriber};
@@ -86,8 +86,13 @@ async fn run_server(config: &Config, server_cfg: &ServerConfig) -> Result<(), an
     let shared_cfg = Arc::new(config.clone());
     let mut node = Node::new(server_cfg.node_id, config.num_nodes, transport.clone());
 
+    let pki = Arc::new(
+        PKIBuilder::new(config.num_nodes, config.num_clients)
+            .for_server(server_cfg.node_id)
+            .build()
+    );
     let _comm = NodeCommunicator::from_node(&mut node).await;
-    let sm = AnonymousLogSM::<_, _>::new(shared_cfg, server_cfg.node_id, transport);
+    let sm = AnonymousLogSM::<_, _>::new(shared_cfg, pki, server_cfg.node_id, transport);
     node.attach_state_machine(sm);
 
     node.run_loop()
