@@ -281,7 +281,7 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
         let timeout_duration = self.config.phase_length / 2;
         let mut batch_futs = (0.. self.config.num_nodes).map(|node_id| {
             let batch = chan_secrets.iter().map(|chan_shares| {
-                chan_shares[node_id].to_bytes()
+                chan_shares[node_id].clone()
             }).collect();
 
             let client = client.clone();

@@ -1,8 +1,10 @@
 use anyhow::Context;
+use sodiumoxide::crypto::box_::PrecomputedKey;
+
 use std::ops::{Add, Sub, Mul, Div};
 use std::collections::BTreeSet;
 use rand::seq::SliceRandom;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize, ser::SerializeSeq};
 use serde::ser::{Serializer, SerializeStruct};
 use serde::de::{self, DeserializeOwned, Deserializer, Visitor, SeqAccess, MapAccess};
 use std::collections::hash_map::DefaultHasher;
@@ -10,6 +12,9 @@ use std::hash::{Hasher, Hash};
 use std::convert::TryFrom;
 use derivative;
 use curve25519_dalek::scalar::Scalar;
+
+
+use crate::crypto::{HybEncrypted, hyb_encrypt, hyb_decrypt};
 
 
 // A finite field with 256 bits
@@ -21,22 +26,36 @@ pub type FP = Scalar;
 pub const NUM_POLYS: usize = 16;
 
 /// A secret share
-#[derive(Derivative, Clone, PartialEq, Eq)]
+#[derive(Derivative, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[derivative(Debug)]
 pub struct Share {
     pub x: u64,
 
     #[derivative(Debug = "ignore")]
+    #[serde(serialize_with = "serialize_fps", deserialize_with = "deserialize_fps")]
     pub p_x: Vec<FP>
+}
+
+fn serialize_fps<S>(fps: &Vec<FP>, s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    let mut seq = s.serialize_seq(Some(fps.len()))?;
+    for p in fps {
+        seq.serialize_element(&p.to_bytes())?;
+    }
+    seq.end()
+}
+
+fn deserialize_fps<'de, D>(d: D) -> Result<Vec<FP>, D::Error> where D: Deserializer<'de> {
+    let fps_bytes: Vec<[u8; 32]> = Deserialize::deserialize(d)?;
+    Ok(fps_bytes.into_iter().map(FP::from_bytes_mod_order).collect())
 }
 
 #[derive(Derivative, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[derivative(Debug)]
-pub struct ShareBytes {
+pub struct EncryptedShare {
     x: u64,
 
     #[derivative(Debug = "ignore")]
-    p_x: Vec<[u8; 32]>
+    p_x: Vec<HybEncrypted>
 }
 
 impl Share {
@@ -49,27 +68,33 @@ impl Share {
         }
     }
 
-    pub fn to_bytes(&self) -> ShareBytes {
+    pub fn encrypt(&self, key: &PrecomputedKey) -> EncryptedShare {
         let x = self.x;
         assert_eq!(self.p_x.len(), NUM_POLYS);
-        let mut p_x = vec![[0u8; 32]; NUM_POLYS];
-        for i in 0 .. NUM_POLYS {
-            p_x[i] = self.p_x[i].to_bytes();
-        }
-        ShareBytes {
+        let p_x = (0 .. NUM_POLYS).map(|i| 
+            hyb_encrypt(key, self.p_x[i].to_bytes())
+        ).collect();
+        EncryptedShare {
             x, p_x
         }
     }
 }
 
 
-impl ShareBytes {
-    pub fn to_share(&self) -> Share {
+impl EncryptedShare {
+    pub fn decrypt(&self, key: &PrecomputedKey) -> Option<Share> {
         let x = self.x;
-        let p_x = self.p_x.iter().map(|b| FP::from_bytes_mod_order(b.clone())).collect();
-        Share {
-            x, p_x
+        let mut p_x = Vec::new();
+        for i in 0 .. self.p_x.len() {
+            let v = hyb_decrypt(key, &self.p_x[i])?;
+            assert_eq!(v.len(), 32, "decrypted polynomial value must have 32 bytes");
+            let mut bytes = [0; 32];
+            bytes.copy_from_slice(&v);
+            p_x.push(FP::from_bytes_mod_order(bytes));
         }
+        Some(Share {
+            x, p_x
+        })
     }
 }
 
@@ -242,6 +267,7 @@ mod tests {
     use quickcheck::{Gen, QuickCheck};
     use rand::{distributions::{Standard, Uniform}, prelude::Distribution};
     use quickcheck_macros::quickcheck;
+    use sodiumoxide::crypto::box_::{gen_keypair, precompute};
 
     use super::*;
 
@@ -408,14 +434,38 @@ mod tests {
     }
 
     #[test]
-    fn share_bytes_conversion_works() {
-        let share = Share {
-            x: 1337u64,
-            p_x: vec![7331u64.into(); NUM_POLYS]
-        };
-        let bytes = share.to_bytes();
-        let share2 = bytes.to_share();
-        assert_eq!(share, share2); 
-        assert_eq!(share.x, 1337u64);
+    fn share_serialization_works() {
+        fn test(payload: Vec<u8>) -> bool {
+            let secret = create_share(encode_secret(payload.clone()).unwrap(), 1, 1);
+
+            let secret_encoded = bincode::serialize(&secret).unwrap();
+            let secret_decoded = bincode::deserialize::<Vec<Share>>(&secret_encoded).unwrap();
+
+            secret == secret_decoded
+        }
+        QuickCheck::gen(QuickCheck::new(), Gen::new(NUM_POLYS * 31 - 16)).quickcheck(test as fn(Vec<u8>) -> bool);
     }
+
+    #[test]
+    fn share_encryption_works() {
+        fn test(payload: Vec<u8>) -> bool {
+
+            let (a_pk, a_sk) = gen_keypair();
+            let (b_pk, b_sk) = gen_keypair();
+
+            let key = precompute(&b_pk, &a_sk);
+            let _key2 = precompute(&a_pk, &b_sk);
+
+            assert_eq!(key, _key2);
+
+            let shares = create_share(encode_secret(payload.clone()).unwrap(), 1, 1);
+            
+            let secret_enc = shares[0].encrypt(&key);
+            let secret_dec = secret_enc.decrypt(&key);
+
+            secret_dec.as_ref() == Some(&shares[0])
+        }
+        QuickCheck::gen(QuickCheck::new(), Gen::new(NUM_POLYS * 31 - 16)).quickcheck(test as fn(Vec<u8>) -> bool);
+    }
+
 }

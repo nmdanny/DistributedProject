@@ -49,7 +49,7 @@ pub struct Config {
 
 /// Given a list of clients who are 'live', that is, didn't crash before sending all their shares,
 /// and all of the node's shares, sums shares from those channels
-fn mix_shares_from(my_id: Id, live_clients: &HashSet<Id>, shares_view: &Vec<Vec<(Share, Id)>>) -> Option<Vec<ShareBytes>> {
+fn mix_shares_from(my_id: Id, live_clients: &HashSet<Id>, shares_view: &Vec<Vec<(Share, Id)>>) -> Option<Vec<Share>> {
     let condensed_view = shares_view[0].iter().map(|s| &s.1).collect::<Vec<_>>();
     info!("node {} is trying to mix his shares from clients {:?}, with view {:?}", my_id, live_clients, condensed_view);
 
@@ -77,7 +77,6 @@ fn mix_shares_from(my_id: Id, live_clients: &HashSet<Id>, shares_view: &Vec<Vec<
                     acc
                 }
             })
-            .to_bytes()
     }).collect())
 }
 
@@ -125,7 +124,7 @@ pub enum AnonymityMessage<V: Value> {
     ClientShare { 
         // A client must always send 'num_channels` shares to a particular server
         #[derivative(Debug="ignore")]
-        channel_shares: Vec<ShareBytes>,
+        channel_shares: Vec<Share>,
         client_id: Id,
         round: usize
     },
@@ -142,7 +141,7 @@ pub enum AnonymityMessage<V: Value> {
     },
     ServerReconstructShare { 
         #[derivative(Debug="ignore")]
-        channel_shares: Vec<ShareBytes>, 
+        channel_shares: Vec<Share>, 
         node_id: Id,
         round: usize
     },
@@ -286,7 +285,7 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
     /// Maps rounds from the future to a list of clients along with their shares
     /// This is used to handle share requests from future rounds
     #[derivative(Debug="ignore")]
-    pub round_to_shares: HashMap<usize, Vec<(Id, Vec<ShareBytes>)>>,
+    pub round_to_shares: HashMap<usize, Vec<(Id, Vec<Share>)>>,
 
     /// Likewise for liveness notifications from the future
     #[derivative(Debug="ignore")]
@@ -324,7 +323,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
     }
 
     #[instrument(skip(batch))]
-    pub fn handle_client_share(&mut self, client_id: Id, batch: &[ShareBytes], round: usize) {
+    pub fn handle_client_share(&mut self, client_id: Id, batch: &[Share], round: usize) {
         // with bad enough timing, this might be possible
         // assert!(round <= self.round + 1, "Cannot receive share from a round bigger than 1 from the current one");
         if round < self.round {
@@ -341,7 +340,6 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             Phase::Reconstructing { .. } => trace!("Got client share too late (while in reconstruct phase)"),
             Phase::ClientSharing { last_share_at, shares, .. } => {
                 assert_eq!(shares.len(), batch.len() , "client batch size mismatch with expected channels");
-                let batch = batch.into_iter().map(|s| s.to_share()).collect::<Vec<_>>();
                 assert!(shares.iter().map(|chan| chan.len()).sum::<usize>() <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
 
                 debug!("Got shares from client {} for round {}: {:?}", client_id, round, batch);
@@ -349,7 +347,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
                     self.metrics.report_share(round, chan, share.clone());
-                    shares[chan].push((share, client_id.clone()));
+                    shares[chan].push((share.clone(), client_id.clone()));
                 }
 
                 *last_share_at = Instant::now();
@@ -377,7 +375,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
     }
 
     #[instrument(skip(batch))]
-    pub fn on_receive_reconstruct_share(&mut self, batch: &[ShareBytes], _from_node: Id, round: usize) {
+    pub fn on_receive_reconstruct_share(&mut self, batch: &[Share], _from_node: Id, round: usize) {
         if self.round != round {
             return;
         }
@@ -394,7 +392,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
             // add all shares for every channel. 
             for channel_num in 0 .. self.config.num_channels {
-                let chan_new_share = batch[channel_num].to_share();
+                let chan_new_share = batch[channel_num].clone();
                 shares[channel_num].push(chan_new_share);
             }
             *last_share_at = Instant::now();
