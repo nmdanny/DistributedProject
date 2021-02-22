@@ -3,6 +3,7 @@ use crate::consensus::state_machine::StateMachine;
 use crate::consensus::transport::Transport;
 use crate::consensus::client::{Client, ClientTransport};
 use crate::anonymity::secret_sharing::*;
+use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use time::Instant;
 use std::{boxed::Box, collections::BTreeMap, convert::TryInto};
@@ -323,7 +324,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
                 let key = &self.pki.clone().clients_keys[client_id].1;
                 let id = self.id;
-                let batch = encrypted_shares.iter()
+                let batch = encrypted_shares.par_iter()
                     .map(|chan| chan[id].decrypt(key).expect("Should be able to decrypt shares meant for us"))
                     .collect::<Vec<_>>();
 
