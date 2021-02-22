@@ -176,8 +176,8 @@ impl <V: Value> GRPCTransport<V> {
             debug!(trans=true, "(req-out) serializing {} to {}: {:?}", desc, to, msg);
             let use_alt_client = use_alt_client(&msg);
             let msg: GenericMessage =
-                tokio::task::spawn_blocking(move || msg.try_into().context("While serializing message").map_err(RaftError::InternalError))
-                    .await.unwrap()?;
+                crate::util::spawn_cpu(move || msg.try_into().context("While serializing message").map_err(RaftError::InternalError))
+                    .await?;
             let client = {
                 let inner = self.inner.read();
                 let (client, client_alt) = inner.clients.get(&to).expect("invalid 'to' id");
@@ -308,8 +308,8 @@ impl <V: Value> RaftService<V> {
         where Req: TryFrom<GenericMessage, Error = TypeConversionError>, Res: TryInto<GenericMessage, Error = TypeConversionError>
     {
         debug!(trans=true, "(req-in) GRPC handler for {}, got request of size {} bytes", desc, request.get_ref().buf.len());
-        let request = tokio::task::spawn_blocking(move || Req::try_from(request.into_inner()).context(format!("serializing request for {}", desc)).map_err(|e|
-            tonic::Status::internal(e.to_string()))).await.unwrap()?;
+        let request = crate::util::spawn_cpu(move || Req::try_from(request.into_inner()).context(format!("serializing request for {}", desc)).map_err(|e|
+            tonic::Status::internal(e.to_string()))).await?;
         debug!(trans=true, "(req-in) GRPC handler for {}, request contents are {:?}", desc, request);
         let res: Result<Res, RaftError> = op(request).await;
         debug!(trans=true, "(res-out) GRPC handler for {}, got response {:?} ", desc, res);

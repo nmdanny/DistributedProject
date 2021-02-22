@@ -26,6 +26,7 @@ futures = "0.3"
 crossbeam = "0.8"
 parking_lot = "0.11"
 async-trait = "0.1.42"
+rayon = "1.5"
 
 # util
 rand = "0.7.3"
