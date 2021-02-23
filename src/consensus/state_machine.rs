@@ -42,9 +42,9 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Sen
     // Spawns the state machine loop, setting up communication
     fn spawn(mut self, mut entry_rx: mpsc::UnboundedReceiver<CommitEntry<V>>,
              mut force_apply_rx: mpsc::UnboundedReceiver<ForceApply<V>>,
-             res_tx: broadcast::Sender<(CommitEntry<V>, V::Result)>) -> JoinHandle<()> {
+             res_tx: broadcast::Sender<(CommitEntry<V>, V::Result)>) {
         let hook_stream = self.create_hook_stream();
-        let jh = tokio::spawn(async move {
+        let _ = crate::util::spawn_on_new_runtime(async move {
             let mut last_applied: Option<usize> = None;
             tokio::pin!(hook_stream);
             loop {
@@ -52,7 +52,6 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Sen
                     Some(event) = hook_stream.next() => {
                         self.handle_hook_event(event);
                     },
-                    // TODO: don't await in body, you dense motherfucker
                     Some(entry) = entry_rx.recv() => {
                         info!("handling SM change {:?}", entry);
                         let new_last_applied = last_applied.map(|i| i + 1).unwrap_or(0);
@@ -75,7 +74,6 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Sen
                 }
             }
         });
-    jh
     }
 }
 
