@@ -173,6 +173,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
                                 }
                            }
                        } else {
+                            sent_for_round = round as i64;
                             let send_res = client.send_anonymously(None, round).await;
                             if let Err(e) = send_res {
                                 error!("Client couldn't send zero value: {:?}", e);
