@@ -16,7 +16,7 @@ use tokio_stream::StreamExt;
 use tracing_futures::Instrument;
 
 use crate::consensus::logging::TimeOp;
-use crate::consensus::node::{Node, ServerState};
+use crate::consensus::node::{Node, ServerState, UpdateCommitIndexReason};
 use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
 use crate::consensus::state_machine::StateMachine;
 use crate::consensus::timing::HEARTBEAT_INTERVAL;
@@ -290,8 +290,10 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
 
 }
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct PendingWriteRequest<V: Value> {
+    #[derivative(Debug = "ignore")]
     pub responder: Option<oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>>,
 
     pub pending_entry_log_index: usize,
@@ -420,7 +422,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
             {
                 debug!("Found that a majority quorum of size {} who committed all values up to(including) index {}",
                        match_count + 1, n);
-                node.update_commit_index(Some(n));
+                node.update_commit_index(Some(n), UpdateCommitIndexReason::LeaderMatchIndexIncreased);
                 return;
 
                 // note: this will indirectly trigger `on_commit` (by commit channel)
@@ -593,11 +595,19 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
             term
         });
 
-        drop(node);
-
         let pending = PendingWriteRequest::new(entry_index, tx);
         let _prev = self.pending_writes.insert(entry_index, pending);
         assert!(_prev.is_none(), "can't insert multiple PendingWriteRequests to same log index");
+
+        if node.number_of_nodes == 1 {
+            // edge case where there's only 1 (leader) node,
+            // and no replication streams
+            let commit_index = node.storage.len() - 1;
+            node.update_commit_index(Some(commit_index),
+                                     UpdateCommitIndexReason::LeaderMatchIndexIncreased);
+            
+            return;
+        }
 
         // notify all replication streams of the newly added
         self.replicate_sender.send(()).unwrap_or_else(|e| {

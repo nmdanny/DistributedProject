@@ -185,6 +185,12 @@ pub enum ChangeStateReason {
     SawHigherTerm { my_term: usize, new_term: usize, new_term_leader: Option<Id>}
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum UpdateCommitIndexReason {
+    ObservedHigherLeaderCommit { leader_commit_index: Option<usize> },
+    LeaderMatchIndexIncreased 
+}
+
 /* Following block contains logic shared with all states of a raft node */
 impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
 
@@ -237,7 +243,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
 
     #[instrument]
     /// Updates the commit index, notifying subscribed clients of the new entries
-    pub fn update_commit_index(&mut self, new_commit_index: Option<usize>)
+    pub fn update_commit_index(&mut self, new_commit_index: Option<usize>, reason: UpdateCommitIndexReason)
     {
         assert!(self.commit_index <= new_commit_index, "Cannot decrease commit index");
         if self.commit_index == new_commit_index {
@@ -412,7 +418,8 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
     pub fn observe_leader_commit(&mut self, leader_commit_index: Option<usize>) {
         if leader_commit_index > self.commit_index {
             let last_log_entry = self.storage.last_log_index_term().index();
-            self.update_commit_index(leader_commit_index.min(last_log_entry));
+            self.update_commit_index(leader_commit_index.min(last_log_entry),
+                                     UpdateCommitIndexReason::ObservedHigherLeaderCommit { leader_commit_index });
         }
     }
 }
