@@ -9,7 +9,8 @@ use chrono::prelude::*;
 
 use std::mem::drop;
 
-pub type Guards = Vec<Box<dyn Any>>;
+/// When dropped, flushes remaining spans/events to disk/network etc
+pub type Guards = Vec<Box<dyn Any + Send>>;
 
 #[must_use]
 pub fn setup_logging() -> Result<Guards, anyhow::Error> {

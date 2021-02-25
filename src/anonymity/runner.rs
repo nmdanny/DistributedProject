@@ -72,7 +72,6 @@ fn main() -> Result<(), anyhow::Error> {
                 });
         }
         Mode::Client(client_cfg) => {
-            let _guard = setup_logging()?;
             run_client(&options.config, client_cfg)?;
         }
     }
@@ -105,7 +104,8 @@ async fn run_server(config: &Config, server_cfg: &ServerConfig) -> Result<(), an
 fn run_client(config: &Config, client_cfg: &ClientConfig) -> Result<(), anyhow::Error> {
     let settings = Settings::with_flags(AppFlags {
         config: config.clone(),
-        client_id: client_cfg.client_id
+        client_id: client_cfg.client_id,
+        logging_guard: None
     });
     gui::App::run(settings).unwrap();
     Ok(())
