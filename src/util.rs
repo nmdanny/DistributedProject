@@ -65,7 +65,7 @@ mod tests {
     #[tokio::test]
     pub async fn test_spawn_cpu_async_works() {
 
-        let _guard = crate::consensus::logging::setup_logging().unwrap();
+        let _guard = crate::logging::setup_logging().unwrap();
 
         let sync_barrier_1 = Arc::new(Barrier::new(2)); 
         let sync_barrier_2 = sync_barrier_1.clone();

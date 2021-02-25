@@ -1,5 +1,5 @@
 
-use crate::{consensus::logging::setup_logging, grpc::transport::{GRPCConfig, GRPCTransport}};
+use crate::{logging::setup_logging, grpc::transport::{GRPCConfig, GRPCTransport}};
 use crate::consensus::types::*;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;

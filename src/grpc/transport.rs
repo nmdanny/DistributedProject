@@ -384,7 +384,8 @@ mod tests {
     use futures::future::join_all;
     use tokio::{sync::mpsc, task::{self, JoinHandle}};
     use tracing_futures::Instrument;
-    use crate::consensus::{logging::setup_logging, node_communicator::NodeCommunicator, state_machine::NoopStateMachine, transport::ThreadTransport};
+    use crate::logging::setup_logging;
+    use crate::consensus::{node_communicator::NodeCommunicator, state_machine::NoopStateMachine, transport::ThreadTransport};
     use crate::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 
 

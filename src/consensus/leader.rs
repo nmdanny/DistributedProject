@@ -15,7 +15,7 @@ use tokio::task;
 use tokio_stream::StreamExt;
 use tracing_futures::Instrument;
 
-use crate::consensus::logging::TimeOp;
+use crate::logging::TimeOp;
 use crate::consensus::node::{Node, ServerState, UpdateCommitIndexReason};
 use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
 use crate::consensus::state_machine::StateMachine;

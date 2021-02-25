@@ -10,4 +10,3 @@ pub mod leader;
 pub mod client;
 pub mod timing;
 pub mod state_machine;
-pub mod logging;

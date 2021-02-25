@@ -15,3 +15,4 @@ pub mod grpc;
 pub mod crypto;
 
 pub(crate) mod util;
+pub mod logging;

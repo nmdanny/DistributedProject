@@ -11,7 +11,7 @@ use dist_lib::{anonymity::private_messaging::PrivateMessage, consensus::{node::N
 use dist_lib::consensus::types::*;
 use dist_lib::anonymity::logic::*;
 use dist_lib::anonymity::anonymous_client::{AnonymousClient, CommitResult, combined_subscriber};
-use dist_lib::consensus::logging::*;
+use dist_lib::logging::*;
 use dist_lib::consensus::client::ClientTransport;
 use gui::AppFlags;
 use iced::{Application, Settings};

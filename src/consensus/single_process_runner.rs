@@ -4,7 +4,7 @@ extern crate tracing;
 use anyhow::Error;
 use tokio::sync::mpsc;
 use tracing_futures::Instrument;
-use dist_lib::consensus::logging::setup_logging;
+use dist_lib::logging::setup_logging;
 use dist_lib::consensus::types::*;
 use dist_lib::consensus::state_machine::NoopStateMachine;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
