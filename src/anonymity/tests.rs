@@ -11,8 +11,9 @@ use crate::anonymity::logic::*;
 use crate::anonymity::anonymous_client::{AnonymousClient, CommitResult, combined_subscriber};
 use crate::anonymity::callbacks::*;
 use crate::crypto::PKIBuilder;
+use crossbeam::epoch::Pointable;
 use futures::{Future, Stream, StreamExt, future::join, future::join_all};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::distributions::{Distribution, Uniform};
 use tokio_stream::StreamMap;
 use tracing_futures::Instrument;
@@ -46,50 +47,46 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
         let num_nodes = config.num_nodes;
 
         let config = Arc::new(config);
-
         let grpc_config = GRPCConfig::default_for_nodes(num_nodes);
-        let (mut nodes, communicators) = futures::future::join_all(
-            (0 .. num_nodes).map(|id| {
-                let grpc_config = grpc_config.clone();
-                async move {
-                    let server_transport = GRPCTransport::new(Some(id), grpc_config).await.unwrap();
-                    let server_transport = AdversaryTransport::new(server_transport, num_nodes);
-                    let mut node = Node::new(id, num_nodes, server_transport.clone());
-                    let comm = NodeCommunicator::from_node(&mut node).await;
-                    (node, comm)
-                }
-            })
-            ).await.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
-
-        let server_transport = nodes[0].transport.clone();
-
-        info!("setup - created nodes");
-            
         let mut pki_builder = PKIBuilder::new(config.num_nodes, config.num_clients);
 
-        for node in &mut nodes {
-            // used for communicating with other nodes
-            let client_transport = node.transport.get_inner().clone();
-            let pki= Arc::new(
-                    pki_builder.for_server(node.id).build()
+        let adversary_transports = Arc::new(Mutex::new(Vec::new()));
+        let rt = tokio::runtime::Handle::current();
+        let _e = rt.enter();
+        for node_id in 0 .. num_nodes {
+            let config = config.clone();
+            let grpc_config = grpc_config.clone();
+            let pki = Arc::new(
+                    pki_builder.for_server(node_id).build()
             );
-            let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
-            node.attach_state_machine(sm);
-        }
+            let adversary_transports = adversary_transports.clone();
+            tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Handle::current();
+                let _ = rt.enter();
+                futures::executor::block_on(async move {
+                    info!("Setting up node {}", node_id);
+                    let ls = tokio::task::LocalSet::new();
+                    ls.run_until(async move {
+                    let server_transport = GRPCTransport::new(Some(node_id), grpc_config).await.unwrap();
+                    let server_transport = AdversaryTransport::new(server_transport, num_nodes);
+                    adversary_transports.lock().push(server_transport.clone());
+                    let mut node = Node::new(node_id, num_nodes, server_transport.clone());
+                    let _comm = NodeCommunicator::from_node(&mut node).await;
 
-        for node in nodes {
-            let id = node.id;
-            tokio::task::spawn_local(async move {
-                node.run_loop()
-                    .instrument(tracing::info_span!("node-loop", node.id = id))
-                    .await
-                    .unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
+
+                    let client_transport = server_transport.get_inner().clone();
+                    let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
+                    node.attach_state_machine(sm);
+                    node.run_loop()
+                        .instrument(tracing::info_span!("node-loop", node.id = node_id))
+                        .await
+                        .unwrap_or_else(|e| error!("Error running node {}: {:?}", node_id, e))
+                    }).await;
+                });
             });
         }
 
-        info!("setup - spawned nodes");
-
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         
         let mut clients = Vec::new();
@@ -119,9 +116,10 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
 
         info!("Starting GRPC scenario");
 
+        let adversary = adversary_transports.lock().remove(0);
         Scenario {
-            communicators,
-            server_transport,
+            communicators: Vec::new(),
+            server_transport: adversary,
             clients,
             client_transports: client_ts,
             phantom: Default::default()
@@ -205,11 +203,11 @@ pub async fn setup_scenario<V: Value + Hash>(config: Config) -> GRPCScenario<V> 
 #[tokio::test]
 async fn simple_scenario() {
     let ls = tokio::task::LocalSet::new();
+    let _guard = setup_logging().unwrap();
     ls.run_until(async move {
 
-        setup_logging().unwrap();
 
-        let mut scenario = setup_grpc_scenario::<u64>(Config {
+        let mut scenario = setup_test_scenario::<u64>(Config {
             num_nodes: 2,
             num_clients: 2,
             threshold: 2,
@@ -239,29 +237,29 @@ const VALS_TO_COMMIT: u64 = 20;
 #[tokio::test]
 async fn many_rounds() {
     let ls = tokio::task::LocalSet::new();
+    let _guard = setup_logging().unwrap();
     ls.run_until(async move {
-
-        setup_logging().unwrap();
-
         let mut scenario = setup_test_scenario::<String>(Config {
             num_nodes: 5,
             threshold: 3,
-            num_clients: 8,
-            num_channels: 16,
-            phase_length: std::time::Duration::from_millis(200),
+            num_clients: 2,
+            num_channels: 64,
+            phase_length: std::time::Duration::from_millis(2000),
 
         }).await;
 
 
-        let handles = (0..).zip(scenario.clients.drain(..)).map(|(num, client)| {
+        let mut handles = (0..).zip(scenario.clients.drain(..)).map(|(num, client)| {
             task::spawn_local(async move {
                 let mut sends = 0;
                 loop {
                     let res = client.send_anonymously(format!("CL{}|V={}", num, sends)).await;
                     match res {
                         Ok(CommitResult { round, channel}) => { 
-                            println!("CL{}|V={}  was committed via channel {} at round {}", num, sends, channel, round)}
-                        Err(e) => { panic!("Client {} failed to send shares: {}", client.client_id(), e) }
+                            info!("CL{}|V={}  was committed via channel {} at round {}", num, sends, channel, round)}
+                        Err(e) => { 
+                            panic!("Client {} failed to send shares: {}", client.client_id(), e) 
+                        }
                     }
                     sends += 1;
                     if sends == VALS_TO_COMMIT {
@@ -269,9 +267,21 @@ async fn many_rounds() {
                     }
                 }
             })
-        });
+        }).collect::<Vec<_>>();
 
-        futures::future::join_all(handles).await;
+        loop {
+            if handles.is_empty() {
+                break
+            }
+            let (res, index, rest) = futures::future::select_all(handles).await;
+            if res.is_err() {
+                panic!("CL{} failed: {:?}", index, res.unwrap_err());
+            } else {
+                println!("CL{} finished", index);
+            }
+            handles = rest;
+        }
+
 
 
 
@@ -283,10 +293,8 @@ async fn many_rounds() {
 #[tokio::test]
 async fn client_crash_only() {
     let ls = tokio::task::LocalSet::new();
+    let _guard = setup_logging().unwrap();
     ls.run_until(async move {
-
-        setup_logging().unwrap();
-
         let mut scenario = setup_test_scenario::<u64>(Config {
             num_nodes: 3,
             num_clients: 2,
@@ -339,10 +347,8 @@ async fn client_crash_only() {
 #[tokio::test]
 async fn client_crash_server_drop() {
     let ls = tokio::task::LocalSet::new();
+    let _guard = setup_logging().unwrap();
     ls.run_until(async move {
-
-        setup_logging().unwrap();
-
         let mut scenario = setup_test_scenario::<u64>(Config {
             num_nodes: 3,
             num_clients: 2,
@@ -399,10 +405,8 @@ async fn client_crash_server_drop() {
 #[tokio::test]
 async fn client_crash_server_crash() {
     let ls = tokio::task::LocalSet::new();
+    let _guard = setup_logging().unwrap();
     ls.run_until(async move {
-
-        setup_logging().unwrap();
-
         let mut scenario = setup_test_scenario::<u64>(Config {
             num_nodes: 3,
             num_clients: 2,

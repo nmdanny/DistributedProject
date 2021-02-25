@@ -181,12 +181,12 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     self.set_leader(leader_id);
                 },
                 Ok(ClientReadResponse::BadRange { commit_index }) => {
-                    // warn!(commit_index = ?commit_index, last_commit_index = ?self.last_commit_index,
-                    //       ">>> client read request - bad range, how is this possible?");
+                    warn!(commit_index = ?commit_index, last_commit_index = ?self.last_commit_index,
+                          ">>> client read request - bad range, how is this possible?");
                     self.last_commit_index = None.max(commit_index);
                 }
                 Err(RaftError::NetworkError(e)) => {
-                    trace!(net_err=true, ">>> client encountered networking error: {}", e);
+                    error!(net_err=true, ">>> client encountered networking error: {}", e);
                     self.set_leader(None);
                 }
                 Err(e) =>
@@ -218,6 +218,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                 return Ok((self.last_commit_index.unwrap(), None))
             }
 
+            info!("Sending {:?} to suspected leader {:?}", value, self.leader);
             let res = self.transport.submit_value(self.leader, value.clone()).await;
             match res {
                 Ok(ClientWriteResponse::Ok { commit_index, sm_output} ) => {
@@ -226,14 +227,15 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     return Ok((commit_index, Some(sm_output)));
                 },
                 Ok(ClientWriteResponse::NotALeader {leader_id }) => {
+                    warn!("Not a leader, setting new leader {:?}", leader_id);
                     self.set_leader(leader_id);
                 }
                 Err(RaftError::NetworkError(e)) => {
-                    trace!(net_err=true, ">>> client encountered network error: {}", e);
+                    error!(net_err=true, ">>> client encountered network error: {}", e);
                     self.set_leader(None);
                 },
                 Err(RaftError::TimeoutError(e)) => {
-                    trace!(">>> client encountered timeout error: {}", e);
+                    error!(">>> client encountered timeout error: {}", e);
                     self.set_leader(None);
                 }
                 Err(e) => {

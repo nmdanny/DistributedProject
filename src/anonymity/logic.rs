@@ -582,7 +582,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     pub async fn test_simulation() {
-        crate::consensus::logging::setup_logging().unwrap();
+        let _guard = crate::consensus::logging::setup_logging().unwrap();
 
         let config = Arc::new(Config {
             threshold: THRESHOLD,

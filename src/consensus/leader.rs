@@ -102,13 +102,14 @@ pub enum ReplicationLoopError {
     PeerError(RaftError),
 }
 
-#[instrument]
+#[instrument(skip(transport), level = "trace")]
 /// Sends an AE, treating network errors or stale responses as errors, and conflict or successful
 /// responses as success.
 async fn send_ae<V: Value, T: Transport<V>>(transport: &T, to: Id, current_term: usize, req: AppendEntries<V>) 
     -> Result<AppendEntriesResponse, ReplicationLoopError> 
 {
     let res = transport.send_append_entries(to, req).await;
+    trace!(?res, "send_ae response");
     let res = res .map_err(ReplicationLoopError::PeerError)?;
     match res.meaning(current_term) {
         AEResponseMeaning::Ok => Ok(res),
@@ -262,10 +263,9 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                     }
                 }
             }
-        })
+        }.instrument(trace_span!("heartbeat-loop", from=?leader_id, to=?id, ?term)))
     }
 
-    #[instrument(skip(stale_sender))]
     /// To run concurrently as long as the leader is active.
     pub async fn run_replication_loop(mut self, stale_sender: mpsc::Sender<StaleLeader>) {
         let current_term = self.node.borrow().current_term;
@@ -485,6 +485,8 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
         let mut node = self.node.borrow_mut();
         node.leader_id = Some(node.id);
         node.voted_for = None;
+        let leader_id = node.id;
+        let leader_term = node.current_term;
 
         let mut sm_result_recv = node.sm_result_sender.subscribe();
 
@@ -521,8 +523,16 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
                 let id = stream.id;
                 stream
                     .run_replication_loop(stale_sender.clone())
-                    .instrument(info_span!("replication-stream", peer_id = ?id))
-            }));
+                    .instrument(
+                        info_span!(
+                            "replication-stream",
+                            from = ?leader_id,
+                            to = ?id,
+                            term = ?leader_term
+                        )
+                    )
+            })
+        );
 
 
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);

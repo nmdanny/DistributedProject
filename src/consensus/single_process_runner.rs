@@ -164,7 +164,7 @@ async fn client_message_loop<T: ClientTransport<String>>(client: &mut Client<T, 
 /// This tests the 'Random omission of clients and server' scenario
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Error> {
-    setup_logging()?;
+    let _guard = setup_logging()?;
 
 
     let ls = tokio::task::LocalSet::new();
@@ -215,7 +215,7 @@ mod tests {
     #[tokio::test]
     pub async fn simple_crash() {
         let ls = task::LocalSet::new();
-        setup_logging().unwrap();
+        let _guard = setup_logging().unwrap();
         ls.run_until(async move {
             let (scenario, rx) = Scenario::<u32>::setup(3, 1).await;
             let rx = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);

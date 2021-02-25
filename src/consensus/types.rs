@@ -225,9 +225,8 @@ pub enum ClientReadResponse<V: Value> {
 }
 
 /// Represents a committed log entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CommitEntry<V: Value> {
-    #[serde(bound = "V: Value")]
     pub value: V,
     pub index: usize,
     pub term: usize

@@ -440,7 +440,7 @@ mod tests {
     #[tokio::test]
     pub async fn grpc_simple_crash() {
         let ls = task::LocalSet::new();
-        setup_logging().unwrap();
+        let _guard = setup_logging().unwrap();
         ls.run_until(async move {
             let scenario = Scenario::<u32>::setup(3, 1).await;
             let Scenario { mut clients, mut server_transports, ..} = scenario;

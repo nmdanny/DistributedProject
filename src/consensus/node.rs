@@ -207,7 +207,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         
             let (sm, commit_recv, fe_recv) = self.state_machine.take().expect("State machine was deleted");
             let sender = self.sm_result_sender.clone();
-            let _jh = sm.spawn(commit_recv, fe_recv, sender);
+            let _jh = sm.spawn(self.id, commit_recv, fe_recv, sender);
 
             let node = Rc::new(RefCell::new(self));
 
@@ -263,8 +263,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         let new_entries = self.storage.get_from_to(
             new_entries_from, new_entries_to_inc + 1);
 
-        info!("Updated commit index from {:?} to {:?}, new entries: {:?}",
-              old_commit_index, self.commit_index, new_entries);
+        info!(old=?old_commit_index, new=?self.commit_index, new_entries=?new_entries, reason=?reason, "Updated commit index");
 
         for (entry, index) in new_entries.iter().zip(new_entries_from ..= new_entries_to_inc) {
             self.commit_sender

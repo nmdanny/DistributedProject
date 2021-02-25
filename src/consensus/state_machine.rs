@@ -40,7 +40,9 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Sen
 
 
     // Spawns the state machine loop, setting up communication
-    fn spawn(mut self, mut entry_rx: mpsc::UnboundedReceiver<CommitEntry<V>>,
+    fn spawn(mut self,
+             node_id: usize,
+             mut entry_rx: mpsc::UnboundedReceiver<CommitEntry<V>>,
              mut force_apply_rx: mpsc::UnboundedReceiver<ForceApply<V>>,
              res_tx: broadcast::Sender<(CommitEntry<V>, V::Result)>) {
         let hook_stream = self.create_hook_stream();
@@ -53,7 +55,6 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Sen
                         self.handle_hook_event(event);
                     },
                     Some(entry) = entry_rx.recv() => {
-                        info!("handling SM change {:?}", entry);
                         let new_last_applied = last_applied.map(|i| i + 1).unwrap_or(0);
                         assert_eq!(new_last_applied, entry.index, "Commit entry index should equal new last applied");
                         let out = self.apply(&entry.value);
@@ -73,7 +74,7 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Sen
                     }
                 }
             }
-        });
+        }.instrument(info_span!("SM-loop", node.id=?node_id)));
     }
 }
 
