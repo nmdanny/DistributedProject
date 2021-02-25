@@ -225,6 +225,14 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
         let id = self.id.clone();
         let last_ae_send = self.last_ae_send.clone();
         let term = self.leader_term;
+        // note that the commit index & prev_log_index_term here are stale, they aren't updated
+        // and in fact, `prev_log_index_term` refers to no entry. 
+        // (In my implementation of `Node::on_receive_append_entry` this isn't an issue)
+        //
+        // Therefore, this loop doesn't handle `match_index` (handled by `try_replication` which
+        // can also send heartbeats), it's sole purpose is to prevent premature leader switch
+        // when sending big AE entries, and this can run on a different thread rather than on the node's local set.
+
         let leader_commit = self.node.borrow().commit_index;
         let leader_id = self.node.borrow().id;
         tokio::spawn(async move {
@@ -240,6 +248,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                     continue;
                 }
                 let transport = transport.clone();
+                debug!("sending heartbeat from alternate loop");
                 let res = send_ae(&transport, id, term, AppendEntries {
                     entries: Vec::new(),
                     leader_commit,
@@ -247,6 +256,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                     leader_id,
                     prev_log_index_term: IndexTerm::no_entry()
                 }).await;
+                debug!("heartbeat send response: {:?}", res);
                 let now = Instant::now();
                 last_ae_send.store(now);
                 delay.as_mut().reset((now + HEARTBEAT_INTERVAL).into());
@@ -263,7 +273,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                     }
                 }
             }
-        }.instrument(trace_span!("heartbeat-loop", from=?leader_id, to=?id, ?term)))
+        }.instrument(debug_span!("heartbeat-loop", from=?leader_id, to=?id, ?term)))
     }
 
     /// To run concurrently as long as the leader is active.
@@ -547,6 +557,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
                 return Ok(());
             }
 
+            // Upon election, leader sends heartbeats
+            // Note that since a tokio interval's first tick occurs immediately,
+            // we don't need to worry about it.
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
                         replicate_trigger.send(()).unwrap_or_else(|e| {
