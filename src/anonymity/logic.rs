@@ -79,7 +79,11 @@ pub enum Phase {
 
         // Contains 'd' channels, each channel containing shares from many clients
         #[derivative(Debug="ignore")]
-        shares: Vec<Vec<(Share, Id)>>
+        shares: Vec<Vec<(Share, Id)>>,
+
+        // Clients who sent shares during a reconstruct phase
+        #[derivative(Debug="ignore")]
+        clients: HashSet<Id>
     },
     Reconstructing {
         #[derivative(Debug="ignore")]
@@ -127,7 +131,7 @@ pub enum AnonymityMessage<V: Value> {
     },
     ReconstructResult {
         #[serde(bound = "V: Value")]
-        #[derivative(Debug="ignore")]
+        // #[derivative(Debug="ignore")]
         results: ReconstructionResults<V>,
         round: usize
     }
@@ -145,7 +149,7 @@ struct SMSender<V: Value, CT: ClientTransport<AnonymityMessage<V>>> {
 impl <V: Value, CT: ClientTransport<AnonymityMessage<V>>> SMSender<V, CT> {
     pub fn new(node_id: usize, mut client: Client<CT, AnonymityMessage<V>>) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<(AnonymityMessage<V>, oneshot::Sender<()>)>();
-        let task_handle = tokio::task::spawn_local(async move {
+        let task_handle = tokio::spawn(async move {
             while let Some((msg, resolver)) = rx.recv().await {
                 let res = client.submit_value(msg.clone()).await;
                 if let Err(e) = res {
@@ -244,6 +248,7 @@ impl Metrics {
 #[derivative(Debug)]
 pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> {
 
+    #[derivative(Debug="ignore")]
     pub committed_messages: Vec<V>,
 
     #[derivative(Debug="ignore")]
@@ -270,10 +275,6 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
     #[derivative(Debug="ignore")]
     pub round_to_shares: HashMap<usize, Vec<(Id, Vec<Vec<EncryptedShare>>)>>,
 
-    /// Likewise for liveness notifications from the future
-    #[derivative(Debug="ignore")]
-    pub round_to_live: HashMap<usize, HashSet<Id>>,
-
     // Used to await on messages sent to other nodes
     #[derivative(Debug="ignore")]
     pub messages_being_sent: Vec<oneshot::Receiver<()>>,
@@ -290,14 +291,14 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         let client = SMSender::new(id, Client::new(format!("SM-{}-cl", id), client_transport, config.num_nodes));
         let state = Phase::ClientSharing {
             last_share_at: Instant::now(),
-            shares: vec![Vec::new(); config.num_channels]
+            shares: vec![Vec::new(); config.num_channels],
+            clients: HashSet::new()
         };
         let (nr_tx, _nr_rx) = broadcast::channel(NEW_ROUND_CHAN_SIZE);
         AnonymousLogSM {
             committed_messages: Vec::new(), client, id, config: config.clone(), pki, state, round: 0, 
             new_round_sender: nr_tx,
             round_to_shares: HashMap::new(),
-            round_to_live: HashMap::new(),
             messages_being_sent: Vec::new(),
             metrics: Metrics::new(id, config)
         }
@@ -315,23 +316,32 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         if round > self.round {
             let entries = self.round_to_shares.entry(round).or_default();
             entries.push((client_id, encrypted_shares.clone()));
-            debug!("Got share from the next round {} while current round is {}, enqueuing", round, self.round);
+            error!("Got share from the next round {} while current round is {}, enqueuing", round, self.round);
             return;
         }
         match &mut self.state {
             Phase::Reconstructing { .. } => trace!("Got client share too late (while in reconstruct phase)"),
-            Phase::ClientSharing { last_share_at, shares, .. } => {
+            Phase::ClientSharing { last_share_at, shares, clients, .. } => {
 
                 let key = &self.pki.clone().clients_keys[client_id].1;
                 let id = self.id;
+                let num_nodes = self.config.num_nodes;
+
+                assert_eq!(encrypted_shares.len(), self.config.num_channels, "anonymous client sent shares of wrong channel count");
+                assert!(encrypted_shares.iter().all(|chan| chan.len() == num_nodes), "anonymous client sent shares of wrong node count");
+
+                let was_not_present = clients.insert(client_id);
+                if !was_not_present {
+                    error!("Got shares from client {} at round {} twice", client_id, self.round);
+                    return;
+                }
+
                 let batch = encrypted_shares.par_iter()
                     .map(|chan| chan[id].decrypt(key).expect("Should be able to decrypt shares meant for us"))
                     .collect::<Vec<_>>();
 
-                assert_eq!(shares.len(), batch.len() , "client batch size mismatch with expected channels");
+                assert_eq!(batch.len(), self.config.num_channels, "client batch size mismatch with expected channels");
                 assert!(shares.iter().map(|chan| chan.len()).sum::<usize>() <= self.config.num_channels * self.config.num_clients, "Got too many shares, impossible");
-
-                debug!("Got shares from client {} for round {}: {:?}", client_id, round, batch);
 
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
@@ -345,20 +355,17 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
     }
 
     #[instrument(skip(batch))]
-    pub fn on_receive_reconstruct_share(&mut self, batch: &[Share], _from_node: Id, round: usize) {
+    pub fn on_receive_reconstruct_share(&mut self, batch: &[Share], from_node: Id, round: usize) {
         if self.round != round {
             return;
         }
         assert_eq!(batch.len(), self.config.num_channels, "batch size mismatch on receive_reconstruct_share");
         if let Phase::ClientSharing { .. } = &self.state {
             // shares must be synchronized(arrive after a BeginReconstruct message),
-            panic!("Got reconstruct share for round {} from node {} while still on ClientSharing phase", round, _from_node);
+            panic!("Got reconstruct share for round {} from node {} while still on ClientSharing phase", round, from_node);
         }
 
         if let Phase::Reconstructing { shares, last_share_at } = &mut self.state {
-
-            info!("Node {} at round {} got a batch batch from node {}", self.id, round, _from_node);
-            debug!("Batch: {:?}", batch);
 
             // add all shares for every channel. 
             for channel_num in 0 .. self.config.num_channels {
@@ -433,6 +440,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             return;
         }
         let shares = shares.unwrap();
+        assert_eq!(shares.len(), self.config.num_channels);
         let id = self.id;
         
         self.submit_message(AnonymityMessage::ServerReconstructShare {
@@ -450,7 +458,8 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
             Phase::Reconstructing { .. } => {
                 self.state = Phase::ClientSharing { 
                     last_share_at: Instant::now(), 
-                    shares: vec![Vec::new(); self.config.num_channels] 
+                    shares: vec![Vec::new(); self.config.num_channels],
+                    clients: HashSet::new()
                 };
                 self.round = round;
             }
@@ -497,7 +506,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
         if let Some(entries) = self.round_to_shares.remove(&self.round) {
             for (client, batch) in entries {
-                debug!("Handling delayed share from client {}", client);
+                warn!("Handling delayed share from client {}", client);
                 self.handle_client_share(client, &batch, self.round);
             }
         }
@@ -515,13 +524,18 @@ pub struct NewRound<V> {
 
 #[async_trait]
 impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<AnonymityMessage<V>>> StateMachine<AnonymityMessage<V>, T> for AnonymousLogSM<V, C> {
+    #[instrument]
     fn apply(&mut self, entry: &AnonymityMessage<V>) -> () {
+        let start = std::time::Instant::now();
+        info!("Begin handling AnonymityMessage");
         match entry {
             AnonymityMessage::ClientShare { shares, client_id, round} => { self.handle_client_share(client_id.to_owned(), shares, *round) },
             AnonymityMessage::ServerReconstructShare { channel_shares, node_id, round} => {  self.on_receive_reconstruct_share(channel_shares.as_slice(), *node_id, *round) }
             AnonymityMessage::ReconstructResult { results, round } => { self.handle_reconstruct_result(&results, *round) }
             AnonymityMessage::ServerBeginReconstruct { initiator, round } => { self.begin_reconstructing(*initiator, *round) }
         }
+        let delta = std::time::Instant::now() - start;
+        info!("Finish handling AnonymityMessage in {} ms", delta.as_millis());
     }
 
     type HookEvent = tokio::time::Instant;
