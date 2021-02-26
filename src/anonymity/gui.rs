@@ -231,14 +231,15 @@ impl <H: Hasher, I, T: 'static, S: 'static + Send + Stream<Item = T>> iced_futur
 
 pub struct AppFlags {
     pub config: Config,
-    pub client_id: usize
+    pub client_id: usize,
+    pub logging_guard: Option<dist_lib::logging::Guards>
 }
 
 
 #[derive(Debug)]
 pub enum AppMessage {
     Message(Message),
-    InitComplete(PMClient<String>)
+    InitComplete(PMClient<String>, dist_lib::logging::Guards)
 }
 
 enum AppState {
@@ -251,6 +252,7 @@ enum AppState {
 pub struct App {
     state: AppState,
     title: String,
+    logging_guard: Option<dist_lib::logging::Guards>
 }
 
 impl Application for App {
@@ -262,6 +264,7 @@ impl Application for App {
     fn new(flags: Self::Flags) -> (Self, Command<Self::Message>) {
         let title = format!("Client {:?}", flags.client_id);
         let cmd = Command::from(async move {
+            let logging_guard = dist_lib::logging::setup_logging().expect("Couldn't set logging for client");
             info!("cmd starting");
             let grpc_config = GRPCConfig::default_for_nodes(flags.config.num_nodes);
             let shared_cfg = Arc::new(flags.config.clone());
@@ -269,7 +272,7 @@ impl Application for App {
             let pki = PKIBuilder::new(
                 shared_cfg.num_nodes, shared_cfg.num_clients
             ).for_client(flags.client_id).build();
-            let transport = GRPCTransport::new(None, grpc_config).await.unwrap();
+            let transport = GRPCTransport::new(None, grpc_config, shared_cfg.client_timeout).await.unwrap();
             let sm_events = futures::future::join_all((0 .. shared_cfg.num_nodes).map(|node_id| {
                 let stream = transport.get_sm_event_stream::<NewRound<_>>(node_id);
                 async move {
@@ -281,11 +284,12 @@ impl Application for App {
             let recv = combined_subscriber(sm_events.into_iter());
             let client = PMClient::new(transport, shared_cfg, Arc::new(pki), flags.client_id, recv);
             info!("PM client created");
-            AppMessage::InitComplete(client)
+            AppMessage::InitComplete(client, logging_guard)
         });
         (App {
             state: AppState::Initializing,
-            title
+            title,
+            logging_guard: None
         }, cmd)
     }
 
@@ -302,8 +306,9 @@ impl Application for App {
                     panic!("Got message in wrong stage");
                 }
             },
-            AppMessage::InitComplete(client) => { 
+            AppMessage::InitComplete(client, logging_guard) => { 
                 self.state = AppState::Initialized { chat_state: ChatState::new(client) };
+                self.logging_guard = Some(logging_guard);
                 Command::none()
             }
         }

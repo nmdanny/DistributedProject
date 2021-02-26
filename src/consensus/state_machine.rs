@@ -71,7 +71,8 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Sen
                         force_apply.1.send(Ok(resp)).unwrap_or_else(|_e| {
                             error!("Couldn't send force apply result to client");
                         });
-                    }
+                    },
+                    else => {}
                 }
             }
         }.instrument(info_span!("SM-loop", node.id=?node_id)));
