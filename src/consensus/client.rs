@@ -8,7 +8,7 @@ use tracing::Instrument;
 use tokio::time::Duration;
 use async_trait::async_trait;
 use color_eyre::eyre::ContextCompat;
-use crate::consensus::timing::{CLIENT_RETRY_DELAY_RANGE, CLIENT_TIMEOUT};
+use crate::consensus::timing::CLIENT_RETRY_DELAY_RANGE;
 use tokio::time::timeout;
 use derivative;
 use futures::{Stream, TryFutureExt};
@@ -37,10 +37,10 @@ pub struct SingleProcessClientTransport<V: Value>
 }
 
 impl <V: Value> SingleProcessClientTransport<V> {
-    pub fn new(communicators: Vec<NodeCommunicator<V>>) -> Self {
+    pub fn new(communicators: Vec<NodeCommunicator<V>>, timeout_duration: Duration) -> Self {
         SingleProcessClientTransport {
             communicators: Arc::new(communicators),
-            timeout_duration: CLIENT_TIMEOUT
+            timeout_duration
         }
     }
 }

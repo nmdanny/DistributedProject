@@ -1,7 +1,7 @@
 use crate::consensus::types::*;
 use async_trait::async_trait;
 use tokio::task;
-use std::fmt::Debug;
+use std::{fmt::Debug, time::Duration};
 use crate::consensus::node::Node;
 use crate::consensus::node_communicator::NodeCommunicator;
 use derivative;
@@ -64,18 +64,21 @@ pub struct ThreadTransport<V: Value>
     state: Arc<RwLock<ThreadTransportState<V>>>,
 
     #[derivative(Debug="ignore")]
-    barrier: Arc<Barrier>
+    barrier: Arc<Barrier>,
+
+    timeout: Duration
 }
 
 impl <V: Value> ThreadTransport<V> {
-    pub fn new(expected_num_nodes: usize) -> Self {
+    pub fn new(expected_num_nodes: usize, timeout: Duration) -> Self {
         let barrier = Arc::new(Barrier::new(expected_num_nodes));
         let state = ThreadTransportState {
-            senders: Default::default()
+            senders: Default::default(),
         };
         ThreadTransport {
             state: Arc::new(RwLock::new(state)),
-            barrier
+            barrier,
+            timeout
         }
     }
 }
@@ -87,7 +90,8 @@ impl <V: Value> Transport<V> for ThreadTransport<V> {
         let comm = {
             self.state.read().await.senders.get(&to).unwrap().clone()
         };
-        Ok(comm.append_entries(msg).await?)
+        Ok(tokio::time::timeout(self.timeout, comm.append_entries(msg)).await
+            .map_err(|_| RaftError::TimeoutError(anyhow::format_err!("Timeout of {:?} for send_append_entries elapsed", self.timeout)))??)
     }
 
     #[instrument]
@@ -95,7 +99,9 @@ impl <V: Value> Transport<V> for ThreadTransport<V> {
         let comm = {
             self.state.read().await.senders.get(&to).unwrap().clone()
         };
-        Ok(comm.request_vote(msg).await?)
+
+        Ok(tokio::time::timeout(self.timeout, comm.request_vote(msg)).await
+            .map_err(|_| RaftError::TimeoutError(anyhow::format_err!("Timeout of {:?} for send_request_vote elapsed", self.timeout)))??)
     }
 
     async fn on_node_communicator_created(&mut self, id: Id, comm: &mut NodeCommunicator<V>) {

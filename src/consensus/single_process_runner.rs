@@ -93,6 +93,8 @@ impl <V: Value + Eq> ConsistencyCheck<V> {
 const NUM_NODES: usize = 3;
 const NUM_CLIENTS: usize = 2;
 
+const NET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 
 /// A single threaded instance of many nodes and clients
 pub struct Scenario<V: Value> {
@@ -105,7 +107,7 @@ pub struct Scenario<V: Value> {
 impl <V: Value> Scenario<V> where V::Result: Default{
     pub async fn setup(num_nodes: usize, num_clients: usize) -> (Self, mpsc::UnboundedReceiver<LogEntry<V>>)
     {
-        let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes), num_nodes);
+        let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes, NET_TIMEOUT), num_nodes);
         let (nodes, communicators) = futures::future::join_all(
             (0 .. num_nodes).map(|i|
                 NodeCommunicator::create_with_node(i,
@@ -116,7 +118,7 @@ impl <V: Value> Scenario<V> where V::Result: Default{
         let mut clients = Vec::new();
         for i in 0 .. num_clients {
             let client_transport = AdversaryClientTransport::new(
-                SingleProcessClientTransport::new(communicators.clone()));
+                SingleProcessClientTransport::new(communicators.clone(), NET_TIMEOUT));
             let client = Client::new(format!("Client {}", i), client_transport, num_nodes);
             clients.push(client);
         }
@@ -213,7 +215,7 @@ mod tests {
     use tokio_stream::StreamExt;
 
     #[tokio::test]
-    pub async fn simple_crash() {
+    pub async fn single_thread_simple_crash() {
         let ls = task::LocalSet::new();
         let _guard = setup_logging().unwrap();
         ls.run_until(async move {

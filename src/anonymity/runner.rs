@@ -81,7 +81,7 @@ fn main() -> Result<(), anyhow::Error> {
 async fn run_server(config: &Config, server_cfg: &ServerConfig) -> Result<(), anyhow::Error> {
     let grpc_config = GRPCConfig::default_for_nodes(config.num_nodes);
     let transport: GRPCTransport<AnonymityMessage<AsymEncrypted>> = 
-        GRPCTransport::new(Some(server_cfg.node_id), grpc_config).await?;
+        GRPCTransport::new(Some(server_cfg.node_id), grpc_config, config.client_timeout).await?;
     let shared_cfg = Arc::new(config.clone());
     let mut node = Node::new(server_cfg.node_id, config.num_nodes, transport.clone());
 

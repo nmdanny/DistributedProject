@@ -71,19 +71,27 @@ pub struct GRPCTransportInner<V: Value> {
     #[derivative(Debug="ignore")]
     config: GRPCConfig,
 
-    clients_init: bool
+    clients_init: bool,
+
+    /// Timeout for client
+    #[derivative(Debug="ignore")]
+    client_timeout: std::time::Duration
 }
 
 /// Attempts to connect to all raft nodes(except my own node, in case we are a node), returns with an error if any connection fails
 #[instrument]
-pub async fn connect_to_nodes(my_id: Option<Id>, config: &GRPCConfig) -> Result<HashMap<usize, (Client, Client)>, anyhow::Error> {
+pub async fn connect_to_nodes(my_id: Option<Id>,
+                              config: &GRPCConfig, 
+                              timeout: std::time::Duration) -> Result<HashMap<usize, (Client, Client)>, anyhow::Error> {
     let mut clients = HashMap::new();
     for (id, url) in config.nodes.clone().into_iter().filter(|(id, _)| Some(*id) != my_id) {
         let mut attempts = 0;
         let client = loop {
             attempts += 1;
-            let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
-            let endpoint2 = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?;
+            let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?
+                .timeout(timeout);
+            let endpoint2 = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?
+                .timeout(timeout);
             info!("Connecting to {}", url);
             let res = tokio::try_join!(
                 RaftClient::connect(endpoint), RaftClient::connect(endpoint2)
@@ -111,16 +119,19 @@ pub struct GRPCTransport<V: Value> {
 }
 
 impl <V: Value> GRPCTransport<V> {
-    pub async fn new(my_id: Option<Id>, config: GRPCConfig) -> Result<Self, anyhow::Error> {
+    pub async fn new(my_id: Option<Id>, 
+                     config: GRPCConfig, 
+                     client_timeout: std::time::Duration) -> Result<Self, anyhow::Error> {
         let mut inner = GRPCTransportInner {
             clients: Default::default(),
             my_id,
             my_node: None,
             config,
-            clients_init: false
+            clients_init: false,
+            client_timeout
         };
         if my_id.is_none() {
-            inner.clients = connect_to_nodes(my_id, &inner.config).await?;
+            inner.clients = connect_to_nodes(my_id, &inner.config, client_timeout).await?;
             inner.clients_init = true;
         }
         Ok(Self {
@@ -133,16 +144,17 @@ impl <V: Value> GRPCTransport<V> {
     */
 
     pub async fn connect_to_nodes(&self) {
-        let (my_id, config) = {
+        let (my_id, config, timeout) = {
             let inner = self.inner.read();
             let my_id = inner.my_id;
+            let timeout = inner.client_timeout;
             if inner.clients_init {
                 return;
             }
             let config = inner.config.clone();
-            (my_id, config)
+            (my_id, config, timeout)
         };
-        let clients = connect_to_nodes(my_id, &config).await.unwrap();
+        let clients = connect_to_nodes(my_id, &config, timeout).await.unwrap();
 
         let mut inner = self.inner.write();
         inner.clients = clients;
@@ -388,6 +400,7 @@ mod tests {
     use crate::consensus::{node_communicator::NodeCommunicator, state_machine::NoopStateMachine, transport::ThreadTransport};
     use crate::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// A single threaded instance of many nodes and clients
     pub struct Scenario<V: Value> {
@@ -400,7 +413,7 @@ mod tests {
         {
             
             let futures = (0 .. num_nodes).map(|i| async move {
-                let grpc_transport = GRPCTransport::new(Some(i), GRPCConfig::default_for_nodes(num_nodes)).await.unwrap();
+                let grpc_transport = GRPCTransport::new(Some(i), GRPCConfig::default_for_nodes(num_nodes), TIMEOUT).await.unwrap();
                 let server_transport = AdversaryTransport::new(grpc_transport, num_nodes);
                 let (node, _comm) = NodeCommunicator::create_with_node(i,
                                                 num_nodes,
@@ -413,7 +426,7 @@ mod tests {
 
             let mut clients = vec![];
             for i in 0 .. num_clients {
-                let grpc_transport = GRPCTransport::new(None, GRPCConfig::default_for_nodes(num_nodes)).await.unwrap();
+                let grpc_transport = GRPCTransport::new(None, GRPCConfig::default_for_nodes(num_nodes), TIMEOUT).await.unwrap();
                 let client_transport = AdversaryClientTransport::new(grpc_transport);
                 let client = crate::consensus::client::Client::new(format!("Client {}", i), client_transport, num_nodes);
                 clients.push(client);
