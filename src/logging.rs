@@ -4,7 +4,7 @@ use tracing_error::ErrorLayer;
 use tracing_futures::WithSubscriber;
 use tracing_subscriber::{Layer, Registry, layer::SubscriberExt, fmt};
 use tracing_flame::FlameLayer;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use chrono::prelude::*;
 
 use std::mem::drop;
@@ -22,7 +22,7 @@ pub fn setup_logging() -> Result<Guards, anyhow::Error> {
         .install()
         .expect("Couldn't install jaeger telemetry");
 
-    let (flame, flame_guard) = FlameLayer::with_file(&name).expect("Couldn't install FlameLayer");
+    let (flame, flame_guard) = FlameLayer::with_file(PathBuf::from("traces").join(name)).expect("Couldn't install FlameLayer");
 
     let drops: Guards = vec![
         Box::new(uninstall),
