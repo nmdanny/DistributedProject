@@ -396,7 +396,7 @@ mod tests {
     use futures::future::join_all;
     use tokio::{sync::mpsc, task::{self, JoinHandle}};
     use tracing_futures::Instrument;
-    use crate::logging::setup_logging;
+    use crate::{consensus::adversarial_transport::{AdversaryHandle, NodeId}, logging::setup_logging};
     use crate::consensus::{node_communicator::NodeCommunicator, state_machine::NoopStateMachine, transport::ThreadTransport};
     use crate::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 
@@ -404,30 +404,34 @@ mod tests {
 
     /// A single threaded instance of many nodes and clients
     pub struct Scenario<V: Value> {
-        pub server_transports: Vec<AdversaryTransport<V, GRPCTransport<V>>>,
+        pub adversary: AdversaryHandle,
         pub clients: Vec<crate::consensus::client::Client<AdversaryClientTransport<V, GRPCTransport<V>>, V>>
     }
 
     impl <V: Value> Scenario<V> where V::Result: Default{
         pub async fn setup(num_nodes: usize, num_clients: usize) -> Self
         {
-            
-            let futures = (0 .. num_nodes).map(|i| async move {
-                let grpc_transport = GRPCTransport::new(Some(i), GRPCConfig::default_for_nodes(num_nodes), TIMEOUT).await.unwrap();
-                let server_transport = AdversaryTransport::new(grpc_transport, num_nodes);
-                let (node, _comm) = NodeCommunicator::create_with_node(i,
-                                                num_nodes,
-                                                server_transport.clone(), NoopStateMachine::default()).await;
-                (node, server_transport)
+            let adversary = AdversaryHandle::new();
+            let futures = (0 .. num_nodes).map(|i| {
+                let adversary = adversary.clone();
+                async move {
+                    let grpc_transport: GRPCTransport<V> = GRPCTransport::new(Some(i), GRPCConfig::default_for_nodes(num_nodes), TIMEOUT).await.unwrap();
+                    let server_transport = adversary.wrap_server_transport(i, grpc_transport);
+                    let (node, _comm) = NodeCommunicator::create_with_node(i,
+                                                    num_nodes,
+                                                    server_transport, NoopStateMachine::default()).await;
+                    node
+                }
             }).collect::<Vec<_>>();
 
-            let (nodes, server_transports) = futures::future::join_all(futures).await.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
+            let nodes = futures::future::join_all(futures).await;
             
 
             let mut clients = vec![];
             for i in 0 .. num_clients {
+                let adversary = adversary.clone();
                 let grpc_transport = GRPCTransport::new(None, GRPCConfig::default_for_nodes(num_nodes), TIMEOUT).await.unwrap();
-                let client_transport = AdversaryClientTransport::new(grpc_transport);
+                let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), grpc_transport);
                 let client = crate::consensus::client::Client::new(format!("Client {}", i), client_transport, num_nodes);
                 clients.push(client);
             }
@@ -444,7 +448,7 @@ mod tests {
             }
 
             Scenario {
-                server_transports,
+                adversary,
                 clients
             }
         }
@@ -457,14 +461,14 @@ mod tests {
         let _guard = setup_logging().unwrap();
         ls.run_until(async move {
             let scenario = Scenario::<u32>::setup(3, 1).await;
-            let Scenario { mut clients, mut server_transports, ..} = scenario;
+            let Scenario { mut clients, adversary, ..} = scenario;
             
             let client_jh = task::spawn_local(async move {
                 // submit first value
                 clients[0].submit_value(100).await.unwrap();
 
                 // "crash" server 0 by preventing it from sending/receiving messages to other nodes
-                server_transports.get_mut(0).unwrap().set_omission_chance(0, 1.0).await;
+                adversary.set_server_omission_chance(0, 1.0).await;
 
                 // submit second value
                 clients[0].submit_value(200).await.unwrap();

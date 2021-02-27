@@ -4,13 +4,12 @@ extern crate tracing;
 use anyhow::Error;
 use tokio::sync::mpsc;
 use tracing_futures::Instrument;
-use dist_lib::logging::setup_logging;
+use dist_lib::{consensus::adversarial_transport::{AdversaryClientTransport, AdversaryHandle, NodeId}, logging::setup_logging};
 use dist_lib::consensus::types::*;
 use dist_lib::consensus::state_machine::NoopStateMachine;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
 use dist_lib::consensus::transport::ThreadTransport;
 use dist_lib::consensus::client::{Client, SingleProcessClientTransport, ClientTransport};
-use dist_lib::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
 use std::collections::btree_map::Entry;
@@ -99,7 +98,7 @@ const NET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// A single threaded instance of many nodes and clients
 pub struct Scenario<V: Value> {
     pub communicators: Vec<NodeCommunicator<V>>,
-    pub server_transport: AdversaryTransport<V, ThreadTransport<V>>,
+    pub adversary: AdversaryHandle,
     pub clients: Vec<Client<AdversaryClientTransport<V, SingleProcessClientTransport<V>>, V>>,
     pub consistency_join_handle: JoinHandle<()>
 }
@@ -107,18 +106,21 @@ pub struct Scenario<V: Value> {
 impl <V: Value> Scenario<V> where V::Result: Default{
     pub async fn setup(num_nodes: usize, num_clients: usize) -> (Self, mpsc::UnboundedReceiver<LogEntry<V>>)
     {
-        let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes, NET_TIMEOUT), num_nodes);
+        let adversary = AdversaryHandle::new();
+        let server_transport = ThreadTransport::new(num_nodes, NET_TIMEOUT);
         let (nodes, communicators) = futures::future::join_all(
-            (0 .. num_nodes).map(|i|
+            (0 .. num_nodes).map(|i| {
+                let server_transport = adversary.wrap_server_transport(i, server_transport.clone());
                 NodeCommunicator::create_with_node(i,
                                                    num_nodes,
-                                                   server_transport.clone(), NoopStateMachine::default()))
+                                                   server_transport, NoopStateMachine::default())
+                })
             )
             .await.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
         let mut clients = Vec::new();
         for i in 0 .. num_clients {
-            let client_transport = AdversaryClientTransport::new(
-                SingleProcessClientTransport::new(communicators.clone(), NET_TIMEOUT));
+            let client_transport = SingleProcessClientTransport::new(communicators.clone(), NET_TIMEOUT);
+            let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), client_transport);
             let client = Client::new(format!("Client {}", i), client_transport, num_nodes);
             clients.push(client);
         }
@@ -145,7 +147,7 @@ impl <V: Value> Scenario<V> where V::Result: Default{
 
         (Scenario {
             communicators,
-            server_transport,
+            adversary,
             clients,
             consistency_join_handle
         }, rx)
@@ -179,18 +181,17 @@ pub async fn main() -> Result<(), Error> {
            Suppose P(request fail) = P(response fail) for simplicity, so the answer is
            P(request fail) = P(response fail) = 0.292
          */
-        setup.server_transport.set_omission_chance(0, 0.292).await;
+        let Scenario { adversary, consistency_join_handle, clients, .. } = setup;
+        adversary.set_server_omission_chance(0, 0.292).await;
         // setup.server_transport.afflict_delays(NUM_NODES, 10 .. 150).await;
 
         // spawn clients
         let mut client_handles = Vec::new();
-        for mut client in setup.clients {
+        for (client_id, mut client) in (0..).zip(clients) {
             let name = client.client_name.clone();
+            let adversary = adversary.clone();
             let handle = tokio::task::spawn_local(async move {
-
-                client.transport.set_default_req_omission_chance(0.292);
-                client.transport.set_default_res_omission_chance(0.292);
-
+                adversary.set_client_omission_chance(client_id, 0.292).await;
                 client_message_loop(&mut client).await;
             }.instrument(info_span!("Client-loop", name=?name)));
             client_handles.push(handle);
@@ -199,7 +200,7 @@ pub async fn main() -> Result<(), Error> {
         tokio::select! {
             _ = clients_finish => {
             },
-            _ = setup.consistency_join_handle => {
+            _ = consistency_join_handle => {
 
             }
         }
@@ -221,14 +222,14 @@ mod tests {
         ls.run_until(async move {
             let (scenario, rx) = Scenario::<u32>::setup(3, 1).await;
             let rx = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
-            let Scenario { mut clients, server_transport, ..} = scenario;
+            let Scenario { mut clients, adversary, ..} = scenario;
             
             let client_jh = task::spawn_local(async move {
                 // submit first value
                 clients[0].submit_value(100).await.unwrap();
 
                 // "crash" server 0 by preventing it from sending/receiving messages to other nodes
-                server_transport.set_omission_chance(0, 1.0).await;
+                adversary.set_server_omission_chance(0, 1.0).await;
 
                 // submit second value
                 clients[0].submit_value(200).await.unwrap();

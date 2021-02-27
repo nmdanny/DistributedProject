@@ -5,7 +5,7 @@ use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
 use crate::consensus::node_communicator::NodeCommunicator;
 use crate::consensus::client::{SingleProcessClientTransport, ClientTransport};
-use crate::consensus::adversarial_transport::{AdversaryTransport, AdversaryClientTransport};
+use crate::consensus::adversarial_transport::{AdversaryHandle, NodeId, AdversaryTransport, AdversaryClientTransport};
 use crate::consensus::transport::{ThreadTransport};
 use crate::anonymity::logic::*;
 use crate::anonymity::anonymous_client::{AnonymousClient, CommitResult, combined_subscriber};
@@ -25,32 +25,24 @@ use std::borrow::BorrowMut;
 use std::cell::Cell;
 
 
-pub struct Scenario<V: Value + Hash, ST: Transport<AnonymityMessage<V>>, CT: ClientTransport<AnonymityMessage<V>>> {
-
+pub struct Scenario<V: Value + Hash>
+{
     pub communicators: Vec<NodeCommunicator<AnonymityMessage<V>>>,
-    pub server_transport: AdversaryTransport<AnonymityMessage<V>, ST>,
     pub clients: Vec<AnonymousClient<V>>,
-
-    pub client_transports: Vec<AdversaryClientTransport<AnonymityMessage<V>, CT>>,
-    phantom: std::marker::PhantomData<V>
+    phantom: std::marker::PhantomData<V>,
+    pub adversary: AdversaryHandle
 
 }
 
-pub type SingleProcessScenario<V> = Scenario<V, ThreadTransport<AnonymityMessage<V>>, 
-    SingleProcessClientTransport<AnonymityMessage<V>>>;
-
-pub type GRPCScenario<V> = Scenario<V, GRPCTransport<AnonymityMessage<V>>, GRPCTransport<AnonymityMessage<V>>>;
-
-
-pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenario<V> {
+pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V> {
 
         let num_nodes = config.num_nodes;
 
         let config = Arc::new(config);
         let grpc_config = GRPCConfig::default_for_nodes(num_nodes);
         let mut pki_builder = PKIBuilder::new(config.num_nodes, config.num_clients);
+        let adversary = AdversaryHandle::new();
 
-        let adversary_transports = Arc::new(Mutex::new(Vec::new()));
         let rt = tokio::runtime::Handle::current();
         let _e = rt.enter();
         for node_id in 0 .. num_nodes {
@@ -59,7 +51,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
             let pki = Arc::new(
                     pki_builder.for_server(node_id).build()
             );
-            let adversary_transports = adversary_transports.clone();
+            let adversary = adversary.clone();
             tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Handle::current();
                 let _ = rt.enter();
@@ -68,13 +60,13 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
                     let ls = tokio::task::LocalSet::new();
                     ls.run_until(async move {
                     let server_transport = GRPCTransport::new(Some(node_id), grpc_config, config.client_timeout).await.unwrap();
-                    let server_transport = AdversaryTransport::new(server_transport, num_nodes);
-                    adversary_transports.lock().push(server_transport.clone());
-                    let mut node = Node::new(node_id, num_nodes, server_transport.clone());
+                    let client_transport = server_transport.clone();
+
+                    let server_transport = adversary.wrap_server_transport(node_id, server_transport);
+                    let client_transport = adversary.wrap_client_transport(NodeId::ServerId(node_id), client_transport);
+
+                    let mut node = Node::new(node_id, num_nodes, server_transport);
                     let _comm = NodeCommunicator::from_node(&mut node).await;
-
-
-                    let client_transport = server_transport.get_inner().clone();
                     let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
                     node.attach_state_machine(sm);
                     node.run_loop()
@@ -90,12 +82,10 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
 
         
         let mut clients = Vec::new();
-        let mut client_ts = Vec::new();
         for i in 0 .. config.num_clients {
-            let server_transport = GRPCTransport::new(None, grpc_config.clone(), config.client_timeout).await.unwrap();
+            let client_transport = GRPCTransport::new(None, grpc_config.clone(), config.client_timeout).await.unwrap();
             info!("created server transport for client {}", i);
-            let client_transport = AdversaryClientTransport::new(server_transport);
-            client_ts.push(client_transport.clone());
+            let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), client_transport);
 
             let sm_events = futures::future::join_all((0 .. num_nodes).map(|node_id| {
                 let stream = client_transport.get_sm_event_stream::<NewRound<V>>(node_id);
@@ -116,25 +106,26 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> GRPCScenari
 
         info!("Starting GRPC scenario");
 
-        let adversary = adversary_transports.lock().remove(0);
         Scenario {
             communicators: Vec::new(),
-            server_transport: adversary,
             clients,
-            client_transports: client_ts,
-            phantom: Default::default()
+            phantom: Default::default(),
+            adversary
         }
 }
 
-pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> SingleProcessScenario<V> {
+pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V> {
         let num_nodes = config.num_nodes;
-        let server_transport = AdversaryTransport::new(ThreadTransport::new(num_nodes, config.client_timeout), num_nodes);
+        let server_transport = ThreadTransport::new(num_nodes, config.client_timeout);
+        let adversary = AdversaryHandle::new();
 
         let config = Arc::new(config);
 
         let (mut nodes, communicators) = futures::future::join_all(
             (0 .. num_nodes).map(|id| {
-                let mut node = Node::new(id, num_nodes, server_transport.clone());
+                let adversary = adversary.clone();
+                let server_transport = adversary.wrap_server_transport(id, server_transport.clone());
+                let mut node = Node::new(id, num_nodes, server_transport);
                 async {
                     let comm = NodeCommunicator::from_node(&mut node).await;
                     (node, comm)
@@ -157,7 +148,8 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> SingleProce
         let mut clients = Vec::new();
         let mut client_ts = Vec::new();
         for i in 0 .. config.num_clients {
-            let client_transport = AdversaryClientTransport::new(
+            
+            let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i),
                 SingleProcessClientTransport::new(communicators.clone(), config.client_timeout));
             client_ts.push(client_transport.clone());
 
@@ -188,14 +180,13 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> SingleProce
 
         Scenario {
             communicators,
-            server_transport,
             clients,
-            client_transports: client_ts,
-            phantom: Default::default()
+            phantom: Default::default(),
+            adversary
         }
 }
 
-pub async fn setup_scenario<V: Value + Hash>(config: Config) -> GRPCScenario<V> {
+pub async fn setup_scenario<V: Value + Hash>(config: Config) -> Scenario<V> {
     setup_grpc_scenario(config).await
 }
 
@@ -293,7 +284,7 @@ async fn many_rounds() {
 #[tokio::test]
 async fn client_crash_only() {
     let ls = tokio::task::LocalSet::new();
-    let _guard = setup_logging().unwrap();
+    // let _guard = setup_logging().unwrap();
     ls.run_until(async move {
         let mut scenario = setup_test_scenario::<u64>(Config {
             num_nodes: 3,
@@ -301,39 +292,33 @@ async fn client_crash_only() {
             threshold: 2,
             num_channels: 2,
             phase_length: std::time::Duration::from_secs(1),
-            client_timeout: std::time::Duration::from_secs(3),
+            client_timeout: std::time::Duration::from_secs(5),
 
         }).await;
 
         let client_b = scenario.clients.pop().unwrap();
         let client_a = scenario.clients.pop().unwrap();
 
-        let a_transport = Rc::new(scenario.client_transports[0].clone());
-
-        // ensure 'a' always fails sending to node 2
-        // technically I am simulating here some kind of omission since node 3 isn't necessarily the last one he sends a message to
-        a_transport.set_omission_chance(2, 1.0);
-
-        register_client_send_callback(Box::new(move |_name, _round, node_id| {
-            // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
-            if node_id.is_none() {
-                a_transport.set_default_req_omission_chance(1.0);
-            } else {
-                a_transport.set_default_req_omission_chance(0.0);
-            }
-
-
-        }));
+        // ensure 'a' always fails
+        scenario.adversary.set_client_omission_chance(0, 1.0).await;
 
         let duration = tokio::time::Duration::from_secs(5);
 
         let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
-            let _res = client_a.send_anonymously(1337u64).await.unwrap();
+            let _res = loop {
+                if let Ok(res) = client_a.send_anonymously(1337u64).await {
+                    break res
+                }
+            };
         }));
 
 
         let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
-            let _res = client_b.send_anonymously(7331u64).await.unwrap();
+            let _res = loop {
+                if let Ok(res) = client_b.send_anonymously(7331u64).await {
+                    break res
+                }
+            };
         }));
 
         let (res1, res2) = futures::future::join(handle_a, handle_b).await;
@@ -346,7 +331,7 @@ async fn client_crash_only() {
 
 
 #[tokio::test]
-async fn client_crash_server_drop() {
+async fn client_omission_server_crash() {
     let ls = tokio::task::LocalSet::new();
     let _guard = setup_logging().unwrap();
     ls.run_until(async move {
@@ -356,111 +341,45 @@ async fn client_crash_server_drop() {
             threshold: 2,
             num_channels: 2,
             phase_length: std::time::Duration::from_secs(1),
-            client_timeout: std::time::Duration::from_secs(3),
+            client_timeout: std::time::Duration::from_secs(5),
         }).await;
 
         let client_b = scenario.clients.pop().unwrap();
         let client_a = scenario.clients.pop().unwrap();
 
-        let a_transport = Rc::new(scenario.client_transports[0].clone());
 
         // ensure 'a' always fails sending to node 2
-        // technically I am simulating here some kind of omission since node 2 isn't necessarily the last one he sends a message to
-        a_transport.set_omission_chance(2, 1.0);
+        scenario.adversary.set_pair_omission_chance(NodeId::ClientId(0), NodeId::ServerId(1), 1.0, true).await;
 
-        // make node 0 omit messages with 0.5 probability
-        scenario.server_transport.set_omission_chance(0, 0.5).await;
-
-        register_client_send_callback(Box::new(move |_name, _round, node_id| {
-            // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
-            if node_id.is_none() {
-                a_transport.set_default_req_omission_chance(1.0);
-            } else {
-                a_transport.set_default_req_omission_chance(0.0);
-            }
+        // crash node 1
+        scenario.adversary.set_server_omission_chance(0, 1.0).await;
 
 
-        }));
 
-
-        let duration = tokio::time::Duration::from_secs(4);
+        let duration = tokio::time::Duration::from_secs(5);
 
         let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
-            let _res = client_a.send_anonymously(1337u64).await.unwrap();
+            let _res = loop {
+                if let Ok(res) = client_a.send_anonymously(1337u64).await {
+                    break res
+                }
+            };
         }));
 
 
         let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
-            let _res = client_b.send_anonymously(7331u64).await.unwrap();
+            let _res = loop {
+                if let Ok(res) = client_b.send_anonymously(7331u64).await {
+                    break res
+                }
+            };
         }));
 
         let (res1, res2) = futures::future::join(handle_a, handle_b).await;
-        assert!(res1.is_err(), "Client A is crashed and shouldn't be able to submit his value");
+        assert!(res1.is_ok(), "Client A's missing share would've reached node 2 via node 3(encrypted)");
         assert!(res2.is_ok(), "Client B is not faulty and should have managed to submit his value");
 
 
     }).await;
 }
 
-
-#[tokio::test]
-async fn client_crash_server_crash() {
-    let ls = tokio::task::LocalSet::new();
-    let _guard = setup_logging().unwrap();
-    ls.run_until(async move {
-        let mut scenario = setup_test_scenario::<u64>(Config {
-            num_nodes: 3,
-            num_clients: 2,
-            threshold: 2,
-            num_channels: 5,
-            phase_length: std::time::Duration::from_secs(1),
-            client_timeout: std::time::Duration::from_secs(1),
-        }).await;
-
-        let client_b = scenario.clients.pop().unwrap();
-        let client_a = scenario.clients.pop().unwrap();
-
-        let a_transport = Rc::new(scenario.client_transports[0].clone());
-
-        // ensure 'a' always fails sending to node 2
-        // technically I am simulating here some kind of omission since node 2 isn't necessarily the last one he sends a message to
-        a_transport.set_omission_chance(2, 1.0);
-
-        // make node 0 appear crashed (omit messages to everyone else)
-        scenario.server_transport.set_omission_chance(0, 1.0).await;
-        scenario.client_transports[0].set_omission_chance(0, 1.0);
-        scenario.client_transports[1].set_omission_chance(0, 1.0);
-
-        register_client_send_callback(Box::new(move |_name, _round, node_id| {
-            // the following code prevents client 'a' from sending liveness request to simulate the fact he crashed
-            if node_id.is_none() {
-                a_transport.set_default_req_omission_chance(1.0);
-            } else {
-                a_transport.set_default_req_omission_chance(0.0);
-            }
-
-
-        }));
-
-        // client 0 shouldn't be able to commit,
-        // client 1 should commit since a majority of valid nodes(nodes 1, 2) should see his shares
-
-        let duration = tokio::time::Duration::from_secs(10);
-
-        let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
-            let _res = client_a.send_anonymously(1337u64).await.unwrap();
-        }));
-
-
-        let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
-            let _res = client_b.send_anonymously(7331u64).await.unwrap();
-        }));
-
-        info!("Starting to submit items");
-        let (res1, res2) = futures::future::join(handle_a, handle_b).await;
-        assert!(res1.is_err(), "Client A is crashed and shouldn't be able to submit his value");
-        assert!(res2.is_ok(), "Client B is not faulty and should have managed to submit his values to [1,2]");
-
-
-    }).await;
-}
