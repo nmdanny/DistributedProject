@@ -176,7 +176,8 @@ impl <V: Value, CT: ClientTransport<AnonymityMessage<V>>> SMSender<V, CT> {
     
     pub fn submit(&mut self, message: AnonymityMessage<V>) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send((message, tx)).unwrap();
+        self.sender.send((message, tx)).unwrap_or_else(|e| 
+            error!("Couldn't send message {:?} because SMSender loop receiver dropped", e.0.0));
         rx
     }
 }
