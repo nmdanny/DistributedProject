@@ -3,6 +3,7 @@ use crate::anonymity::logic::*;
 use crate::anonymity::callbacks::*;
 use crate::consensus::client::{ClientTransport, Client};
 use crate::consensus::types::*;
+use parking_lot::Mutex;
 use rayon::prelude::*;
 use std::{cell::RefCell, hash::Hash, pin::Pin, rc::Rc};
 use std::collections::{VecDeque, HashMap};
@@ -70,7 +71,7 @@ pub struct AnonymousClient<V: Value + Hash> {
 
     id: Id,
 
-    receiver: RefCell<Option<mpsc::UnboundedReceiver<NewRound<V>>>>,
+    receiver: Mutex<Option<mpsc::UnboundedReceiver<NewRound<V>>>>,
 
     config: Arc<Config>
 
@@ -216,7 +217,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
             handle,
             send_anonym_queue: orig_tx,
             id,
-            receiver: RefCell::new(Some(v_recv)),
+            receiver: Mutex::new(Some(v_recv)),
             config
         }
 
@@ -236,7 +237,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
     /// Can be used to be notified of new rounds(& reconstructed values) seen by the client.
     /// Should only be called once
     pub fn event_stream(&self) -> Option<EventStream<NewRound<V>>> {
-        self.receiver.borrow_mut().take().map(|rec| {
+        self.receiver.lock().take().map(|rec| {
             tokio_stream::wrappers::UnboundedReceiverStream::new(rec).boxed()
         })
     }
@@ -283,13 +284,10 @@ impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClient
                   .map(|(node_id, share)| share.encrypt(&pki.servers_keys[node_id].1)).collect::<Vec<_>>()
         }).collect::<Vec<_>>()).await;
 
-
-        let timeout_duration = self.config.phase_length;
-        let res = tokio::time::timeout(timeout_duration, self.client.submit_value(AnonymityMessage::ClientShare {
+        let res = self.client.submit_value(AnonymityMessage::ClientShare {
             client_id: self.client_id, round, shares
-        })).await;
+        }).await;
 
-        let res = res.map_err(|_| anyhow::format_err!("Timeout when sending value during round {}", round))?;
         let res = res.context(format!("While sending value during round {}", round))?;
         info!("My shares of round {} were committed at log index {}", round, res.0);
         Ok(val_channel)

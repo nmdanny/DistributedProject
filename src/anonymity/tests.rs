@@ -12,7 +12,7 @@ use crate::anonymity::anonymous_client::{AnonymousClient, CommitResult, combined
 use crate::anonymity::callbacks::*;
 use crate::crypto::PKIBuilder;
 use crossbeam::epoch::Pointable;
-use futures::{Future, Stream, StreamExt, future::join, future::join_all, stream::FuturesOrdered};
+use futures::{Future, Stream, StreamExt, future::join, future::join_all, stream::{FuturesOrdered, FuturesUnordered}};
 use parking_lot::{Mutex, RwLock};
 use rand::distributions::{Distribution, Uniform};
 use tokio_stream::StreamMap;
@@ -230,12 +230,12 @@ const VALS_TO_COMMIT: u64 = 20;
 #[tokio::test]
 async fn many_rounds() {
     let ls = tokio::task::LocalSet::new();
-    let _guard = setup_logging().unwrap();
+    // let _guard = setup_logging().unwrap();
     ls.run_until(async move {
         let mut scenario = setup_test_scenario::<String>(Config {
             num_nodes: 5,
             threshold: 3,
-            num_clients: 2,
+            num_clients: 8,
             num_channels: 64,
             phase_length: std::time::Duration::from_millis(2000),
             client_timeout: std::time::Duration::from_millis(6000)
@@ -243,17 +243,19 @@ async fn many_rounds() {
 
 
         let mut handles = (0..).zip(scenario.clients.drain(..)).map(|(num, client)| {
-            task::spawn_local(async move {
+            tokio::spawn(async move {
                 let mut sends = (0 .. VALS_TO_COMMIT)
                     .map(|i| client.send_anonymously(format!("CL{}|V={}", num, i)))
-                    .collect::<futures::stream::FuturesOrdered<_>>();
+                    .collect::<futures::stream::FuturesUnordered<_>>();
                 let mut i = 0;
                 while let Some(res) = sends.next().await {
                     match res {
                         Ok(CommitResult { round, channel}) => { 
-                            info!("CL{}|V={}  was committed via channel {} at round {}", num, i, channel, round)}
+                            info!("CL{}|V={}  was committed via channel {} at round {}", num, i, channel, round);
+                            println!("CL{}|V={}  was committed via channel {} at round {}", num, i, channel, round);
+                        }
                         Err(e) => { 
-                            panic!("CL{}|V={} failed to be committed: {:?}", client.client_id(), i, e) 
+                            panic!("CL{}|V={} failed to be committed: {:?}", client.client_id(), i, e);
                         }
                     }
                     i += 1;
@@ -303,9 +305,9 @@ async fn client_crash_only() {
         // ensure 'a' always fails
         scenario.adversary.set_client_omission_chance(0, 1.0).await;
 
-        let duration = tokio::time::Duration::from_secs(5);
+        let duration = tokio::time::Duration::from_secs(10);
 
-        let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
+        let handle_a = tokio::time::timeout(duration, tokio::spawn(async move {
             let _res = loop {
                 if let Ok(res) = client_a.send_anonymously(1337u64).await {
                     break res
@@ -314,7 +316,7 @@ async fn client_crash_only() {
         }));
 
 
-        let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
+        let handle_b = tokio::time::timeout(duration, tokio::spawn(async move {
             let _res = loop {
                 if let Ok(res) = client_b.send_anonymously(7331u64).await {
                     break res
@@ -357,9 +359,9 @@ async fn client_omission_server_crash() {
 
 
 
-        let duration = tokio::time::Duration::from_secs(5);
+        let duration = tokio::time::Duration::from_secs(10);
 
-        let handle_a = tokio::time::timeout(duration, task::spawn_local(async move {
+        let handle_a = tokio::time::timeout(duration, task::spawn(async move {
             let _res = loop {
                 if let Ok(res) = client_a.send_anonymously(1337u64).await {
                     break res
@@ -368,7 +370,7 @@ async fn client_omission_server_crash() {
         }));
 
 
-        let handle_b = tokio::time::timeout(duration, task::spawn_local(async move {
+        let handle_b = tokio::time::timeout(duration, task::spawn(async move {
             let _res = loop {
                 if let Ok(res) = client_b.send_anonymously(7331u64).await {
                     break res
