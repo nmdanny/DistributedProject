@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use crate::consensus::node::Node;
 use crate::consensus::node_communicator::NodeCommunicator;
 use anyhow::Error;
-use rand::distributions::{Uniform, Bernoulli, Distribution};
+use rand::{distributions::{Uniform, Bernoulli, Distribution}, thread_rng};
 use async_trait::async_trait;
 use futures::{Future, Stream, TryFutureExt};
 use tokio_stream::StreamExt;
@@ -29,7 +29,7 @@ pub enum NodeId {
     ServerId(Id), ClientId(Id)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AdversaryState {
     /// Maps nodes to a number in [0,1] indicating the probability of a message(request/response)
     /// that's originating from that node of being dropped
@@ -138,7 +138,7 @@ impl AdversaryHandle {
 
         tokio::time::sleep(Duration::from_millis(req_delay)).await;
 
-        if requester_omission.sample(&mut rand::thread_rng()) {
+        if requester_omission.sample(&mut rand::thread_rng()) || responder_omission.sample(&mut rand::thread_rng()) {
             return Err(RaftError::NetworkError(
                 anyhow::anyhow!("omission of request from {:?} to {:?}", from, to)));
         }
@@ -147,7 +147,7 @@ impl AdversaryHandle {
 
         tokio::time::sleep(Duration::from_millis(res_delay)).await;
 
-        if responder_omission.sample(&mut rand::thread_rng()) {
+        if responder_omission.sample(&mut rand::thread_rng()) || requester_omission.sample(&mut rand::thread_rng()) {
             return Err(RaftError::NetworkError(
                 anyhow::anyhow!("omission of response from {:?} to {:?}", to, from)));
         }

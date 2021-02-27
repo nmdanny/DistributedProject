@@ -83,9 +83,9 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
         
         let mut clients = Vec::new();
         for i in 0 .. config.num_clients {
-            let client_transport = GRPCTransport::new(None, grpc_config.clone(), config.client_timeout).await.unwrap();
             info!("created server transport for client {}", i);
-            let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), client_transport);
+            let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), 
+                GRPCTransport::new(None, grpc_config.clone(), config.client_timeout).await.unwrap());
 
             let sm_events = futures::future::join_all((0 .. num_nodes).map(|node_id| {
                 let stream = client_transport.get_sm_event_stream::<NewRound<V>>(node_id);
@@ -138,7 +138,8 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
 
         for node in &mut nodes {
             // used for communicating with other nodes
-            let client_transport = SingleProcessClientTransport::new(communicators.clone(), config.client_timeout);
+            let client_transport = adversary.wrap_client_transport(NodeId::ServerId(node.id), 
+                SingleProcessClientTransport::new(communicators.clone(), config.client_timeout));
             let pki = Arc::new(pki_builder.for_server(node.id).build());
             let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
             node.attach_state_machine(sm);
