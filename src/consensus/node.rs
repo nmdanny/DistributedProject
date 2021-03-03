@@ -194,7 +194,7 @@ pub enum UpdateCommitIndexReason {
 /* Following block contains logic shared with all states of a raft node */
 impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(id=self.id))]
     /// The main loop - this does everything, and it has ownership of the Node
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
 
@@ -263,7 +263,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         let new_entries = self.storage.get_from_to(
             new_entries_from, new_entries_to_inc + 1);
 
-        info!(old=?old_commit_index, new=?self.commit_index, new_entries=?new_entries, reason=?reason, "Updated commit index");
+        debug!(old=?old_commit_index, new=?self.commit_index, new_entries=?new_entries, reason=?reason, "Updated commit index");
 
         for (entry, index) in new_entries.iter().zip(new_entries_from ..= new_entries_to_inc) {
             self.commit_sender
@@ -341,8 +341,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
 
         // 1. Check if sender is stale leader
         if req.term < self.current_term {
-            warn!("sender is stale leader (my term = {}, other term = {})", req.term, self.current_term);
-            self.observe_leader_commit(req.leader_commit);
+            trace!("sender is stale leader (my term = {}, other term = {})", req.term, self.current_term);
             return Ok(AppendEntriesResponse::failed(self.current_term));
         }
 

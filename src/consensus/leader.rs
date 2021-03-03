@@ -289,9 +289,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                 Err(ReplicationLoopError::StaleLeaderError(stale)) => {
                     warn!("Determined I'm a stale leader via peer {}, my term is {}, newer term is {}",
                           self.id, current_term, stale.newer_term);
-                    stale_sender.send(stale).unwrap_or_else(|e| {
-                        error!("replication stream couldn't send StaleLeader message {:?}", e)
-                    }).await;
+                    let _ = stale_sender.send(stale).await;
                     return;
                 }
             }

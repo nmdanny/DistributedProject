@@ -120,11 +120,11 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                         trace!("got vote response {:?}", res);
                         tx.send(res.clone()).unwrap_or_else(|e| {
                             // TODO this isn't really an error, just the result of delays
-                            error!(vote_granted_too_late=true, "Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
+                            trace!(vote_granted_too_late=true, "Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
                         });
                     },
-                    Err(RaftError::NetworkError(e)) => {
-                        trace!(net_err=true, "Network error when sending vote request to {}: {}", node_id, e);
+                    Err(RaftError::NetworkError(e)) | Err(RaftError::TimeoutError(e)) => {
+                        trace!(net_err=true, "Network/timeout error when sending vote request to {}: {}", node_id, e);
                     },
                     Err(e) => {
                         error!("Misc Raft error when sending vote request: {}", e);
@@ -164,7 +164,8 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                 tokio::select! {
                     _ = election_end_fut => {
                         // election timed out, start another one
-                        debug!("elections timed out(got: {} yes, {} no), starting more elections",
+                        debug!("elections of term {} timed out(got: {} yes, {} no), starting more elections",
+                               self.node.current_term,
                                election_state.yes, election_state.no);
                         break;
                     },

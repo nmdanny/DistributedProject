@@ -86,7 +86,8 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> fo
             // Because that would imply each of them got a majority of votes for said term,
             // But a node cannot vote for two different leaders at the same term
             assert_ne!(req.term, self.node.current_term,
-                       "If there's a mismatch between leaders, the term must have changed(increased)");
+                       "If there's a mismatch between leaders (self.node.leader_id = {:?} and req.leader_id = {:?}), the term must have changed(increased)",
+                        self.node.leader_id, req.leader_id);
         }
         self.node.leader_id = Some(req.leader_id);
 

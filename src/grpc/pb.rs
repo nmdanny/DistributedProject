@@ -79,6 +79,7 @@ fn tonic_status_to_raft(status: tonic::Status) -> RaftError {
         tonic::Code::Internal => RaftError::InternalError(anyhow::anyhow!("{}", status.message())),
         tonic::Code::DeadlineExceeded => RaftError::TimeoutError(anyhow::anyhow!("{}", status.message())),
         _ if status.message().contains("tcp") => RaftError::NetworkError(anyhow::anyhow!("{}", status.message())),
+        _ if status.message().contains("timed out") => RaftError::TimeoutError(anyhow::anyhow!("{}", status.message())),
         c => RaftError::InternalError(anyhow::anyhow!("unknown error, code: {}, message: {}", c, status.message()))
     }
 }
