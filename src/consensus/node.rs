@@ -342,10 +342,17 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         // 1. Check if sender is stale leader
         if req.term < self.current_term {
             trace!("sender is stale leader (my term = {}, other term = {})", req.term, self.current_term);
+            // self.observe_leader_commit(req.leader_commit);
             return Ok(AppendEntriesResponse::failed(self.current_term));
         }
 
         self.try_update_term(req.term, Some(req.leader_id));
+
+        if req.entries.is_empty() {
+            trace!("got heartbeat/empty entry list");
+            self.observe_leader_commit(req.leader_commit);
+            return Ok(AppendEntriesResponse::success(self.current_term));
+        }
 
         // 2. Check if we have a mismatch with the prev_log_index_term
         if req.prev_log_index_term.contains_entry() {
@@ -372,11 +379,6 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
             }
         }
 
-        if req.entries.is_empty() {
-            trace!("got heartbeat/empty entry list");
-            self.observe_leader_commit(req.leader_commit);
-            return Ok(AppendEntriesResponse::success(self.current_term));
-        }
 
         let insertion_index = req.prev_log_index_term.index()
             .map(|prev_log_index| prev_log_index + 1).unwrap_or(0);
