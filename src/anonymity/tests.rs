@@ -59,7 +59,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
                     info!("Setting up node {}", node_id);
                     let ls = tokio::task::LocalSet::new();
                     ls.run_until(async move {
-                    let server_transport = GRPCTransport::new(Some(node_id), grpc_config, config.client_timeout).await.unwrap();
+                    let server_transport = GRPCTransport::new(Some(node_id), grpc_config, config.timeout).await.unwrap();
                     let client_transport = server_transport.clone();
 
                     let server_transport = adversary.wrap_server_transport(node_id, server_transport);
@@ -85,7 +85,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
         for i in 0 .. config.num_clients {
             info!("created server transport for client {}", i);
             let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), 
-                GRPCTransport::new(None, grpc_config.clone(), config.client_timeout).await.unwrap());
+                GRPCTransport::new(None, grpc_config.clone(), config.timeout).await.unwrap());
 
             let sm_events = futures::future::join_all((0 .. num_nodes).map(|node_id| {
                 let stream = client_transport.get_sm_event_stream::<NewRound<V>>(node_id);
@@ -116,7 +116,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
 
 pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V> {
         let num_nodes = config.num_nodes;
-        let server_transport = ThreadTransport::new(num_nodes, config.client_timeout);
+        let server_transport = ThreadTransport::new(num_nodes, config.timeout);
         let adversary = AdversaryHandle::new();
 
         let config = Arc::new(config);
@@ -139,7 +139,7 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
         for node in &mut nodes {
             // used for communicating with other nodes
             let client_transport = adversary.wrap_client_transport(NodeId::ServerId(node.id), 
-                SingleProcessClientTransport::new(communicators.clone(), config.client_timeout));
+                SingleProcessClientTransport::new(communicators.clone(), config.timeout));
             let pki = Arc::new(pki_builder.for_server(node.id).build());
             let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
             node.attach_state_machine(sm);
@@ -151,7 +151,7 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
         for i in 0 .. config.num_clients {
             
             let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i),
-                SingleProcessClientTransport::new(communicators.clone(), config.client_timeout));
+                SingleProcessClientTransport::new(communicators.clone(), config.timeout));
             client_ts.push(client_transport.clone());
 
             let sm_events = futures::future::join_all((0 .. num_nodes).map(|node_id| {
@@ -205,7 +205,7 @@ async fn simple_scenario() {
             threshold: 2,
             num_channels: 2,
             phase_length: std::time::Duration::from_secs(1),
-            client_timeout: std::time::Duration::from_secs(3)
+            timeout: std::time::Duration::from_secs(3)
 
         }).await;
 
@@ -238,7 +238,7 @@ async fn many_rounds() {
             num_clients: 8,
             num_channels: 64,
             phase_length: std::time::Duration::from_millis(2000),
-            client_timeout: std::time::Duration::from_millis(6000)
+            timeout: std::time::Duration::from_millis(6000)
         }).await;
 
 
@@ -295,7 +295,7 @@ async fn client_crash_only() {
             threshold: 2,
             num_channels: 2,
             phase_length: std::time::Duration::from_secs(1),
-            client_timeout: std::time::Duration::from_secs(5),
+            timeout: std::time::Duration::from_secs(5),
 
         }).await;
 
@@ -344,7 +344,7 @@ async fn client_omission_server_crash() {
             threshold: 2,
             num_channels: 2,
             phase_length: std::time::Duration::from_secs(1),
-            client_timeout: std::time::Duration::from_secs(5),
+            timeout: std::time::Duration::from_secs(5),
         }).await;
 
         let client_b = scenario.clients.pop().unwrap();

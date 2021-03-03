@@ -272,7 +272,7 @@ impl Application for App {
             let pki = PKIBuilder::new(
                 shared_cfg.num_nodes, shared_cfg.num_clients
             ).for_client(flags.client_id).build();
-            let transport = GRPCTransport::new(None, grpc_config, shared_cfg.client_timeout).await.unwrap();
+            let transport = GRPCTransport::new(None, grpc_config, shared_cfg.timeout).await.unwrap();
             let sm_events = futures::future::join_all((0 .. shared_cfg.num_nodes).map(|node_id| {
                 let stream = transport.get_sm_event_stream::<NewRound<_>>(node_id);
                 async move {
