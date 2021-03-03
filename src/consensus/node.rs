@@ -317,8 +317,8 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         }
 
         if self.storage.last_log_index_term() > req.last_log_index_term {
-            info!(my=?self.storage.last_log_index_term(), req=?req.last_log_index_term,
-                "My log is more up to date than the candidate's log"
+            debug!(my_index_term=?self.storage.last_log_index_term(), candidate_index_term=?req.last_log_index_term,
+                "My log is more up to date than the candidate's log, rejecting vote"
             );
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
