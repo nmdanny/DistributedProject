@@ -266,9 +266,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                         error!(trans=true, net_err=true, "Received IO error during heartbeat stream for {}, will try again later: {}",
                                id, _e),
                     Err(ReplicationLoopError::StaleLeaderError(stale)) => {
-                        stale_sender.send(stale).unwrap_or_else(|e| {
-                            error!("heartbeat stream couldn't send StaleLeader message {:?}", e)
-                        }).await;
+                        let _ = stale_sender.send(stale).await;
                         return;
                     }
                 }
