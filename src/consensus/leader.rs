@@ -145,56 +145,34 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
     #[instrument]
     pub async fn try_replication(&mut self) -> Result<(), ReplicationLoopError>
     {
-        let node = self.node.borrow();
-
-        /* Note, it's possible that during an await point, a concurrent client write request will cause
-           the storage to increase, but for simplicity, we will not synchronize in call values
-           beyond that point - that will be done in the next call to `try_replication`
-
-           (Of course, values at or before 'last_log_index' cannot change in term or value as we're
-           the leader)
-        */
-        let last_log_index = node.storage.last_log_index_term().index();
-        drop(node);
-
         let mut ran = false;
 
         // we run at least once(in case this is a heartbeat), or as long as we are not synchronized
-        while self.match_index != last_log_index || !ran {
-            ran = true;
+        loop {
             let node = self.node.borrow();
-            let span = debug_span!("whileLoopStart",
-                                    peer_id=?self.id,
-                                    match_index=?self.match_index,
-                                    next_index=?self.next_index,
-                                    commit_index=?node.commit_index,
-                                    storage=?node.storage
-            );
-            span.in_scope(|| {
-                trace!("Synchronizing node {}, match_index: {:?}, last_log_index_term: {:?}",
-                       self.id, self.match_index, node.storage.last_log_index_term());
-            });
 
+            assert!(self.next_index <= node.storage.len(), "next_index is invalid");
 
-            assert!(self.next_index <= node.storage.len(), "if we're not synchronized, next_index must be valid");
+            let last_log_index = node.storage.last_log_index_term().index();
             let req = create_append_entries_for_index(&node, self.next_index);
             let is_heartbeat = req.entries.is_empty();
             assert_eq!(req.entries.len(), node.storage.len() - self.next_index);
 
             drop(node);
+
+            // if we are synchronized and ran at least once(heartbeat), then we are done
+            if ran && last_log_index == self.match_index {
+                return Ok(());
+            }
+            ran = true;
+
             let res = send_ae(&self.transport, self.id, self.leader_term, req).await?;
             self.last_ae_send.store(Instant::now());
-            let node = self.node.borrow();
-            let span = info_span!("whileLoopEnd",
-                                  peer_id=?self.id,
-                                  match_index=?self.match_index,
-                                  next_index=?self.next_index,
-                                  commit_index=?node.commit_index,
-                                  recorded_last_log_index=?last_log_index,
-                                  storage=?node.storage);
-            drop(node);
 
             if res.success && !is_heartbeat {
+                // note that the node's last log index might have increased after the .await point, but
+                // by our construction the AE only included entries in [next_index, last_log_index]
+                // and the rest will be sent in the next iteration
                 let last_index = last_log_index
                     .expect("If this wasn't a heartbeat, last_log_index shouldn't be None");
                 self.next_index = last_index + 1;
@@ -202,10 +180,8 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                 self.match_index_sender.send((self.id, last_index)).unwrap_or_else(|e| {
                     error!("Peer couldn't send match index to leader: {:?}", e);
                 }).await;
-                span.in_scope(|| {
-                    debug!("Successfully replicated to peer {} values up to, including, index {}",
-                           self.id, last_index);
-                });
+                debug!("Successfully replicated to peer {} values up to, including, index {}",
+                        self.id, last_index);
                 return Ok(())
             } else if res.success {
                 return Ok(())
@@ -214,7 +190,6 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
             assert!(self.next_index > 0, "We could not have failed for next_index = 0");
             self.next_index -= 1;
         }
-        Ok(())
 
     }
 
@@ -496,8 +471,6 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
 
         let mut sm_result_recv = node.sm_result_sender.subscribe();
 
-        drop(node);
-        let node = self.node.borrow();
         info!("became leader for term {}", node.current_term);
 
         let (replicate_trigger, heartbeat_receiver) = watch::channel(());
@@ -516,9 +489,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
 
         let ls = task::LocalSet::new();
 
-        for stream in replication_streams.iter() {
-            stream.spawn_heartbeat_loop(stale_sender.clone());
-        }
+        let heartbeat_handles = replication_streams.iter().map(|stream| 
+            stream.spawn_heartbeat_loop(stale_sender.clone())
+        ).collect::<Vec<_>>();
 
         // A replication loop will only be resolved if we detect we are stale, regardless,
         // We don't care about it much as stale notification leaders are sent via channel
@@ -549,7 +522,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
         loop {
 
             if self.node.borrow().state != ServerState::Leader {
-
+                for handle in heartbeat_handles {
+                    handle.abort();
+                }
                 return Ok(());
             }
 
@@ -584,6 +559,9 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
                     let mut node = self.node.borrow_mut();
                     let _res = node.try_update_term(newer_term, None);
                     assert!(_res);
+                    for handle in heartbeat_handles {
+                        handle.abort();
+                    }
                     return Ok(())
                 },
                 res = receiver.recv() => {
