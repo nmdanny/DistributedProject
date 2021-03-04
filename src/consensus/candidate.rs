@@ -98,7 +98,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
         self.node.leader_id = None;
         self.node.current_term += 1;
         self.node.voted_for = Some(self.node.id);
-        debug!("Starting elections started for term {}", self.node.current_term);
+        debug!("Starting elections for term {}", self.node.current_term);
 
         // for notifying the loop of received votes
         let (tx, rx) = mpsc::unbounded_channel();
@@ -112,7 +112,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
             };
             let transport = self.node.transport.clone();
             let tx = tx.clone();
-            tokio::task::spawn_local(async move {
+            tokio::spawn(async move {
                 trace!("sending vote request to {}", node_id);
                 let res = transport.send_request_vote(node_id, req).await;
                 match &res {
@@ -130,7 +130,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                         error!("Misc Raft error when sending vote request: {}", e);
                     }
                 }
-            }.instrument(info_span!("vote request", to=node_id)));
+            }.instrument(trace_span!("vote request", to=node_id)));
         }
         Ok(ElectionState::new(self.node.quorum_size(), self.node.current_term, rx))
     }

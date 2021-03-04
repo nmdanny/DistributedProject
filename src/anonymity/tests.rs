@@ -1,5 +1,5 @@
 
-use crate::{logging::setup_logging, grpc::transport::{GRPCConfig, GRPCTransport}};
+use crate::{grpc::transport::{GRPCConfig, GRPCTransport}, logging::{profiler, setup_logging}};
 use crate::consensus::types::*;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
@@ -30,7 +30,8 @@ pub struct Scenario<V: Value + Hash>
     pub communicators: Vec<NodeCommunicator<AnonymityMessage<V>>>,
     pub clients: Vec<AnonymousClient<V>>,
     phantom: std::marker::PhantomData<V>,
-    pub adversary: AdversaryHandle
+    pub adversary: AdversaryHandle,
+    handles: Vec<task::JoinHandle<()>>
 
 }
 
@@ -45,6 +46,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
 
         let rt = tokio::runtime::Handle::current();
         let _e = rt.enter();
+        let mut handles = Vec::new();
         for node_id in 0 .. num_nodes {
             let config = config.clone();
             let grpc_config = grpc_config.clone();
@@ -52,7 +54,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
                     pki_builder.for_server(node_id).build()
             );
             let adversary = adversary.clone();
-            tokio::task::spawn_blocking(move || {
+            let handle = tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Handle::current();
                 let _ = rt.enter();
                 futures::executor::block_on(async move {
@@ -70,12 +72,13 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
                     let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
                     node.attach_state_machine(sm);
                     node.run_loop()
-                        .instrument(tracing::info_span!("node-loop", node.id = node_id))
+                        .instrument(tracing::trace_span!("node-loop", node.id = node_id))
                         .await
-                        .unwrap_or_else(|e| error!("Error running node {}: {:?}", node_id, e))
+                        .unwrap_or_else(|e| panic!("Error running node {}: {:?}", node_id, e))
                     }).await;
                 });
             });
+            handles.push(handle)
         }
 
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -110,7 +113,8 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
             communicators: Vec::new(),
             clients,
             phantom: Default::default(),
-            adversary
+            adversary,
+            handles
         }
 }
 
@@ -168,22 +172,26 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
             clients.push(client);
         }
 
+        
         // spawn all nodes
+        let mut handles = Vec::new();
         for node in nodes.into_iter() {
             let id = node.id;
-            tokio::task::spawn_local(async move {
+            let handle = tokio::task::spawn_local(async move {
                 node.run_loop()
                     .instrument(tracing::info_span!("node-loop", node.id = id))
                     .await
-                    .unwrap_or_else(|e| error!("Error running node {}: {:?}", id, e))
+                    .unwrap_or_else(|e| panic!("Error running node {}: {:?}", id, e))
             });
+            handles.push(handle);
         }
 
         Scenario {
             communicators,
             clients,
             phantom: Default::default(),
-            adversary
+            adversary,
+            handles
         }
 }
 
@@ -196,6 +204,7 @@ pub async fn setup_scenario<V: Value + Hash>(config: Config) -> Scenario<V> {
 async fn simple_scenario() {
     let ls = tokio::task::LocalSet::new();
     let _guard = setup_logging().unwrap();
+    let _profiler = profiler("simple_scenario", 1000);
     ls.run_until(async move {
 
 
@@ -230,15 +239,16 @@ const VALS_TO_COMMIT: u64 = 20;
 #[tokio::test]
 async fn many_rounds() {
     let ls = tokio::task::LocalSet::new();
-    // let _guard = setup_logging().unwrap();
+    let _guard = setup_logging().unwrap();
+    let _profiler = profiler("many_rounds", 100);
     ls.run_until(async move {
         let mut scenario = setup_test_scenario::<String>(Config {
             num_nodes: 5,
             threshold: 3,
-            num_clients: 8,
-            num_channels: 64,
-            phase_length: std::time::Duration::from_millis(2000),
-            timeout: std::time::Duration::from_millis(6000)
+            num_clients: 25,
+            num_channels: 100,
+            phase_length: std::time::Duration::from_millis(5000),
+            timeout: std::time::Duration::from_millis(8000)
         }).await;
 
 

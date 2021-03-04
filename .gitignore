@@ -1,4 +1,5 @@
 traces/
+logs/
 certs/
 .vscode/
 out/

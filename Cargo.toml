@@ -15,6 +15,7 @@ tracing-error = "0.1.2"
 color-spantrace = "0.1.6"
 tracing-futures = { version = "0.2.4" }
 tracing-subscriber = "0.2"
+tracing-appender = "0.1"
 tracing-flame = "0.1"
 opentelemetry = { version = "0.12", features = ["tokio-support", "serialize"] }
 opentelemetry-jaeger = { version = "0.11", features = ["tokio"] }
@@ -54,6 +55,10 @@ iced_futures = { git = "https://github.com/hecrj/iced", rev = "9f5c2eb0c43daa61b
 tonic = { version = "0.4", features = ["default", "tls"] }
 prost = "0.7"
 
+
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.4.2", features = ["flamegraph", "protobuf"] }
+
 [lib]
 name = "dist_lib"
 path = "src/lib.rs"
@@ -80,3 +85,4 @@ tonic-build = "0.4"
 
 
  [profile.release] 
+ debug = true

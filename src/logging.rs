@@ -6,6 +6,9 @@ use tracing_subscriber::{Layer, Registry, layer::SubscriberExt, fmt};
 use tracing_flame::FlameLayer;
 use std::path::{Path, PathBuf};
 use chrono::prelude::*;
+use std::io::Write;
+use prost::Message;
+use anyhow::Context;
 
 use std::mem::drop;
 
@@ -24,26 +27,35 @@ pub fn setup_logging() -> Result<Guards, anyhow::Error> {
 
     let (flame, flame_guard) = FlameLayer::with_file(PathBuf::from("traces").join(name)).expect("Couldn't install FlameLayer");
 
+    #[cfg(not(test))]
+    let (appender, appender_guard) = tracing_appender::non_blocking(std::io::stdout());
+    #[cfg(test)]
+    let (appender, appender_guard) = tracing_appender::non_blocking(tracing_subscriber::fmt::TestWriter::new());
+
     let drops: Guards = vec![
         Box::new(uninstall),
-        Box::new(flame_guard)
+        Box::new(flame_guard),
+        Box::new(appender_guard)
     ];
 
     let otl = tracing_opentelemetry::layer().with_tracer(tracer);
 
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+            // .add_directive("dist_lib::anonymity::tests=info".parse().unwrap())
             .add_directive("raft=info".parse().unwrap())
             .add_directive("runner=debug".parse().unwrap())
-            .add_directive("dist_lib::consensus=warn".parse().unwrap())
+            .add_directive("dist_lib::consensus=trace".parse().unwrap())
             // .add_directive("dist_lib::consensus[{important}]=info".parse().unwrap())
             // .add_directive("dist_lib::grpc[{trans}]=debug".parse().unwrap())
             .add_directive("dist_lib::anonymity=info".parse().unwrap())
             .add_directive("dist_lib::grpc=error".parse().unwrap());
             // .add_directive("dist_lib[{vote_granted_too_late}]=off".parse()?)
-            // .add_directive("dist_lib[{net_err}]=off".parse()?);
+            // .add_directive("dist_lib[{net_err}]=off".parse()?)
 
 
     let fmt_layer = fmt::Layer::new()
+        .with_writer(appender)
+        .pretty()
         .with_thread_ids(true);
 
     
@@ -59,6 +71,49 @@ pub fn setup_logging() -> Result<Guards, anyhow::Error> {
     color_eyre::install().unwrap();
 
     Ok(drops)
+}
+
+#[must_use]
+pub fn profiler<P: AsRef<Path>>(my_path: P, sample_freq: std::os::raw::c_int) -> impl Drop {
+    #[cfg(unix)] {
+        struct Profiler<P: AsRef<Path>> {
+            profiler: pprof::ProfilerGuard<'static>,
+            path: P
+        }
+        impl <P: AsRef<Path>> Drop for Profiler<P> {
+            #[cfg(unix)]
+            fn drop(&mut self) {
+                let flamegraph_path = self.path.as_ref().with_extension("svg");
+                let file = std::fs::File::create(&flamegraph_path)
+                    .context(format!("at path {:?}", flamegraph_path))
+                    .expect("creating flamegraph file");
+                let report = self.profiler.report().build().expect("building report");
+                report.flamegraph(file).expect("reporting flamegraph into file");
+                println!("Created flamegraph file at {:?}", flamegraph_path);
+
+                let pprof_path = self.path.as_ref().with_extension("pb");
+                let mut file = std::fs::File::create(&pprof_path)
+                    .context(format!("at path {:?}", pprof_path))
+                    .expect("creating pprof file");
+                let profile = report.pprof().expect("creating pprof profile");
+                let mut content = Vec::new();
+                profile.encode(&mut content).unwrap();
+                file.write_all(&content).unwrap();
+                println!("Created pprof file at {:?}", pprof_path);
+
+            }
+
+        }
+        let profiler = pprof::ProfilerGuard::new(sample_freq).expect("making profiler guard");
+        Profiler { profiler, path: my_path }
+    }
+    #[cfg(not(unix))] {
+        struct Noop();
+        impl Drop for Noop {
+            fn drop(&mut self) {}
+        }
+        Noop()
+    }
 }
 
 pub struct TimeOp {

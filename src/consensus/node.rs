@@ -329,7 +329,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
     }
 
     /// Invoked by any node upon receiving a request to append entries
-    #[instrument(level="warn")]
+    #[instrument(skip(self))]
     pub fn on_receive_append_entry(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
 
         assert_ne!(req.leader_id, self.id, "A leader cannot send append entry to himself");
@@ -341,7 +341,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
 
         // 1. Check if sender is stale leader
         if req.term < self.current_term {
-            trace!("sender is stale leader (my term = {}, other term = {})", req.term, self.current_term);
+            trace!("got ae: sender is stale leader (my term = {}, other term = {})", req.term, self.current_term);
             // self.observe_leader_commit(req.leader_commit);
             return Ok(AppendEntriesResponse::failed(self.current_term));
         }
@@ -349,10 +349,12 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         self.try_update_term(req.term, Some(req.leader_id));
 
         if req.entries.is_empty() {
-            trace!("got heartbeat/empty entry list");
+            trace!("got ae: heartbeat/empty entry list, OK");
             self.observe_leader_commit(req.leader_commit);
             return Ok(AppendEntriesResponse::success(self.current_term));
         }
+
+        trace!("got ae: with {} entries", req.entries.len());
 
         // 2. Check if we have a mismatch with the prev_log_index_term
         if req.prev_log_index_term.contains_entry() {

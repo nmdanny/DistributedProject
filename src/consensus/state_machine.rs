@@ -60,7 +60,6 @@ pub trait StateMachine<V: Value, T: Transport<V>>: Debug + 'static + Sized + Sen
                         let out = self.apply(&entry.value);
                         res_tx.send((entry, out)).unwrap_or_else(|_e| {
                             // this is normal for a non-leader node
-                            trace!("Couldn't broadcast result of state machine, no one is subscribed");
                             0
                         });
                         last_applied = Some(new_last_applied);
