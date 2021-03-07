@@ -31,8 +31,9 @@ pub fn combined_subscriber<V: Value>(receivers: impl Iterator<Item = Pin<Box<dyn
     }
 
     let mut next_round_to_send = 0;
-    let combined_stream = stream_map.filter_map(move |(_, round)| {
+    let combined_stream = stream_map.filter_map(move |(_i, round)| {
         let res = if round.round >= next_round_to_send {
+            debug!("Got new round event from node {}: {:?}", _i, round);
             next_round_to_send = round.round + 1;
             Some(round)
         } else { None };

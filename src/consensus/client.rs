@@ -231,15 +231,15 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     self.set_leader(leader_id);
                 }
                 Err(RaftError::NetworkError(e)) => {
-                    error!(net_err=true, ">>> client encountered network error: {}", e);
+                    error!(net_err=true, ">>> client encountered network error: {:?}", e);
                     self.set_leader(None);
                 },
                 Err(RaftError::TimeoutError(e)) => {
-                    error!(">>> client encountered timeout error: {}", e);
+                    error!(">>> client encountered timeout error: {:?}", e);
                     self.set_leader(None);
                 }
                 Err(e) => {
-                    error!(">>> client received error: {}", e);
+                    error!(">>> client received error: {:?}", e);
                     self.set_leader(None);
                 }
             }
@@ -256,10 +256,10 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
             let res = self.transport.force_apply(node_id, value.clone()).await;
             match res {
                 Err(RaftError::NetworkError(e)) => {
-                    trace!(net_err=true, ">>> client encountered network error: {}", e);
+                    trace!(net_err=true, ">>> client encountered network error: {:?}", e);
                 },
                 Err(e) => {
-                    error!(">>> client received error: {}, giving up request.", e);
+                    error!(">>> client received error: {:?}, giving up request.", e);
                     return Err(e.into());
                 },
                 Ok(res) => {

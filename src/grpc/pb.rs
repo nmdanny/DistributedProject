@@ -49,7 +49,7 @@ pub fn raft_to_tonic<T: TryInto<inner::GenericMessage, Error = TypeConversionErr
             Ok(tonic::Response::new(ser))
         },
         Err(RaftError::NetworkError(err)) => {
-            let res = tonic::Status::unavailable(format!("network error: {}", err));
+            let res = tonic::Status::unavailable(format!("network error: {:?}", err));
             Err(res)
         },
         Err(RaftError::NoLongerLeader()) => {
@@ -57,15 +57,15 @@ pub fn raft_to_tonic<T: TryInto<inner::GenericMessage, Error = TypeConversionErr
             Err(res)
         },
         Err(RaftError::InternalError(err)) => {
-            let res = tonic::Status::internal(format!("internal error: {}", err));
+            let res = tonic::Status::internal(format!("internal error: {:?}", err));
             Err(res)
         },
         Err(RaftError::TimeoutError(err)) => {
-            let res = tonic::Status::deadline_exceeded(format!("timeout error: {}", err));
+            let res = tonic::Status::deadline_exceeded(format!("timeout error: {:?}", err));
             Err(res)
         },
         Err(RaftError::CommunicatorError(err)) => {
-            let res = tonic::Status::internal(format!("communicator error: {}", err));
+            let res = tonic::Status::internal(format!("communicator error: {:?}", err));
             Err(res)
         }
     }

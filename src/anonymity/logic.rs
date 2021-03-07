@@ -350,7 +350,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
 
                 for (chan, share) in (0..).zip(batch.into_iter()) {
                     assert_eq!(share.x, ((self.id + 1) as u64), "Got wrong share, bug within client");
-                    self.metrics.report_share(round, chan, share.clone());
+                    //self.metrics.report_share(round, chan, share.clone());
                     shares[chan].push((share, client_id));
                 }
 
@@ -441,7 +441,7 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
         debug!("My shares being sent: {:?}", shares);
 
         if shares.is_none() {
-            warn!("I am missing shares from some clients, skipping reconstruct round {}", self.round);
+            warn!("I am missing shares from all clients, skipping reconstruct round {}", self.round);
             return;
         }
         let shares = shares.unwrap();
@@ -488,11 +488,11 @@ impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<
                         Ok(val) => {
                             trace!(round=?self.round, "Node committed value {:?} via channel {} into index {}", val, chan, self.committed_messages.len());
                             self.committed_messages.push(val.clone());
-                            self.metrics.report_decode_result(self.round, chan, false);
+                            //self.metrics.report_decode_result(self.round, chan, false);
                         }
                         Err(_) => {
                             trace!("Node detected collision at channel {}", chan);
-                            self.metrics.report_decode_result(self.round, chan, true);
+                            //self.metrics.report_decode_result(self.round, chan, true);
                         }
                     }
                 }
