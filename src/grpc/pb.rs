@@ -105,7 +105,17 @@ pub fn tonic_stream_to_raft<EventType: Value>(tonic_result: Result<tonic::Respon
     -> Result<EventStream<EventType>, RaftError> {
     match tonic_result {
         Ok(res) => {
-            Ok(Box::pin(res.into_inner().filter_map(|res| {
+            Ok(Box::pin(res.into_inner()
+                           .take_while(|res| {
+                    if let Err(err) = res {
+                        if err.message().contains("broken pipe") {
+                            error!("There was an error while receiving stream-element during tonic_stream_to_raft which requires terminating the stream: {:?}", err);
+                            return false;
+                        }
+                    }
+                    true
+                })
+                           .filter_map(|res| {
                 match res {
                     Ok(generic_message) => {
                         let deser = serde_json::from_slice::<EventType>(&generic_message.buf);
