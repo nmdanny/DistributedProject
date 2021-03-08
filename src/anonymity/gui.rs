@@ -259,7 +259,7 @@ impl Application for App {
         let cmd = Command::from(async move {
             let logging_guard = dist_lib::logging::setup_logging().expect("Couldn't set logging for client");
             info!("cmd starting");
-            let grpc_config = GRPCConfig::default_for_nodes(flags.config.num_nodes);
+            let grpc_config = GRPCConfig::default_for_nodes(flags.config.num_nodes, !flags.config.insecure);
             let shared_cfg = Arc::new(flags.config.clone());
 
             let pki = PKIBuilder::new(

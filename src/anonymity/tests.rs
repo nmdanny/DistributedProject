@@ -40,7 +40,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
         let num_nodes = config.num_nodes;
 
         let config = Arc::new(config);
-        let grpc_config = GRPCConfig::default_for_nodes(num_nodes);
+        let grpc_config = GRPCConfig::default_for_nodes(num_nodes, !config.insecure);
         let mut pki_builder = PKIBuilder::new(config.num_nodes, config.num_clients);
         let adversary = AdversaryHandle::new();
 
@@ -214,7 +214,8 @@ async fn simple_scenario() {
             threshold: 2,
             num_channels: 2,
             phase_length: std::time::Duration::from_secs(1),
-            timeout: std::time::Duration::from_secs(3)
+            timeout: std::time::Duration::from_secs(3),
+            insecure: true
 
         }).await;
 
@@ -248,7 +249,8 @@ async fn many_rounds() {
             num_clients: 25,
             num_channels: 100,
             phase_length: std::time::Duration::from_millis(5000),
-            timeout: std::time::Duration::from_millis(8000)
+            timeout: std::time::Duration::from_millis(8000),
+            insecure: true
         }).await;
 
 
@@ -306,7 +308,7 @@ async fn client_crash_only() {
             num_channels: 2,
             phase_length: std::time::Duration::from_secs(1),
             timeout: std::time::Duration::from_secs(5),
-
+            insecure: true
         }).await;
 
         let client_b = scenario.clients.pop().unwrap();
@@ -355,6 +357,7 @@ async fn client_omission_server_crash() {
             num_channels: 2,
             phase_length: std::time::Duration::from_secs(1),
             timeout: std::time::Duration::from_secs(5),
+            insecure: true
         }).await;
 
         let client_b = scenario.clients.pop().unwrap();

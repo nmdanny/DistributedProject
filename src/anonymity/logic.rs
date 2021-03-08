@@ -48,7 +48,10 @@ pub struct Config {
 
     #[clap(short='r', long = "timeout", about = "Timeout duration of Raft client for comitting a single entry to the state machine. Also timeout of transport(client/server)", 
            parse(try_from_str = parse_phase_length), default_value = "3000")]
-    pub timeout: std::time::Duration
+    pub timeout: std::time::Duration,
+
+    #[clap(long = "insecure", about = "If enabled, disables TLS")]
+    pub insecure: bool
 }
 
 
@@ -608,7 +611,8 @@ mod tests {
             num_channels: NUM_CHANNELS,
             num_nodes: NUM_NODES,
             num_clients: 1, phase_length: Duration::from_millis(1),
-            timeout: Duration::from_secs(1)
+            timeout: Duration::from_secs(1),
+            insecure: true
         });
 
         let ls = tokio::task::LocalSet::new();

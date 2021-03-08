@@ -79,7 +79,7 @@ fn main() -> Result<(), anyhow::Error> {
 }
 
 async fn run_server(config: &Config, server_cfg: &ServerConfig) -> Result<(), anyhow::Error> {
-    let grpc_config = GRPCConfig::default_for_nodes(config.num_nodes);
+    let grpc_config = GRPCConfig::default_for_nodes(config.num_nodes, !config.insecure);
     let transport: GRPCTransport<AnonymityMessage<AsymEncrypted>> = 
         GRPCTransport::new(Some(server_cfg.node_id), grpc_config, config.timeout).await?;
     let shared_cfg = Arc::new(config.clone());

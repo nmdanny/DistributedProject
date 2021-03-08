@@ -9,9 +9,9 @@ use futures::{Future, Stream};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tonic::{IntoRequest, Response};
+use tonic::{IntoRequest, Response, transport::{ClientTlsConfig, ServerTlsConfig}};
 use tracing_futures::Instrument;
-use std::{convert::{TryInto, TryFrom}, pin::Pin, sync::Arc, unimplemented};
+use std::{convert::{TryInto, TryFrom}, path::Path, pin::Pin, sync::Arc, unimplemented};
 
 use std::collections::HashMap;
 use serde::Serialize;
@@ -28,21 +28,24 @@ const MAX_RECONNECTS: usize = 5;
 #[derive(Debug, Clone)]
 pub struct GRPCConfig {
     /// Maps a node ID to gRPC URL
-    pub nodes: HashMap<usize, String>
+    pub nodes: HashMap<usize, String>,
+
+    pub use_tls: bool
 }
 
 const DEFAULT_START_PORT: u16 = 18200;
 
 impl GRPCConfig {
-    pub fn new() -> Self {
-        GRPCConfig { nodes: Default::default() }
+    pub fn new(use_tls: bool) -> Self {
+        GRPCConfig { nodes: Default::default(), use_tls }
     }
 
-    pub fn default_for_nodes(num_nodes: usize) -> Self {
+    pub fn default_for_nodes(num_nodes: usize, use_tls: bool) -> Self {
         GRPCConfig {
             nodes: (0 .. num_nodes).into_iter().map(|node_id| {
                 (node_id, format!("[::1]:{}", DEFAULT_START_PORT + node_id as u16))
-            }).collect()
+            }).collect(),
+            use_tls
         }
     }
 }
@@ -78,6 +81,25 @@ pub struct GRPCTransportInner<V: Value> {
     client_timeout: std::time::Duration
 }
 
+const CA_PEM_PATH: &str = "certs/ca.pem";
+
+async fn get_ca_cert() -> Result<tonic::transport::Certificate, anyhow::Error> {
+    let pem = tokio::fs::read(&CA_PEM_PATH).await
+        .context(anyhow::format_err!("Couldn't open certificate authority PEM at {}", CA_PEM_PATH))?;
+    Ok(tonic::transport::Certificate::from_pem(pem))
+}
+
+async fn get_server_identity(server_id: Id) -> Result<tonic::transport::Identity, anyhow::Error> {
+    let server_pem_path = format!("certs/tls-server/server{}.pem", server_id);
+    let server_key_path = format!("certs/tls-server/server{}.key", server_id);
+    let pem = tokio::fs::read(&server_pem_path).await
+        .context(anyhow::format_err!("Couldn't open public key of server {} at {}", server_id, server_pem_path))?;
+    let key = tokio::fs::read(&server_key_path).await
+        .context(anyhow::format_err!("Couldn't open private key of server {} at {}", server_id, server_key_path))?;
+
+    Ok(tonic::transport::Identity::from_pem(pem, key))
+}
+
 /// Attempts to connect to all raft nodes(except my own node, in case we are a node), returns with an error if any connection fails
 #[instrument]
 pub async fn connect_to_nodes(my_id: Option<Id>,
@@ -88,10 +110,21 @@ pub async fn connect_to_nodes(my_id: Option<Id>,
         let mut attempts = 0;
         let client = loop {
             attempts += 1;
-            let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?
+
+            let scheme = if config.use_tls { "https" } else { "http" } ;
+            let url = format!("{}://{}", scheme, url);
+
+            let endpoint = tonic::transport::Endpoint::from_shared(url.clone())?
                 .timeout(timeout);
-            let endpoint2 = tonic::transport::Endpoint::from_shared(format!("http://{}", url))?
+            let endpoint2 = tonic::transport::Endpoint::from_shared(url.clone())?
                 .timeout(timeout);
+            let (endpoint, endpoint2) = if config.use_tls {
+                let ca_cert = get_ca_cert().await?;
+                let tls = ClientTlsConfig::new()
+                    .ca_certificate(ca_cert)
+                    .domain_name("localhost");
+                (endpoint.tls_config(tls.clone())?, endpoint2.tls_config(tls)?)
+            } else { (endpoint, endpoint2) };
             info!("Connecting to {}", url);
             let res = tokio::try_join!(
                 RaftClient::connect(endpoint), RaftClient::connect(endpoint2)
@@ -235,18 +268,25 @@ impl <V: Value> Transport<V> for GRPCTransport<V> {
     #[instrument]
     async fn on_node_communicator_created(&mut self, id: Id, comm: &mut NodeCommunicator<V>) {
 
-        let addr = {
+        let (addr, use_tls) = {
             let mut inner = self.inner.write();
             inner.my_id = Some(id);
             inner.my_node = Some(comm.clone());
-            inner.config.nodes.get(&id).unwrap().parse().unwrap()
+            (inner.config.nodes.get(&id).unwrap().parse().unwrap(), inner.config.use_tls)
         };
 
         let communicator = comm.clone();
         tokio::spawn(async move {
             info!("Spawning GRPC server for node {}", id);
             let raft_service = RaftService { communicator };
-            let _server = tonic::transport::Server::builder()
+            let server_builder = tonic::transport::Server::builder();
+            let mut server_builder = if use_tls {
+                let identity = get_server_identity(id).await.unwrap();
+                let tls = ServerTlsConfig::new().identity(identity);
+                server_builder.tls_config(tls).unwrap()
+            } else { server_builder };
+
+            let _ = server_builder
                 .add_service(RaftServer::new(raft_service))
                 .serve(addr)
                 .await.unwrap();
@@ -408,6 +448,8 @@ mod tests {
         pub clients: Vec<crate::consensus::client::Client<AdversaryClientTransport<V, GRPCTransport<V>>, V>>
     }
 
+    const USE_TLS: bool = false;
+
     impl <V: Value> Scenario<V> where V::Result: Default{
         pub async fn setup(num_nodes: usize, num_clients: usize) -> Self
         {
@@ -415,7 +457,7 @@ mod tests {
             let futures = (0 .. num_nodes).map(|i| {
                 let adversary = adversary.clone();
                 async move {
-                    let grpc_transport: GRPCTransport<V> = GRPCTransport::new(Some(i), GRPCConfig::default_for_nodes(num_nodes), TIMEOUT).await.unwrap();
+                    let grpc_transport: GRPCTransport<V> = GRPCTransport::new(Some(i), GRPCConfig::default_for_nodes(num_nodes, USE_TLS), TIMEOUT).await.unwrap();
                     let server_transport = adversary.wrap_server_transport(i, grpc_transport);
                     let (node, _comm) = NodeCommunicator::create_with_node(i,
                                                     num_nodes,
@@ -430,7 +472,7 @@ mod tests {
             let mut clients = vec![];
             for i in 0 .. num_clients {
                 let adversary = adversary.clone();
-                let grpc_transport = GRPCTransport::new(None, GRPCConfig::default_for_nodes(num_nodes), TIMEOUT).await.unwrap();
+                let grpc_transport = GRPCTransport::new(None, GRPCConfig::default_for_nodes(num_nodes, USE_TLS), TIMEOUT).await.unwrap();
                 let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), grpc_transport);
                 let client = crate::consensus::client::Client::new(format!("Client {}", i), client_transport, num_nodes);
                 clients.push(client);
