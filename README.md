@@ -1,84 +1,100 @@
-# Practical Exercise 1 in Distributed Algorithms
+# Anonymous Chat - Final Project
 
-By Daniel Kerbel(CSE user `danielkerbel`)
-
-
-## Framework
-
-We'll build a framework for modelling unreliable channels. The transport will be gRPC, but we will not rely on the built
-in reliability mechanisms of gRPC/HTTP/TCP, or the way IP packets are routed - we'll only look at the payload of the packets,
-which are messages serialized via protobuf. Therefore, these messages will form the lowest layer of our simulated network stack.
-
-gRPC is based on a request-response flow, as well as streaming. A `Subscribe` message initiates a server to client stream,
-which is effectively used to broadcast messages to all subscribed peers.
+In this project we implement an anonymous chat messaging service which allows two clients to chat
+privately with each other, without leaking information about the contents of their messages or
+their identities to other clients or any servers. In addition, the chat service is tolerant to omission faults so long as at least half of the servers are not faulty. (The number of faulty clients affects the size of the anonymity set)
 
 
-This framework is coded in Rust, using the [Tonic](https://github.com/hyperium/tonic/) library for gRPC. 
+## Installing and Running
+
+This project was tested on Windows & Linux, compiled via Rust 1.50 and running the client requires a graphical environment.
+
+1. If you don't have Rust, install the latest stable version. The recommended way of installing Rust is via [Rustup](https://rustup.rs/)
+
+2. Compile the project by running `cargo build`
+
+3. Generating keys & certificates:
+   - Run `cargo run --bin cert_gen --num_servers 5 --num_clients 50` to generate
+     public & private key-pairs for 5 servers and 50 clients   
+     
+   - For TLS, run 
+   
+     ```shell
+     cd certs
+     ./gen.sh
+     ```
+
+     (this requires a linux environment & an up-to-date openssh installation)
+
+     to generate a self signed CA and use it to create keys & certificates for the servers
 
 
-## Problem
+     Alternatively, you can use the `--insecure` flag in the runner & run scripts(see below) to disable TLS.
 
-See the PDF
+4. To run either a client or a server, see documentation under
+   `cargo run --bin runner -- --help`
 
-## Solution
+   (All arguments to the chat client/server appear after `runner -- `, the arguments beore that belong to the `cargo` program)
 
-We wish to attain safety & liveness within the setting specified in the PDF.
-We'll deal with the adversary as follows:
+   There are also scripts for Windows & Linux which start several servers and clients :
 
-- Every message(request/response) will be identified by the client who initiated it(`client_id`)
-  
-- Every client will maintain a counter that is incremented upon each successful request, and the request(and response) will
-  contain said counter at time of request.(`sequence_num`)
+   - On Windows,  [Window Terminal](https://www.microsoft.com/en-us/p/windows-terminal/9n0dx20hk701) is required, simply compile the project and then run `./start_servers.ps1` from the project root
 
-The overall flow will be clients sending requests, and then waiting for an appropriate broadcast before proceeding - if no
-response is received in an appropriate time, they will re-transmit their request(due to the synchrony assumption there is
-a known timeout number)
- 
-### Message re-ordering
- 
-When clients create requests and await for responses serially, message re-ordering is not a problem, however, clients can also make several requests in parallel
-and wait for their responses to come in any order - this is where `sequence_num` comes into play, it ensures the server
-will process them in the order they came, ensuring safety.
-
-Note - we don't care about message ordering among different clients as this is a different problem that has more to do
-with synchronization/locking strategies rather than safety.
-
-### Duplicate messages
-
-The `sequence_num` is also used to determine duplicate requests/responses. The server will not manipulate his state
-upon encountering a duplicate write request, however he will respond with the original response - this is because
-some duplicate requests are actually legitimate, and occurred due to a response message being dropped.
-
-Clients can use the index of broadcast write messages to determine if a chat message is duplicated(the index of a new
-message should be client_log_view.length + 1)
-
-A trickier issue is that broadcasts might not arrive to all clients, causing some of them to have an incomplete
-view. This is solved in one of two ways:
-
-1. When the client eventually receives another broadcast, he can inspect the index to determine the length of the real log;
-  if he finds out that the index is bigger by his own log's view length by more than 1, it means he has missed some messages
-  and can request the log from the server
-  
-2. In case no broadcast was received in a certain amount of time, the client can actively
-
-
-* Technical note: Because gRPC is naturally request-response oriented, I found it very difficult to duplicate response messages
-  towards the client, so the adversary will only duplicate request messages to the server.  
-
-### Message drop
-
-
-Due to synchrony assumption, clients can assume that the server will receive their request and broadcast their message in a certain amount of time.
-If not, they'll simply retransmit the message(with the original counter)
-
-This handles both request drops or response drops involving the initiating client
-
-A more complicated issue is that not all clients may receive a broadcast chat message, resulting in an inconsistent
-chat view. To deal with this, clients will ask for the entire log if they detect an inconsistency(they recognize
-that a message was skipped)
+   - On Linux, [tmux](https://github.com/tmux/tmux/wiki/Installing) is required, simply compile the project and then run `./start_servers.sh` from the project root.
 
 
 
+## Documents
+
+- See [this diagram](DistProjDiagram.pdf) which summarizes the design of
+  the program, or the below section
+
+- See [this file](Project.pdf) for a more detailed introduction and
+  theoretical analysis
+
+From previous exercises:
+   - For recap of Raft implementation, see [this file](src/consensus/README.md)
+
+   - For recap of crash tolerant anonymous, public chat service, see [this file](src/anonymity/README.md) - not very accurate or relevant now.
+
+## Design & Implementation recap
+
+The project is based on several components, some were implemented in previous
+exercises and are tested independently, and are layered on top of each other
+in order to provide the required functionality of omission-tolerant,
+anonymous 2 way communication between clients.
+
+1. Consensus
+   
+   Implemented via Raft, consists of mostly server logic (the Raft protocol) as well as a client
+   module allowing to submit values, as well as being notified whenever a value is committed to the state machine.
+
+2. Anonymous public chat
+
+   On the server's side, implemented as a state machine on top of Raft, allowing client crash tolerance and server omission tolerance. 
+
+   This component will be modified in this project in order to allow server
+   omission tolerance, via the use of PKI. This means that a client submits
+   all shares of all channels via a single message, such that each share is
+   encrypted via the corresponding server's public key. Those shares are
+   replicated via the Consensus module, thereby ensuring from this point on,
+   the value will be recoverable by all valid servers. Each server decrypts the shares
+   intended for him, and is unable to decrypt shares of other servers, thereby ensuring
+   secrecy.
+
+   Once the secret is recovered, the servers broadcast the value to all clients.
 
 
+3. Anonymous 2 way chat
 
+   This will be implemented on top of the public chat, by using encrypted messages as values. When
+   client `X` sends a message `M` to client `Y`, once it is recovered by the servers, it will be broadcast
+   to all clients (after all, due to anonymity, they cannot tell to who it is intended, so broadcast is their
+   only option). Every client will try to decipher it via his private key, and only `Y` will succeed.
+
+   In addition to `M`, there will also be `X`'s identifier which allows `Y` to respond to him.
+   (If we want `X` to remain anonymous to `Y`, we can use a randomly generated symmetric key instead, and
+   have that key re-generated whenever `X` wishes to start a new communication channel with `Y`)
+
+   Note how the servers don't have any further logic beside what was described in 2, their mere role is basically
+   forwarding messages between clients, and use secret-sharing in order to anonymize them
