@@ -1,6 +1,5 @@
 use crate::{anonymity::secret_sharing::*, consensus::client::EventStream, crypto::PKISettings};
 use crate::anonymity::logic::*;
-use crate::anonymity::callbacks::*;
 use crate::consensus::client::{ClientTransport, Client};
 use crate::consensus::types::*;
 use parking_lot::Mutex;

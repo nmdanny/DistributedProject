@@ -9,7 +9,6 @@ use crate::consensus::adversarial_transport::{AdversaryHandle, NodeId, Adversary
 use crate::consensus::transport::{ThreadTransport};
 use crate::anonymity::logic::*;
 use crate::anonymity::anonymous_client::{AnonymousClient, CommitResult, combined_subscriber};
-use crate::anonymity::callbacks::*;
 use crate::crypto::PKIBuilder;
 use crossbeam::epoch::Pointable;
 use futures::{Future, Stream, StreamExt, future::join, future::join_all, stream::{FuturesOrdered, FuturesUnordered}};
