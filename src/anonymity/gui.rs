@@ -14,7 +14,7 @@ use crate::ClientConfig;
 /// Status of a chat message
 enum ChatMessageState {
     /// Sent but not yet recovered
-    Sent,
+    Sending,
     /// Sent and recovered by servers
     Delivered(CommitResult),
     /// Tried sending but got an error
@@ -30,7 +30,7 @@ impl iced::container::StyleSheet for ChatMessageState {
         let other_message_color : Color = Color::WHITE;
         let error_message_color : Color = Color::from_rgb8(250, 212, 216);
         let background_color = match &self {
-                ChatMessageState::Sent | ChatMessageState::Delivered(_) => { my_message_color }
+                ChatMessageState::Sending | ChatMessageState::Delivered(_) => { my_message_color }
                 ChatMessageState::Errored(_) => { error_message_color}
                 ChatMessageState::Received(_) => { other_message_color }
         };
@@ -54,14 +54,7 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     fn view(&mut self) -> Element<Message> {
-        let contents = format!("[{:?}] {}", self.state, self.contents);
-
-        let contents = match &self.state {
-            ChatMessageState::Sent => { contents }
-            ChatMessageState::Delivered(commit_result) => { format!("{} √\n{:?}", contents, commit_result)}
-            ChatMessageState::Errored(err) => { format!("{}\nError: {}", contents, err)}
-            ChatMessageState::Received(commit_result) => { format!("{}\n{:?}", contents, commit_result) }
-        };
+        let contents = format!("{}\n{:?}", self.contents, self.state);
         let text = Text::new(contents);
         let container = Container::new(text).width(Length::Fill).padding(1).style(self.state.clone());
         container.into()
@@ -122,7 +115,7 @@ impl ChatState {
                 self.messages.push(ChatMessage {
                     from: self.client.client_id(),
                     contents: message.clone(),
-                    state: ChatMessageState::Sent
+                    state: ChatMessageState::Sending
                 });
                 let message_ix = self.messages.len() - 1;
                 let fut = self.client.send_anonymously(self.input_recipient, message);
