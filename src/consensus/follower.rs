@@ -71,32 +71,21 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> FollowerState<'a, V,
 impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> for FollowerState<'a, V, T, S> {
     #[instrument]
     fn handle_append_entries(&mut self, req: AppendEntries<V>) -> Result<AppendEntriesResponse, RaftError> {
+        let mut reset_timer = true;
+
+        // if sender is stale, we will not reset the timer
         if req.term < self.node.current_term {
-            return Ok(AppendEntriesResponse::failed(self.node.current_term));
+            reset_timer = false;
         }
-
-        // if we had just lost an election
-        if self.node.leader_id.is_none() {
-            info!("Now I know the new leader: {}", req.leader_id);
-            self.node.leader_id = Some(req.leader_id);
-        }
-
-        if self.node.leader_id != Some(req.leader_id) {
-            // It is impossible to have two different leaders at the same term,
-            // Because that would imply each of them got a majority of votes for said term,
-            // But a node cannot vote for two different leaders at the same term
-            assert_ne!(req.term, self.node.current_term,
-                       "If there's a mismatch between leaders (self.node.leader_id = {:?} and req.leader_id = {:?}), the term must have changed(increased)",
-                        self.node.leader_id, req.leader_id);
-        }
-        self.node.leader_id = Some(req.leader_id);
-
 
         // continue with the default handling of append entry
         let res = self.node.on_receive_append_entry(req);
 
-        // update heartbeat to prevent switch to candidate
-        self.update_timer();
+        if reset_timer {
+            // update heartbeat to prevent switch to candidate
+            // only if the sender of this AE wasn't stale
+            self.update_timer();
+        }
 
         res
     }

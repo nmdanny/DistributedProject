@@ -188,7 +188,8 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
 pub enum ChangeStateReason {
     WonElection { yes: usize, no: usize},
     FollowerTimeout { timeout_duration: std::time::Duration },
-    SawHigherTerm { my_term: usize, new_term: usize, new_term_leader: Option<Id>}
+    SawHigherTerm { my_term: usize, new_term: usize, new_term_leader: Option<Id>},
+    SomeoneElseWon { term: usize, leader: Id }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -285,20 +286,56 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
 
     }
 
-    /// Updates the current term to the given one, if it's more up to date.
-    /// Also updates the leader in that case. Returns true if the term was indeed updated
+    /// Observes a term(and a leader for an AE request), updating them and the state if necessary.
+    /// Returns true iff the state was changed(to follower)
     #[instrument]
     pub fn try_update_term(&mut self, term: usize, leader: Option<Id>) -> bool {
-        if term > self.current_term {
+
+        // Election safety property check
+        if self.current_term == term && self.leader_id.is_some() && leader.is_some() {
+            assert_eq!(self.leader_id, leader, 
+                       "Election safety property violated: \
+                        For term {}, my node's current leader is {:?}, \
+                        yet I observed an RPC for that term whose leader is {:?}", term, self.leader_id, leader);
+        }
+
+        // If we got an AE(only request where leader is Some) for the current term
+        if term == self.current_term && leader.is_some(){
+            assert_ne!(self.state, ServerState::Leader, "A leader node doesn't send itself AE, so he cannot receive an AE \
+                                                         for the current term, and there are no other leaders for said term");
+            if self.state == ServerState::Follower {
+                if self.leader_id.is_none() {
+                    self.leader_id = leader;
+                    info!("Follower at term {} is now aware of leader for said term: {}", term, leader.unwrap());
+                } else {
+                    assert!(self.leader_id == leader, "A follower cannot see an AE whose leader is different from the \
+                                                       current leader for said term");
+                }
+                return false;
+            }
+
+            if self.state == ServerState::Candidate {
+                self.leader_id = leader;
+                self.change_state(ServerState::Follower, ChangeStateReason::SomeoneElseWon {
+                    term, leader: leader.unwrap()
+                });
+                return true;
+            } else {
+                unreachable!("Not a leader, not a follower and not a candidate, impossible");
+            }
+        }
+
+        // If we saw a request/response with a higher term
+        if term > self.current_term  {
             let old_term = self.current_term;
-            self.current_term = term;
             self.change_state(ServerState::Follower, ChangeStateReason::SawHigherTerm {
                 my_term: old_term, new_term: term, new_term_leader: leader
             });
+            self.current_term = term;
             self.leader_id = leader;
-            return true
+            return true;
         }
-        return false
+        return false;
     }
 
     /// Invoked by any node upon receiving a request to vote
