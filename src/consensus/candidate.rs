@@ -12,13 +12,6 @@ use async_trait::async_trait;
 use anyhow::Error;
 use crate::consensus::timing::generate_election_length;
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum ElectionResult {
-    Lost,
-    Won,
-    Undecided
-}
-
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct ElectionState {
@@ -65,15 +58,9 @@ impl ElectionState {
         self.votes.push(vote);
     }
 
-    /// Tallies all current votes and returns the result
-    pub fn tally(&self) -> ElectionResult {
-        if self.yes >= self.quorum_size {
-            return ElectionResult::Won;
-        }
-        if self.no >= self.quorum_size {
-            return ElectionResult::Lost;
-        }
-        return ElectionResult::Undecided;
+    /// Have we won the elections
+    pub fn won(&self) -> bool {
+        return self.yes >= self.quorum_size
     }
 }
 
@@ -144,14 +131,18 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
         // loop for multiple consecutive elections(1 or more)
         loop {
 
+
+            if self.node.state != ServerState::Candidate {
+                return Ok(());
+            }
+
             elections_in_a_row += 1;
             // start an election, updating node state and sending vote requests
             let mut election_state = self.start_election().await?;
-            let mut _lost = false;
 
             let duration = generate_election_length(&self.node.settings);
             let election_end = tokio::time::Instant::now() + duration;
-            debug!("elections started({} elections in a row), duration: {:?}", elections_in_a_row, duration);
+            info!("elections started for term {} ({} elections in a row), duration: {:?}", self.node.current_term, elections_in_a_row, duration);
 
             // loop for a single election
             loop {
@@ -164,9 +155,9 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                 tokio::select! {
                     _ = election_end_fut => {
                         // election timed out, start another one
-                        debug!("elections of term {} timed out(got: {} yes, {} no), starting more elections",
+                        info!("elections of term {} timed out(got: {} yes, {} no), so far ran {} elections in a row",
                                self.node.current_term,
-                               election_state.yes, election_state.no);
+                               election_state.yes, election_state.no, elections_in_a_row);
                         break;
                     },
                     Some(vote) = election_state.vote_receiver.recv() => {
@@ -177,30 +168,14 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                             return Ok(());
                         }
                         election_state.count_vote(vote);
-                        match election_state.tally() {
-                            ElectionResult::Lost => {
-                                if !_lost {
-                                    debug!("lost election, results: {:?}", election_state);
-                                }
-                                _lost = true;
-                                // we will not change the state yet, this will be done once we
-                                // receive a new AppendEntries message(might be slightly wasteful
-                                // as we might try another election, but this is a rare scenario
-                                // as the election timeout is bigger by an order of magnitude than
-                                // the broadcast time.)
-                            }
-                            ElectionResult::Won => {
-                                assert!(!_lost, "Cannot win election after losing(sanity check)");
-                                info!("won election, results: {:?}", election_state);
-                                self.node.change_state(ServerState::Leader,
-                                    ChangeStateReason::WonElection {
-                                      yes: election_state.yes, no: election_state.no
-                                  });
-                                return Ok(())
-                            }
-                            ElectionResult::Undecided => {
-                                assert!(!_lost, "Cannot become undecided after losing(sanity check)");
-                            }
+                        if election_state.won() {
+                            info!("won election after {} elections in a row, results: {:?}", 
+                                elections_in_a_row, election_state);
+                            self.node.change_state(ServerState::Leader,
+                                ChangeStateReason::WonElection {
+                                    yes: election_state.yes, no: election_state.no
+                                });
+                            return Ok(())
                         }
                     },
                     res = self.node.receiver.as_mut().expect("candidate - Node::receiver was None").recv() => {
