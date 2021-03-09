@@ -233,13 +233,21 @@ pub struct CommitEntry<V: Value> {
 }
 
 /// A pair of index and term
-/// Unlike
-#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
-pub struct IndexTerm(pub Option<(usize, usize)>);
+/// Ordering by term, tie-breaking by index. This allows checking
+/// which of two logs is more up-to-date by comparing their last IndexTerm
+#[derive(Clone, Eq, Ord, PartialOrd, PartialEq, Serialize, Deserialize)]
+pub enum IndexTerm {
+    // note that the order of the enum variants & fields matters
+    NoEntry,
+    SomeEntry {
+        term: usize,
+        index: usize
+    },
+}
 
 impl std::fmt::Debug for IndexTerm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some((index, term)) = self.0 {
+        if let Some((index, term)) = self.as_tuple() {
             f.debug_struct("IndexTerm")
                 .field("index", &index)
                 .field("term", &term)
@@ -254,27 +262,35 @@ impl std::fmt::Debug for IndexTerm {
 
 impl IndexTerm {
     pub fn new(index: usize, term: usize) -> Self {
-        IndexTerm(Some((index, term)))
+        IndexTerm::SomeEntry {
+            index, term
+        }
     }
     pub fn no_entry() -> Self {
-        IndexTerm(None)
+        IndexTerm::NoEntry
     }
 
-
-    pub fn for_entry<V: Value>(index: usize, entry: &LogEntry<V>) -> Self {
-        IndexTerm(Some((index, entry.term)))
+    /// If has an entry, returns a tuple of the form (index, term)
+    pub fn as_tuple(&self) -> Option<(usize, usize)> {
+        if let &IndexTerm::SomeEntry { index, term} = &self {
+            return Some((*index, *term));
+        }
+        None
     }
 
     pub fn contains_entry(&self) -> bool {
-        self.0.is_some()
+        if let &IndexTerm::SomeEntry { .. } = &self {
+            return true;
+        }
+        false
     }
 
     pub fn index(&self) -> Option<usize> {
-        self.0.map(|t| t.0)
+        self.as_tuple().map(|t| t.0)
     }
 
     pub fn term(&self) -> Option<usize> {
-        self.0.map(|t| t.1)
+        self.as_tuple().map(|t| t.1)
     }
 }
 
@@ -293,15 +309,22 @@ mod tests{
         let none = IndexTerm::no_entry();
 
         let a = IndexTerm::new(0, 0);
-        assert!(none < a);
+        assert!(none < a, "An empty log is less up to date from a log with one element");
 
-        let b = IndexTerm::new(5, 10);
-        assert!(a < b);
+        let b = IndexTerm::new(0, 1);
+        assert!(a < b, "Log with bigger term is more up-to-date");
 
-        let c = IndexTerm::new(6, 20);
-        assert!(b < c);
+        let c = IndexTerm::new(1, 1);
+        assert!(b < c, "If two logs have the same term, the longer one is more up-to-date");
+        
+        let short_big_term = IndexTerm::new(50, 100);
+        let long_short_term = IndexTerm::new(100000, 99);
+        assert!(short_big_term > long_short_term, "A shorter log with a bigger term is considered more up-to-date");
 
-        let d = IndexTerm::new(6, 25);
-        assert!(c < d);
+
+        // same checks as above, just for sanity..
+        assert!(IndexTerm::new(50, 50) < IndexTerm::new(51, 51));
+        assert!(IndexTerm::no_entry() < IndexTerm::new(10, 0));
+        assert!(IndexTerm::new(51, 50) < IndexTerm::new(50, 51));
     }
 }

@@ -401,7 +401,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
 
         // 2. Check if we have a mismatch with the prev_log_index_term
         if req.prev_log_index_term.contains_entry() {
-            let (prev_log_index, prev_log_term) = req.prev_log_index_term.0.unwrap();
+            let (prev_log_index, prev_log_term) = req.prev_log_index_term.as_tuple().unwrap();
             match self.storage.get(prev_log_index) {
                 None => {
                     warn!(
