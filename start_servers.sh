@@ -23,12 +23,12 @@ WORK_DIR=$(mktemp -d)
 
 for ((id=0; id < $num_servers; id++))
 do
-    tmux new-window -a -n "Server $id" "$exe --num_servers $num_servers -t $threshold --num_clients $num_clients --num_channels $num_channels --timeout $timeoutMs server --id $id > $WORK_DIR/s-$id & tail -f $WORK_DIR/s-$id"
+    tmux new-window -a -n "Server $id" "$exe --num_servers $num_servers -t $threshold --num_clients $num_clients --num_channels $num_channels --timeout $timeoutMs server --id $id &> $WORK_DIR/s-$id &; tail -f $WORK_DIR/s-$id"
 done
 
 for ((id=0; id < $num_clients; id++))
 do
-    tmux new-window -a -n "Client $id" "$exe --num_servers $num_servers -t $threshold --num_clients $num_clients --num_channels $num_channels --timeout $timeoutMs client --id $id > $WORK_DIR/c-$id & tail -f $WORK_DIR/c-$id"
+    tmux new-window -a -n "Client $id" "$exe --num_servers $num_servers -t $threshold --num_clients $num_clients --num_channels $num_channels --timeout $timeoutMs client --id $id &> $WORK_DIR/c-$id &; tail -f $WORK_DIR/c-$id"
 done
 
 
