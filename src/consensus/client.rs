@@ -8,12 +8,13 @@ use tracing::Instrument;
 use tokio::time::Duration;
 use async_trait::async_trait;
 use color_eyre::eyre::ContextCompat;
-use crate::consensus::timing::CLIENT_RETRY_DELAY_RANGE;
 use tokio::time::timeout;
 use derivative;
 use futures::{Stream, TryFutureExt};
 use std::{pin::Pin, rc::Rc};
 use std::sync::Arc;
+
+use super::timing::RaftClientSettings;
 
 pub type EventStream<EventType> = Pin<Box<dyn Send + Stream<Item = EventType>>>;
 
@@ -88,6 +89,9 @@ impl <V: Value> ClientTransport<V> for SingleProcessClientTransport<V> {
 /// values(by using their equality definition)
 pub struct Client<T: ClientTransport<V>, V: Value> {
 
+    #[derivative(Debug="ignore")]
+    pub settings: RaftClientSettings,
+
     /// Used to identify the client, for debugging purposes
     pub client_name: String,
 
@@ -106,10 +110,6 @@ pub struct Client<T: ClientTransport<V>, V: Value> {
     last_commit_index: Option<usize>,
 
     #[derivative(Debug="ignore")]
-    /// Maximal number of retries before giving up
-    pub max_retries: usize,
-
-    #[derivative(Debug="ignore")]
     /// The number of time(in ms) to wait between re-try attempts
     pub retry_delay_ms: Uniform<u64>,
 
@@ -119,15 +119,16 @@ pub struct Client<T: ClientTransport<V>, V: Value> {
 
 impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
 {
-    pub fn new(client_name: String, transport: T, num_nodes: usize) -> Self {
+    pub fn new(client_name: String, transport: T, num_nodes: usize, settings: RaftClientSettings) -> Self {
+        let retry_delay_ms = settings.retry_delay_ms.clone();
         Client {
+            settings,
             client_name,
             transport,
             leader: 0,
             num_nodes,
             last_commit_index: None,
-            max_retries: 10000,
-            retry_delay_ms: Uniform::from(CLIENT_RETRY_DELAY_RANGE),
+            retry_delay_ms: Uniform::from(retry_delay_ms),
             phantom: Default::default()
         }
     }
@@ -154,7 +155,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
 
         let mut attempt = 0;
 
-        while attempt <= self.max_retries {
+        while attempt <= self.settings.max_retries {
 
 
             let values = self.transport.request_values(self.leader,
@@ -212,7 +213,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
     {
         let mut attempt = 0;
 
-        while attempt <= self.max_retries {
+        while attempt <= self.settings.max_retries {
 
             if attempt > 0 && self.is_value_already_committed(&value).await? {
                 return Ok((self.last_commit_index.unwrap(), None))
@@ -252,7 +253,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
 
     pub async fn submit_without_commit(&self, node_id: usize, value: V) -> Result<V::Result, Error> {
         let mut attempt = 0;
-        while attempt <= self.max_retries {
+        while attempt <= self.settings.max_retries {
             let res = self.transport.force_apply(node_id, value.clone()).await;
             match res {
                 Err(RaftError::NetworkError(e)) => {

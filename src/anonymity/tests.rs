@@ -1,5 +1,5 @@
 
-use crate::{grpc::transport::{GRPCConfig, GRPCTransport}, logging::{profiler, setup_logging}};
+use crate::{consensus::timing::{RaftClientSettings, RaftServerSettings}, grpc::transport::{GRPCConfig, GRPCTransport}, logging::{profiler, setup_logging}};
 use crate::consensus::types::*;
 use crate::consensus::transport::Transport;
 use crate::consensus::node::Node;
@@ -14,6 +14,7 @@ use crossbeam::epoch::Pointable;
 use futures::{Future, Stream, StreamExt, future::join, future::join_all, stream::{FuturesOrdered, FuturesUnordered}};
 use parking_lot::{Mutex, RwLock};
 use rand::distributions::{Distribution, Uniform};
+use serde::__private::de;
 use tokio_stream::StreamMap;
 use tracing_futures::Instrument;
 use tokio::task;
@@ -34,7 +35,10 @@ pub struct Scenario<V: Value + Hash>
 
 }
 
-pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V> {
+pub async fn setup_grpc_scenario<V: Value + Hash>(
+    config: Config, 
+    server_settings: RaftServerSettings,
+    client_settings: RaftClientSettings) -> Scenario<V> {
 
         let num_nodes = config.num_nodes;
 
@@ -53,6 +57,8 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
                     pki_builder.for_server(node_id).build()
             );
             let adversary = adversary.clone();
+            let server_settings = server_settings.clone();
+            let client_settings = client_settings.clone();
             let handle = tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Handle::current();
                 let _ = rt.enter();
@@ -66,9 +72,9 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
                     let server_transport = adversary.wrap_server_transport(node_id, server_transport);
                     let client_transport = adversary.wrap_client_transport(NodeId::ServerId(node_id), client_transport);
 
-                    let mut node = Node::new(node_id, num_nodes, server_transport);
+                    let mut node = Node::new(node_id, num_nodes, server_transport, server_settings);
                     let _comm = NodeCommunicator::from_node(&mut node).await;
-                    let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
+                    let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport, client_settings);
                     node.attach_state_machine(sm);
                     node.run_loop()
                         .instrument(tracing::trace_span!("node-loop", node.id = node_id))
@@ -100,7 +106,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
 
             let recv = combined_subscriber(sm_events.into_iter());
             let pki = Arc::new(pki_builder.for_client(i).build());
-            let client = AnonymousClient::new(client_transport, config.clone(), pki, i, recv);
+            let client = AnonymousClient::new(client_transport, config.clone(), pki, i, recv, client_settings.clone());
             clients.push(client);
         }
 
@@ -117,7 +123,7 @@ pub async fn setup_grpc_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
         }
 }
 
-pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V> {
+pub async fn setup_test_scenario<V: Value + Hash>(config: Config, server_settings: RaftServerSettings, client_settings: RaftClientSettings) -> Scenario<V> {
         let num_nodes = config.num_nodes;
         let server_transport = ThreadTransport::new(num_nodes, config.timeout);
         let adversary = AdversaryHandle::new();
@@ -128,7 +134,7 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
             (0 .. num_nodes).map(|id| {
                 let adversary = adversary.clone();
                 let server_transport = adversary.wrap_server_transport(id, server_transport.clone());
-                let mut node = Node::new(id, num_nodes, server_transport);
+                let mut node = Node::new(id, num_nodes, server_transport, server_settings.clone());
                 async {
                     let comm = NodeCommunicator::from_node(&mut node).await;
                     (node, comm)
@@ -144,7 +150,7 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
             let client_transport = adversary.wrap_client_transport(NodeId::ServerId(node.id), 
                 SingleProcessClientTransport::new(communicators.clone(), config.timeout));
             let pki = Arc::new(pki_builder.for_server(node.id).build());
-            let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport);
+            let sm = AnonymousLogSM::<V, _>::new(config.clone(), pki, node.id, client_transport, client_settings.clone());
             node.attach_state_machine(sm);
         }
 
@@ -167,7 +173,7 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
 
             let recv = combined_subscriber(sm_events.into_iter());
             let pki = Arc::new(pki_builder.for_client(i).build());
-            let client = AnonymousClient::new(client_transport, config.clone(), pki, i, recv);
+            let client = AnonymousClient::new(client_transport, config.clone(), pki, i, recv, client_settings.clone());
             clients.push(client);
         }
 
@@ -194,10 +200,6 @@ pub async fn setup_test_scenario<V: Value + Hash>(config: Config) -> Scenario<V>
         }
 }
 
-pub async fn setup_scenario<V: Value + Hash>(config: Config) -> Scenario<V> {
-    setup_grpc_scenario(config).await
-}
-
 
 #[tokio::test]
 async fn simple_scenario() {
@@ -215,8 +217,7 @@ async fn simple_scenario() {
             phase_length: std::time::Duration::from_secs(1),
             timeout: std::time::Duration::from_secs(3),
             insecure: true
-
-        }).await;
+        }, RaftServerSettings::default(), RaftClientSettings::default()).await;
 
         let client_a = scenario.clients.pop().unwrap();
         let client_b = scenario.clients.pop().unwrap();
@@ -234,7 +235,7 @@ async fn simple_scenario() {
     }).await;
 }
 
-const VALS_TO_COMMIT: u64 = 20;
+const VALS_TO_COMMIT: u64 = 10;
 
 #[tokio::test]
 async fn many_rounds() {
@@ -247,10 +248,13 @@ async fn many_rounds() {
             threshold: 3,
             num_clients: 25,
             num_channels: 100,
-            phase_length: std::time::Duration::from_millis(300),
+            phase_length: std::time::Duration::from_millis(500),
             timeout: std::time::Duration::from_millis(8000),
             insecure: true
-        }).await;
+        }, RaftServerSettings {
+            election_timeout_ms_range: 150 .. 450,
+           .. Default::default()
+        }, RaftClientSettings::default()).await;
 
 
         let mut handles = (0..).zip(scenario.clients.drain(..)).map(|(num, client)| {
@@ -308,7 +312,7 @@ async fn client_crash_only() {
             phase_length: std::time::Duration::from_secs(1),
             timeout: std::time::Duration::from_secs(5),
             insecure: true
-        }).await;
+        }, RaftServerSettings::default(), RaftClientSettings::default()).await;
 
         let client_b = scenario.clients.pop().unwrap();
         let client_a = scenario.clients.pop().unwrap();
@@ -357,7 +361,7 @@ async fn client_omission_server_crash() {
             phase_length: std::time::Duration::from_secs(1),
             timeout: std::time::Duration::from_secs(5),
             insecure: true
-        }).await;
+        }, RaftServerSettings::default(), RaftClientSettings::default()).await;
 
         let client_b = scenario.clients.pop().unwrap();
         let client_a = scenario.clients.pop().unwrap();

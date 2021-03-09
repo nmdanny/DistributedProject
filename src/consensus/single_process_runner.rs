@@ -4,7 +4,7 @@ extern crate tracing;
 use anyhow::Error;
 use tokio::sync::mpsc;
 use tracing_futures::Instrument;
-use dist_lib::{consensus::adversarial_transport::{AdversaryClientTransport, AdversaryHandle, NodeId}, logging::setup_logging};
+use dist_lib::{consensus::{adversarial_transport::{AdversaryClientTransport, AdversaryHandle, NodeId}, timing::{RaftClientSettings, RaftServerSettings}}, logging::setup_logging};
 use dist_lib::consensus::types::*;
 use dist_lib::consensus::state_machine::NoopStateMachine;
 use dist_lib::consensus::node_communicator::NodeCommunicator;
@@ -113,7 +113,8 @@ impl <V: Value> Scenario<V> where V::Result: Default{
                 let server_transport = adversary.wrap_server_transport(i, server_transport.clone());
                 NodeCommunicator::create_with_node(i,
                                                    num_nodes,
-                                                   server_transport, NoopStateMachine::default())
+                                                   server_transport, NoopStateMachine::default(),
+                                                   RaftServerSettings::default())
                 })
             )
             .await.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
@@ -121,7 +122,7 @@ impl <V: Value> Scenario<V> where V::Result: Default{
         for i in 0 .. num_clients {
             let client_transport = SingleProcessClientTransport::new(communicators.clone(), NET_TIMEOUT);
             let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), client_transport);
-            let client = Client::new(format!("Client {}", i), client_transport, num_nodes);
+            let client = Client::new(format!("Client {}", i), client_transport, num_nodes, RaftClientSettings::default());
             clients.push(client);
         }
 

@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use anyhow::{anyhow, Context};
 use tokio::sync::broadcast;
 
+use super::timing::RaftServerSettings;
+
 
 /// A command, created within a `NodeCommunicator` for invoking various methods on a Node which is
 /// running asynchronously. Sent via concurrency channels. Also includes a sender for sending
@@ -61,8 +63,9 @@ impl <V: Value> NodeCommunicator<V> {
                             id: usize,
                             number_of_nodes: usize,
                             transport: T,
-                            machine: S) -> (Node<V, T, S>, NodeCommunicator<V>) {
-        let mut node = Node::new(id, number_of_nodes, transport);
+                            machine: S,
+                            settings: RaftServerSettings) -> (Node<V, T, S>, NodeCommunicator<V>) {
+        let mut node = Node::new(id, number_of_nodes, transport, settings);
         let communicator = NodeCommunicator::from_node(&mut node).await;
         node.attach_state_machine(machine);
         (node, communicator)

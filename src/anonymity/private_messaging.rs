@@ -2,7 +2,7 @@ use std::{cell::RefCell, pin::Pin, sync::Arc};
 use std::hash::Hash;
 use derivative;
 
-use crate::{consensus::{client::{ClientTransport, EventStream}, types::{Id, Value}}, crypto::*};
+use crate::{consensus::{client::{ClientTransport, EventStream}, timing::RaftClientSettings, types::{Id, Value}}, crypto::*};
 use futures::{Future, Stream, StreamExt, future::ready, stream::BoxStream};
 use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
@@ -46,9 +46,10 @@ impl <V: Value + Hash> PMClient<V> {
 
     pub fn new<CT: ClientTransport<AnonymityMessage<AsymEncrypted>>>(client_transport: CT, 
         config: Arc<Config>, pki: Arc<PKISettings>, id: Id,
-        event_recv: Pin<Box<dyn Send + Stream<Item = NewRound<AsymEncrypted>>>>) -> Self 
+        event_recv: Pin<Box<dyn Send + Stream<Item = NewRound<AsymEncrypted>>>>,
+        client_settings: RaftClientSettings) -> Self 
     {
-        let anonym_client = AnonymousClient::new(client_transport, config, pki.clone(), id, event_recv);
+        let anonym_client = AnonymousClient::new(client_transport, config, pki.clone(), id, event_recv, client_settings);
 
         let (tx, rx) = mpsc::unbounded_channel();
         let mut event_stream = anonym_client.event_stream().expect("Event stream shouldn't be none");

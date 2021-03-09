@@ -149,7 +149,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
             let mut election_state = self.start_election().await?;
             let mut _lost = false;
 
-            let duration = generate_election_length();
+            let duration = generate_election_length(&self.node.settings);
             let election_end = tokio::time::Instant::now() + duration;
             debug!("elections started({} elections in a row), duration: {:?}", elections_in_a_row, duration);
 

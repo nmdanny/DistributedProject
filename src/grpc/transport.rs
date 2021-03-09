@@ -1,7 +1,7 @@
 use crate::consensus::{client::{ClientTransport, EventStream}, types::*};
 use crate::consensus::transport::Transport;
 use crate::consensus::node_communicator::NodeCommunicator;
-use crate::consensus::timing::HEARTBEAT_INTERVAL;
+use crate::consensus::timing::{RaftServerSettings, RaftClientSettings};
 use curve25519_dalek::digest::generic_array::GenericArray;
 use derivative;
 use async_trait::async_trait;
@@ -461,7 +461,8 @@ mod tests {
                     let server_transport = adversary.wrap_server_transport(i, grpc_transport);
                     let (node, _comm) = NodeCommunicator::create_with_node(i,
                                                     num_nodes,
-                                                    server_transport, NoopStateMachine::default()).await;
+                                                    server_transport, NoopStateMachine::default(),
+                                                    RaftServerSettings::default()).await;
                     node
                 }
             }).collect::<Vec<_>>();
@@ -474,7 +475,7 @@ mod tests {
                 let adversary = adversary.clone();
                 let grpc_transport = GRPCTransport::new(None, GRPCConfig::default_for_nodes(num_nodes, USE_TLS), TIMEOUT).await.unwrap();
                 let client_transport = adversary.wrap_client_transport(NodeId::ClientId(i), grpc_transport);
-                let client = crate::consensus::client::Client::new(format!("Client {}", i), client_transport, num_nodes);
+                let client = crate::consensus::client::Client::new(format!("Client {}", i), client_transport, num_nodes, RaftClientSettings::default());
                 clients.push(client);
             }
 

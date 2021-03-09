@@ -7,7 +7,7 @@ extern crate dist_lib;
 
 use std::rc::Rc;
 
-use dist_lib::{anonymity::private_messaging::PrivateMessage, consensus::{node::Node, node_communicator::NodeCommunicator}, crypto::{AsymEncrypted, PKIBuilder}, grpc::transport::{GRPCConfig, GRPCTransport}};
+use dist_lib::{anonymity::private_messaging::PrivateMessage, consensus::{node::Node, node_communicator::NodeCommunicator, timing::{RaftClientSettings, RaftServerSettings}}, crypto::{AsymEncrypted, PKIBuilder}, grpc::transport::{GRPCConfig, GRPCTransport}};
 use dist_lib::consensus::types::*;
 use dist_lib::anonymity::logic::*;
 use dist_lib::anonymity::anonymous_client::{AnonymousClient, CommitResult, combined_subscriber};
@@ -28,12 +28,22 @@ struct ServerConfig {
     #[clap(short = 'i', long = "id", about = "Server ID. IDs begin from 0 and must be consecutive")]
     node_id: Id,
 
+    #[clap(flatten)]
+    pub raft_server_settings: RaftServerSettings,
+
+    /// A server also contains a raft client for talking with other nodes
+    #[clap(flatten)]
+    pub raft_client_settings: RaftClientSettings,
+
 }
 
 #[derive(Clap, Clone)]
 struct ClientConfig {
     #[clap(short = 'i', long = "id", about = "Client ID. IDs begin from 0 and must be consecutive")]
-    client_id: Id
+    client_id: Id,
+
+    #[clap(flatten)]
+    pub raft_client_settings: RaftClientSettings,
 }
 
 #[derive(Clap, Clone)]
@@ -83,7 +93,7 @@ async fn run_server(config: &Config, server_cfg: &ServerConfig) -> Result<(), an
     let transport: GRPCTransport<AnonymityMessage<AsymEncrypted>> = 
         GRPCTransport::new(Some(server_cfg.node_id), grpc_config, config.timeout).await?;
     let shared_cfg = Arc::new(config.clone());
-    let mut node = Node::new(server_cfg.node_id, config.num_nodes, transport.clone());
+    let mut node = Node::new(server_cfg.node_id, config.num_nodes, transport.clone(), server_cfg.raft_server_settings.clone());
 
     let pki = Arc::new(
         PKIBuilder::new(config.num_nodes, config.num_clients)
@@ -91,7 +101,7 @@ async fn run_server(config: &Config, server_cfg: &ServerConfig) -> Result<(), an
             .build()
     );
     let _comm = NodeCommunicator::from_node(&mut node).await;
-    let sm = AnonymousLogSM::<_, _>::new(shared_cfg, pki, server_cfg.node_id, transport);
+    let sm = AnonymousLogSM::<_, _>::new(shared_cfg, pki, server_cfg.node_id, transport, server_cfg.raft_client_settings.clone());
     node.attach_state_machine(sm);
 
     node.run_loop()
@@ -105,6 +115,7 @@ fn run_client(config: &Config, client_cfg: &ClientConfig) -> Result<(), anyhow::
     let settings = Settings::with_flags(AppFlags {
         config: config.clone(),
         client_id: client_cfg.client_id,
+        raft_client_settings: client_cfg.raft_client_settings.clone(),
         logging_guard: None
     });
     gui::App::run(settings).unwrap();

@@ -1,8 +1,9 @@
-use crate::{consensus::{node, types::*}, crypto::PKISettings};
+use crate::{consensus::{node, timing::{RaftClientSettings, RaftServerSettings}, types::*}, crypto::PKISettings};
 use crate::consensus::state_machine::StateMachine;
 use crate::consensus::transport::Transport;
 use crate::consensus::client::{Client, ClientTransport};
 use crate::anonymity::secret_sharing::*;
+use crate::util::parse_phase_length;
 use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use time::Instant;
@@ -20,11 +21,6 @@ use tokio::time::{Interval, Duration};
 use std::collections::HashMap;
 use chrono::Local;
 use clap::Clap;
-
-fn parse_phase_length(src: &str) -> Result<std::time::Duration, anyhow::Error> {
-    let millis = src.parse::<u64>()?;
-    Ok(std::time::Duration::from_millis(millis))
-}
 
 
 #[derive(Debug, Clone, Clap)]
@@ -294,9 +290,9 @@ pub struct AnonymousLogSM<V: Value + Hash, CT: ClientTransport<AnonymityMessage<
 
 
 impl <V: Value + Hash, CT: ClientTransport<AnonymityMessage<V>>> AnonymousLogSM<V, CT> {
-    pub fn new(config: Arc<Config>, pki: Arc<PKISettings>, id: usize, client_transport: CT) -> AnonymousLogSM<V, CT> {
+    pub fn new(config: Arc<Config>, pki: Arc<PKISettings>, id: usize, client_transport: CT, client_settings: RaftClientSettings) -> AnonymousLogSM<V, CT> {
         assert!(id < config.num_nodes, "Invalid node ID");
-        let client = SMSender::new(id, Client::new(format!("SM-{}-cl", id), client_transport, config.num_nodes));
+        let client = SMSender::new(id, Client::new(format!("SM-{}-cl", id), client_transport, config.num_nodes, client_settings));
         let state = Phase::ClientSharing {
             last_share_at: Instant::now(),
             shares: vec![Vec::new(); config.num_channels],

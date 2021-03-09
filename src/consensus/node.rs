@@ -21,6 +21,8 @@ use async_trait::async_trait;
 use futures::TryFutureExt;
 use std::cell::RefCell;
 
+use super::timing::RaftServerSettings;
+
 
 /// Size of applied commit notification channel. Note that in case of lagging receivers(clients), they will never block
 /// the node from sending values, but they might lose some commit notifications - see https://docs.rs/tokio/0.3.5/tokio/sync/broadcast/index.html#lagging
@@ -56,6 +58,8 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
     ///    (He will move the receiver back into the node before finishing)
     #[derivative(Debug="ignore")]
     pub receiver: Option<mpsc::UnboundedReceiver<NodeCommand<V>>>,
+
+    pub settings: RaftServerSettings,
 
     /// Node ID
     pub id: Id,
@@ -122,13 +126,15 @@ pub struct Node<V: Value, T: Transport<V>, S: StateMachine<V, T>> {
 impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> Node<V, T, S> {
     pub fn new(id: usize,
                number_of_nodes: usize,
-               transport: T) -> Self {
+               transport: T,
+                settings: RaftServerSettings) -> Self {
         let state = if id == 0 { ServerState::Leader } else { ServerState::Follower};
         let (sm_result_sender, _) = broadcast::channel(BROADCAST_CHAN_SIZE);
         let (sm_publish_sender, _) = broadcast::channel(BROADCAST_CHAN_SIZE);
         Node {
             transport,
             receiver: None,
+            settings,
             id,
             leader_id: Some(0),
             other_nodes: (0 .. number_of_nodes).filter(|&cur_id| cur_id != id).collect(),
@@ -436,7 +442,8 @@ mod tests {
         let mut node = Node::<String, _, _>::new(
             2, 
             5, 
-            NoopTransport());
+            NoopTransport(),
+            RaftServerSettings::default());
         node.attach_state_machine(NoopStateMachine::default());
         assert_eq!(node.id, 2);
         assert_eq!(node.quorum_size(), 3);
@@ -459,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_ae() {
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), RaftServerSettings::default());
         node.attach_state_machine(NoopStateMachine::default());
 
         let req1 = AppendEntries {
@@ -523,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_ae_clipping() {
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), RaftServerSettings::default());
         node.attach_state_machine(NoopStateMachine::default());
         node.current_term = 2;
 
@@ -584,7 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_on_receive_mismatching_ae() {
-        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport());
+        let mut node = Node::<i32, _, _>::new(2, 5, NoopTransport(), RaftServerSettings::default());
         node.attach_state_machine(NoopStateMachine::default());
         node.current_term = 2;
 

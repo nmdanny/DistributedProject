@@ -1,4 +1,24 @@
+use std::{convert::TryInto, ops::Range};
+use anyhow::Context;
+
 use futures::Future;
+
+pub fn parse_phase_length(src: &str) -> Result<std::time::Duration, anyhow::Error> {
+    let millis = src.parse::<u64>()?;
+    Ok(std::time::Duration::from_millis(millis))
+}
+
+pub fn parse_range(src: &str) -> Result<Range<u64>, anyhow::Error> {
+    let mut parts = src.split("..").map(str::to_owned).collect::<Vec<_>>();
+    if parts.len() != 2 {
+        return Err(anyhow::anyhow!("Expected 2 parts separated by '..', got {} instead", src.len()));
+    }
+    parts[0].retain(|c| !c.is_whitespace());
+    parts[1].retain(|c| !c.is_whitespace());
+    let from = parts[0].parse::<u64>().context("from")?;
+    let to = parts[1].parse::<u64>().context("to")?;
+    Ok(from .. to)
+}
 
 /// Similar to `tokio::task::spawn_nonblocking`, but uses the rayon thread-pool instead,
 /// useful for CPU heavy computations.
@@ -42,6 +62,13 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    #[test]
+    pub fn can_parse_range() {
+        assert_eq!(parse_range("13 ..   15").unwrap(), 13 .. 15);
+        assert_eq!(parse_range("13..15").unwrap(), 13 .. 15);
+        assert_eq!(parse_range("100 .. 200").unwrap(), 100 .. 200);
+    }
 
     #[tokio::test]
     pub async fn test_spawn_cpu_works() {

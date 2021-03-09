@@ -19,11 +19,8 @@ use crate::logging::TimeOp;
 use crate::consensus::node::{Node, ServerState, UpdateCommitIndexReason};
 use crate::consensus::node_communicator::{CommandHandler, NodeCommand};
 use crate::consensus::state_machine::StateMachine;
-use crate::consensus::timing::HEARTBEAT_INTERVAL;
 use crate::consensus::transport::Transport;
 use crate::consensus::types::*;
-
-const USE_HEARTBEAT_LOOP: bool = false;
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -37,6 +34,9 @@ pub struct PeerReplicationStream<V: Value, T: Transport<V>, S: StateMachine<V, T
 
     /// Peer ID
     pub id: Id,
+
+    /// How much time between heartbeats
+    pub heartbeat_interval: Duration,
 
     /// The index of the new log entry(in the leader's log) to send to the peer
     pub next_index: usize,
@@ -130,13 +130,14 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
         // at first, assume the peer is completely synchronized, so `next_index` points to one past
         // the last element
         let node_b = node.borrow();
+        let heartbeat_interval = node_b.settings.heartbeat_interval;
         let next_index = node_b.storage.len();
         let leader_term = node_b.current_term;
         let transport = node_b.transport.clone();
         drop(node_b);
         let match_index = None;
         PeerReplicationStream {
-            node, id, next_index, match_index, tick_receiver, match_index_sender,
+            node, id, heartbeat_interval, next_index, match_index, tick_receiver, match_index_sender,
             leader_term, transport, phantom: Default::default(),
             last_ae_send: Arc::new(AtomicCell::new(Instant::now()))
         }
@@ -210,21 +211,26 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
         // can also send heartbeats), it's sole purpose is to prevent premature leader switch
         // when sending big AE entries, and this can run on a different thread rather than on the node's local set.
 
-        let leader_commit = self.node.borrow().commit_index;
-        let leader_id = self.node.borrow().id;
+        let node = self.node.borrow();
+        let leader_commit = node.commit_index;
+        let leader_id = node.id;
+        let disable_heartbeat_loop = node.settings.no_heartbeat_loop;
+        let heartbeat_interval = node.settings.heartbeat_interval;
+        drop(node);
+
         tokio::spawn(async move {
-            if !USE_HEARTBEAT_LOOP {
+            if disable_heartbeat_loop {
                 return;
             }
-            let delay = tokio::time::sleep(HEARTBEAT_INTERVAL);
+            let delay = tokio::time::sleep(heartbeat_interval);
             tokio::pin!(delay);
             loop {
                 delay.as_mut().await;
                 // in case the replication task already sent a heartbeat/message before
                 
                 let last_sent = last_ae_send.load();
-                if Instant::now() - last_sent < HEARTBEAT_INTERVAL {
-                    delay.as_mut().reset((last_sent + HEARTBEAT_INTERVAL).into());
+                if Instant::now() - last_sent < heartbeat_interval {
+                    delay.as_mut().reset((last_sent + heartbeat_interval).into());
                     continue;
                 }
                 let transport = transport.clone();
@@ -239,7 +245,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                 debug!("heartbeat send response: {:?}", res);
                 let now = Instant::now();
                 last_ae_send.store(now);
-                delay.as_mut().reset((now + HEARTBEAT_INTERVAL).into());
+                delay.as_mut().reset((now + heartbeat_interval).into());
                 match res {
                     Ok(_) => {},
                     Err(ReplicationLoopError::PeerError(_e)) => 
@@ -469,6 +475,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
 
     async fn run_loop_inner(&mut self, receiver: &mut mpsc::UnboundedReceiver<NodeCommand<V>>) -> Result<(), anyhow::Error> {
         let mut node = self.node.borrow_mut();
+        let heartbeat_interval = node.settings.heartbeat_interval;
         node.leader_id = Some(node.id);
         node.voted_for = None;
         let leader_id = node.id;
@@ -519,7 +526,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
         );
 
 
-        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let mut heartbeat_interval = tokio::time::interval(heartbeat_interval);
 
         ls.run_until(async move {
             task::spawn_local(replication_fut);

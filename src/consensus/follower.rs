@@ -29,7 +29,7 @@ pub struct FollowerState<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> {
 impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> FollowerState<'a, V, T, S> {
     /// Creates state used for a node who has just become a follower
     pub fn new(node: &'a mut Node<V, T, S>) -> Self {
-        let timeout_duration = generate_election_length();
+        let timeout_duration = generate_election_length(&node.settings);
         let sleep = tokio::time::sleep(timeout_duration);
         FollowerState {
             node,

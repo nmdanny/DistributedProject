@@ -1,4 +1,4 @@
-use crate::{anonymity::secret_sharing::*, consensus::client::EventStream, crypto::PKISettings};
+use crate::{anonymity::secret_sharing::*, consensus::{client::EventStream, timing::RaftClientSettings}, crypto::PKISettings};
 use crate::anonymity::logic::*;
 use crate::consensus::client::{ClientTransport, Client};
 use crate::consensus::types::*;
@@ -124,9 +124,10 @@ fn was_value_committed<V: Value + PartialEq>(new_round: &NewRound<V>, last_sent:
 impl <V: Value + Hash> AnonymousClient<V> {
     pub fn new<CT: ClientTransport<AnonymityMessage<V>>>(client_transport: CT, 
         config: Arc<Config>, pki: Arc<PKISettings>, id: Id,
-        mut event_recv: Pin<Box<dyn Send + Stream<Item = NewRound<V>>>>) -> Self 
+        mut event_recv: Pin<Box<dyn Send + Stream<Item = NewRound<V>>>>,
+        client_settings: RaftClientSettings) -> Self 
     {
-        let mut client = AnonymousClientInner::new(client_transport, config.clone(), pki, id);
+        let mut client = AnonymousClientInner::new(client_transport, config.clone(), pki, id, client_settings);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -252,10 +253,10 @@ impl <V: Value + Hash> AnonymousClient<V> {
 }
 
 impl <CT: ClientTransport<AnonymityMessage<V>>, V: Value + Hash> AnonymousClientInner<V, CT> {
-    fn new(client_transport: CT, config: Arc<Config>, pki: Arc<PKISettings>, client_id: Id) -> Self {
+    fn new(client_transport: CT, config: Arc<Config>, pki: Arc<PKISettings>, client_id: Id, client_settings: RaftClientSettings) -> Self {
         let client_name = format!("Client {}", client_id);
         AnonymousClientInner {
-            client: Client::new(client_name, client_transport, config.num_nodes),
+            client: Client::new(client_name, client_transport, config.num_nodes, client_settings),
             config,
             pki,
             client_id

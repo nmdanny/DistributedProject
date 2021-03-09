@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, hash::{Hash, Hasher}, ops::Sub, pin::Pin, sync::Arc};
 
-use dist_lib::{anonymity::{anonymous_client::{AnonymousClient, CommitResult, combined_subscriber}, logic::{AnonymityMessage, Config, NewRound, ReconstructionResults}, private_messaging::{PMClient, PMEvent}}, consensus::{client::{ClientTransport, EventStream}, types::{Id, RaftError}}, crypto::PKIBuilder, grpc::transport::{GRPCConfig, GRPCTransport}};
+use dist_lib::{anonymity::{anonymous_client::{AnonymousClient, CommitResult, combined_subscriber}, logic::{AnonymityMessage, Config, NewRound, ReconstructionResults}, private_messaging::{PMClient, PMEvent}}, consensus::{client::{ClientTransport, EventStream}, timing::RaftClientSettings, types::{Id, RaftError}}, crypto::PKIBuilder, grpc::transport::{GRPCConfig, GRPCTransport}};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use iced::{Application, Background, Button, Color, Column, Command, Container, Element, Font, Length, PickList, Row, Scrollable, Subscription, Text, TextInput, button, executor, keyboard::Event, pick_list, scrollable};
 use iced::text_input;
@@ -224,6 +224,7 @@ impl <H: Hasher, I, T: 'static, S: 'static + Send + Stream<Item = T>> iced_futur
 
 pub struct AppFlags {
     pub config: Config,
+    pub raft_client_settings: RaftClientSettings,
     pub client_id: usize,
     pub logging_guard: Option<dist_lib::logging::Guards>
 }
@@ -275,7 +276,7 @@ impl Application for App {
             })).await;
 
             let recv = combined_subscriber(sm_events.into_iter());
-            let client = PMClient::new(transport, shared_cfg, Arc::new(pki), flags.client_id, recv);
+            let client = PMClient::new(transport, shared_cfg, Arc::new(pki), flags.client_id, recv, flags.raft_client_settings);
             info!("PM client created");
             AppMessage::InitComplete(client, logging_guard)
         });
