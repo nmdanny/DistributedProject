@@ -5,7 +5,6 @@ use tracing_futures::WithSubscriber;
 use tracing_subscriber::{Layer, Registry, layer::SubscriberExt, fmt};
 use tracing_flame::FlameLayer;
 use std::path::{Path, PathBuf};
-use chrono::prelude::*;
 use std::io::Write;
 use prost::Message;
 use anyhow::Context;
@@ -18,13 +17,13 @@ pub type Guards = Vec<Box<dyn Any + Send>>;
 #[must_use]
 pub fn setup_logging() -> Result<Guards, anyhow::Error> {
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    let time = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-    let name = format!("dist_lib_{}", time);
+    let name = "dist_lib".to_owned();
     let (tracer, uninstall) = opentelemetry_jaeger::new_pipeline()
         .with_service_name(&name)
         .install()
         .expect("Couldn't install jaeger telemetry");
 
+    std::fs::create_dir_all("traces").expect("Couldn't create traces folder");
     let (flame, flame_guard) = FlameLayer::with_file(PathBuf::from("traces").join(name)).expect("Couldn't install FlameLayer");
 
     #[cfg(not(test))]
@@ -44,7 +43,7 @@ pub fn setup_logging() -> Result<Guards, anyhow::Error> {
             // .add_directive("dist_lib::anonymity::tests=info".parse().unwrap())
             .add_directive("raft=info".parse().unwrap())
             .add_directive("runner=debug".parse().unwrap())
-            .add_directive("dist_lib::consensus=trace".parse().unwrap())
+            .add_directive("dist_lib::consensus=info".parse().unwrap())
             // .add_directive("dist_lib::consensus[{important}]=info".parse().unwrap())
             // .add_directive("dist_lib::grpc[{trans}]=debug".parse().unwrap())
             .add_directive("dist_lib::anonymity=info".parse().unwrap())
@@ -108,6 +107,8 @@ pub fn profiler<P: AsRef<Path>>(my_path: P, sample_freq: std::os::raw::c_int) ->
         Profiler { profiler, path: my_path }
     }
     #[cfg(not(unix))] {
+        let _ = my_path;
+        let _ = sample_freq;
         struct Noop();
         impl Drop for Noop {
             fn drop(&mut self) {}

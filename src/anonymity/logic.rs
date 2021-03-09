@@ -535,7 +535,7 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
     #[instrument]
     fn apply(&mut self, entry: &AnonymityMessage<V>) -> () {
         let start = std::time::Instant::now();
-        info!("Begin handling AnonymityMessage");
+        debug!("Begin handling AnonymityMessage");
         match entry {
             AnonymityMessage::ClientShare { shares, client_id, round} => { self.handle_client_share(client_id.to_owned(), shares, *round) },
             AnonymityMessage::ServerReconstructShare { channel_shares, node_id, round} => {  self.on_receive_reconstruct_share(channel_shares.as_slice(), *node_id, *round) }
@@ -543,7 +543,7 @@ impl <V: Value + Hash, T: Transport<AnonymityMessage<V>>, C: ClientTransport<Ano
             AnonymityMessage::ServerBeginReconstruct { initiator, round } => { self.begin_reconstructing(*initiator, *round) }
         }
         let delta = std::time::Instant::now() - start;
-        info!("Finish handling AnonymityMessage in {} ms", delta.as_millis());
+        debug!("Finish handling AnonymityMessage in {} ms", delta.as_millis());
     }
 
     type HookEvent = tokio::time::Instant;

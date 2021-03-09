@@ -126,7 +126,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
             leader: 0,
             num_nodes,
             last_commit_index: None,
-            max_retries: 100,
+            max_retries: 10000,
             retry_delay_ms: Uniform::from(CLIENT_RETRY_DELAY_RANGE),
             phantom: Default::default()
         }
@@ -186,7 +186,7 @@ impl <V: Value + PartialEq, T: ClientTransport<V>> Client<T, V>
                     self.last_commit_index = None.max(commit_index);
                 }
                 Err(RaftError::NetworkError(e)) => {
-                    error!(net_err=true, ">>> client encountered networking error: {}", e);
+                    trace!(net_err=true, ">>> client encountered networking error: {}", e);
                     self.set_leader(None);
                 }
                 Err(e) =>

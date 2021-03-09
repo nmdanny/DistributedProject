@@ -238,7 +238,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
                 match res {
                     Ok(_) => {},
                     Err(ReplicationLoopError::PeerError(_e)) => 
-                        error!(trans=true, net_err=true, "Received IO error during heartbeat stream for {}, will try again later: {:?}",
+                        trace!(trans=true, net_err=true, "Received IO error during heartbeat stream for {}, will try again later: {:?}",
                                id, _e),
                     Err(ReplicationLoopError::StaleLeaderError(stale)) => {
                         let _ = stale_sender.send(stale).await;
@@ -256,7 +256,7 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
             match self.try_replication().await {
                 Ok(_) => {},
                 Err(ReplicationLoopError::PeerError(e)) => {
-                    error!(trans=true, net_err=true, "Received IO error during replication stream for {}, will try again later: {:?}",
+                    trace!(trans=true, net_err=true, "Received IO error during replication stream for {}, will try again later: {:?}",
                            self.id, e);
                 },
                 Err(ReplicationLoopError::StaleLeaderError(stale)) => {

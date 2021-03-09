@@ -20,14 +20,15 @@ pub fn spawn_on_new_runtime<F>(f: F) -> impl Future<Output = F::Output>
     where F: Future + Send + 'static, F::Output: Send + 'static
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
+    std::thread::Builder::new().name("new_runtime-scheduler".to_owned()).spawn(move || {
         let res = tokio::runtime::Builder::new_current_thread()
+            .thread_name("new_runtime-tokio-runtime-worker")
             .enable_all()
             .build()
             .unwrap()
             .block_on(f);
         let _ = tx.send(res);
-    });
+    }).expect("Couldn't spawn new thread");
     async move {
         rx.await.expect("tokio runtime panicked")
     }
