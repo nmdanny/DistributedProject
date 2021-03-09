@@ -11,10 +11,13 @@ This project was tested on Windows & Linux, compiled via Rust 1.50 and running t
 
 1. If you don't have Rust, install the latest stable version. The recommended way of installing Rust is via [Rustup](https://rustup.rs/)
 
-2. Compile the project by running `cargo build`
+2. Compile the project by running `cargo build --release` 
+   Note, there are major performance differences between the debug and release builds, and this effect is multiplied
+   when you run multiple instances of a server. Running in debug build requires higher timeouts, otherwise there'd be no progress
+   at all (servers wouldn't be able to process shares fast enough before having to proceed to the next round)
 
 3. Generating keys & certificates:
-   - Run `cargo run --bin cert_gen --num_servers 5 --num_clients 50` to generate
+   - Run `cargo run --release --bin cert_gen --num_servers 5 --num_clients 50` to generate
      public & private key-pairs for 5 servers and 50 clients   
      
    - For TLS, run 
@@ -32,7 +35,7 @@ This project was tested on Windows & Linux, compiled via Rust 1.50 and running t
      Alternatively, you can use the `--insecure` flag in the runner & run scripts(see below) to disable TLS.
 
 4. To run either a client or a server, see documentation under
-   `cargo run --bin runner -- --help`
+   `cargo run --release --bin runner -- --help`
 
    (All arguments to the chat client/server appear after `runner -- `, the arguments beore that belong to the `cargo` program)
 
@@ -41,7 +44,6 @@ This project was tested on Windows & Linux, compiled via Rust 1.50 and running t
    - On Windows,  [Window Terminal](https://www.microsoft.com/en-us/p/windows-terminal/9n0dx20hk701) is required, simply compile the project and then run `./start_servers.ps1` from the project root
 
    - On Linux, [tmux](https://github.com/tmux/tmux/wiki/Installing) is required, simply compile the project and then run `./start_servers.sh` from the project root.
-
 
 
 ## Documents
