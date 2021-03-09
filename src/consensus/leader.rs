@@ -23,6 +23,8 @@ use crate::consensus::timing::HEARTBEAT_INTERVAL;
 use crate::consensus::transport::Transport;
 use crate::consensus::types::*;
 
+const USE_HEARTBEAT_LOOP: bool = false;
+
 #[derive(Derivative)]
 #[derivative(Debug)]
 /// Contains state used to replicate the leader's data to a peer.
@@ -211,6 +213,9 @@ impl <V: Value, T: Transport<V>, S: StateMachine<V, T>> PeerReplicationStream<V,
         let leader_commit = self.node.borrow().commit_index;
         let leader_id = self.node.borrow().id;
         tokio::spawn(async move {
+            if !USE_HEARTBEAT_LOOP {
+                return;
+            }
             let delay = tokio::time::sleep(HEARTBEAT_INTERVAL);
             tokio::pin!(delay);
             loop {
