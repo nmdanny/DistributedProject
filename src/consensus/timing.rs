@@ -10,7 +10,7 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 pub const CLIENT_RETRY_DELAY_RANGE: std::ops::Range<u64> = 100 .. 200;
 
 /// Range of uniformly generated times(milliseconds) for an election timeout
-pub const ELECTION_TIMEOUT_MS_RANGE: Range<u64> = 1500 .. 3000;
+pub const ELECTION_TIMEOUT_MS_RANGE: Range<u64> = 300 .. 700;
 
 
 /// Generates an election timeout - time without heartbeat/vote until a follower becomes
