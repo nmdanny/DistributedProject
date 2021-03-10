@@ -39,18 +39,7 @@ pub fn setup_logging() -> Result<Guards, anyhow::Error> {
 
     let otl = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-            // .add_directive("dist_lib::anonymity::tests=info".parse().unwrap())
-            .add_directive("raft=info".parse().unwrap())
-            .add_directive("runner=debug".parse().unwrap())
-            .add_directive("dist_lib::consensus=info".parse().unwrap())
-            // .add_directive("dist_lib::consensus[{important}]=info".parse().unwrap())
-            // .add_directive("dist_lib::grpc[{trans}]=debug".parse().unwrap())
-            .add_directive("dist_lib::anonymity=info".parse().unwrap())
-            .add_directive("dist_lib::grpc=error".parse().unwrap());
-            // .add_directive("dist_lib[{vote_granted_too_late}]=off".parse()?)
-            // .add_directive("dist_lib[{net_err}]=off".parse()?)
-
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env();
 
     let fmt_layer = fmt::Layer::new()
         .with_writer(appender)
@@ -66,8 +55,13 @@ pub fn setup_logging() -> Result<Guards, anyhow::Error> {
         .with(fmt_layer);
 
     tracing::subscriber::set_global_default(subscriber)
-        .expect("Couldn't set up default tracing subscriber");
-    color_eyre::install().unwrap();
+        .unwrap_or_else(|e| {
+            error!("Error setting the global tracing subscriber: {:?}", e);
+            eprintln!("Error setting the global tracing subscriber: {:?}", e);
+        });
+    color_eyre::install().unwrap_or_else(|e| {
+        error!("Couldn't set up color_eyre: {:?}", e);
+    });
 
     Ok(drops)
 }

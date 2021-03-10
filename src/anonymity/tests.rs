@@ -240,7 +240,7 @@ const VALS_TO_COMMIT: u64 = 10;
 #[tokio::test]
 async fn many_rounds() {
     let ls = tokio::task::LocalSet::new();
-    // let _guard = setup_logging().unwrap();
+    let _guard = setup_logging().unwrap();
     let _profiler = profiler("many_rounds", 100);
     ls.run_until(async move {
         let mut scenario = setup_test_scenario::<String>(Config {
@@ -302,7 +302,7 @@ async fn many_rounds() {
 #[tokio::test]
 async fn client_crash_only() {
     let ls = tokio::task::LocalSet::new();
-    // let _guard = setup_logging().unwrap();
+    let _guard = setup_logging().unwrap();
     ls.run_until(async move {
         let mut scenario = setup_test_scenario::<u64>(Config {
             num_nodes: 3,
@@ -374,7 +374,7 @@ async fn client_omission_server_crash() {
         scenario.adversary.set_server_omission_chance(0, 1.0).await;
 
 
-        let duration = tokio::time::Duration::from_secs(5);
+        let duration = tokio::time::Duration::from_secs(8);
 
         let handle_a = tokio::time::timeout(duration, task::spawn(async move {
             let _res = loop {

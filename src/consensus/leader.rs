@@ -314,7 +314,7 @@ pub struct LeaderState<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>>{
 
     pub term: usize,
 
-    #[derivative(Debug="ignore")]
+    // #[derivative(Debug="ignore")]
     pub node: Rc<RefCell<Node<V, T, S>>>,
 
     #[derivative(Debug="ignore")]
@@ -326,6 +326,7 @@ pub struct LeaderState<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>>{
     /// To be passed to all peer replication streams
     pub replicate_receiver: watch::Receiver<()>,
 
+    #[derivative(Debug="ignore")]
     /// Used to resolve client write requests
     pub pending_writes: BTreeMap<usize, PendingWriteRequest<V>>,
 
@@ -360,7 +361,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
 
 
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
         // let mut node = self.node.borrow_mut();
         let mut receiver = self.node.borrow_mut().receiver
@@ -596,7 +597,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
     pub fn handle_client_write_command(&mut self, req: ClientWriteRequest<V>,
                                        tx: oneshot::Sender<Result<ClientWriteResponse<V>,RaftError>>) {
         let mut node = self.node.borrow_mut();
-        info!("Received request {:?}, ", req);
+        debug!("Received request {:?}, ", req);
 
         let term = node.current_term;
         let entry_index = node.storage.push(LogEntry {
