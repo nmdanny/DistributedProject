@@ -270,7 +270,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         let new_entries = self.storage.get_from_to(
             new_entries_from, new_entries_to_inc + 1);
 
-        debug!(old=?old_commit_index, new=?self.commit_index, new_entries=?new_entries, reason=?reason, "Updated commit index");
+        trace!(old=?old_commit_index, new=?self.commit_index, new_entries=?new_entries, reason=?reason, "Updated commit index");
 
         for (entry, index) in new_entries.iter().zip(new_entries_from ..= new_entries_to_inc) {
             self.commit_sender
@@ -366,7 +366,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
 
-        debug!("I voted for {}", req.candidate_id);
+        debug!("I voted for {} at term {}", req.candidate_id, req.term);
         self.voted_for = Some(req.candidate_id);
         return Ok(RequestVoteResponse::vote_yes(self.current_term));
     }
