@@ -91,16 +91,23 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> fo
     }
 
     fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
+        let mut reset_timer = false;
+
+        // Raft spec dictates that upon seeing an RPC with a higher term, we should "become a
+        // follower". Since we're already a follower there won't really be a state change in our implementation,
+        // so we'll just update the timer. 
+        reset_timer |= req.term > self.node.current_term;
+
         // use default handling of request vote
         let res = self.node.on_receive_request_vote(&req);
 
-        match res.as_ref() {
-            Ok(res) if res.vote_granted => {
-                // if we granted a vote, delay switch to candidate
-                self.update_timer();
-            }
-            _ => {}
+
+        reset_timer |= res.as_ref().map(|res| res.vote_granted).unwrap_or(false);
+
+        if reset_timer {
+            self.update_timer()
         }
+
         return res;
     }
 
