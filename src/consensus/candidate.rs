@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use tokio::time::Duration;
 use crate::consensus::types::*;
 use crate::consensus::state_machine::{StateMachine, ForceApply};
@@ -15,52 +17,44 @@ use crate::consensus::timing::generate_election_length;
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct ElectionState {
-    /// NOTE: it is assumed that Raft RPC messages cannot be duplicated, in other words,
-    /// since each node only votes once, we can not have more than one response for every nodee
-    /// (We can assume reliability by our network protocol, e.g, unique message ID)
-    pub votes: Vec<RequestVoteResponse>,
-
-    pub yes: usize,
-    pub no: usize,
+    pub yes_votes: HashSet<usize>,
+    pub no_votes: HashSet<usize>,
 
     pub quorum_size: usize,
     pub term: usize,
 
     #[derivative(Debug="ignore")]
-    pub vote_receiver: UnboundedReceiver<RequestVoteResponse>
+    pub vote_receiver: UnboundedReceiver<(RequestVoteResponse, Id)>
 }
 
 impl ElectionState {
-    pub fn new(quorum_size: usize, term: usize,
-               vote_receiver: UnboundedReceiver<RequestVoteResponse>) -> Self {
-        // we always vote for ourself
-        let votes = vec![
-            RequestVoteResponse {
-                term, vote_granted: true
-            }
-        ];
+    pub fn new(my_id: Id, quorum_size: usize, term: usize,
+               vote_receiver: UnboundedReceiver<(RequestVoteResponse, Id)>) -> Self {
+        let mut yes_votes = HashSet::new();
+        let no_votes = HashSet::new();
+        // A candidate always votes for himself
+        yes_votes.insert(my_id);
         ElectionState {
-            votes, yes: 1, no: 0, quorum_size, term, vote_receiver
+            yes_votes, no_votes, quorum_size, term, vote_receiver
         }
     }
 
     /// Counts the given vote(if it is for the current election)
-    pub fn count_vote(&mut self, vote: RequestVoteResponse) {
+    pub fn count_vote(&mut self, vote: RequestVoteResponse, from: Id) {
         if vote.term != self.term {
             error!("Got vote for another term, my term: {}, vote term: {}", self.term, vote.term);
             return;
         }
         if vote.vote_granted {
-            self.yes += 1;
+            self.yes_votes.insert(from);
         } else {
-            self.no += 1;
+            self.no_votes.insert(from);
         }
-        self.votes.push(vote);
     }
 
     /// Have we won the elections
     pub fn won(&self) -> bool {
-        return self.yes >= self.quorum_size
+        return self.yes_votes.len() >= self.quorum_size
     }
 }
 
@@ -81,7 +75,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
     }
 
     /// Starts a new election
-    pub async fn start_election(&mut self) -> Result<ElectionState, RaftError>{
+    pub fn start_election(&mut self) -> Result<ElectionState, RaftError>{
         self.node.leader_id = None;
         self.node.current_term += 1;
         self.node.voted_for = Some(self.node.id);
@@ -102,13 +96,11 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
             tokio::spawn(async move {
                 trace!("sending vote request to {}", node_id);
                 let res = transport.send_request_vote(node_id, req).await;
-                match &res {
+                match res {
                     Ok(res) => {
                         trace!("got vote response {:?}", res);
-                        tx.send(res.clone()).unwrap_or_else(|e| {
-                            // TODO this isn't really an error, just the result of delays
-                            trace!(vote_granted_too_late=true, "Received vote response {:?} too late (loop has dropped receiver, send error: {:?})", res, e);
-                        });
+                        // rx will be dropped if node state changes, not an error.
+                        let _ = tx.send((res, node_id));
                     },
                     Err(RaftError::NetworkError(e)) | Err(RaftError::TimeoutError(e)) => {
                         trace!(net_err=true, "Network/timeout error when sending vote request to {}: {}", node_id, e);
@@ -119,7 +111,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                 }
             }.instrument(trace_span!("vote request", to=node_id)));
         }
-        Ok(ElectionState::new(self.node.quorum_size(), self.node.current_term, rx))
+        Ok(ElectionState::new(self.node.id, self.node.quorum_size(), self.node.current_term, rx))
     }
 
     #[instrument(skip(self))]
@@ -138,7 +130,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
 
             elections_in_a_row += 1;
             // start an election, updating node state and sending vote requests
-            let mut election_state = self.start_election().await?;
+            let mut election_state = self.start_election()?;
 
             let duration = generate_election_length(&self.node.settings);
             let election_end = tokio::time::Instant::now() + duration;
@@ -157,23 +149,23 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CandidateState<'a, V
                         // election timed out, start another one
                         info!("elections of term {} timed out(got: {} yes, {} no), so far ran {} elections in a row",
                                self.node.current_term,
-                               election_state.yes, election_state.no, elections_in_a_row);
+                               election_state.yes_votes.len(), election_state.no_votes.len(), elections_in_a_row);
                         break;
                     },
-                    Some(vote) = election_state.vote_receiver.recv() => {
+                    Some((vote, from)) = election_state.vote_receiver.recv() => {
                         // If we get vote from a node at a later term, we'll convert
                         // to follower. (§5.1)
                         if self.node.try_update_term(vote.term, None) {
                             assert!(!vote.vote_granted);
                             return Ok(());
                         }
-                        election_state.count_vote(vote);
+                        election_state.count_vote(vote, from);
                         if election_state.won() {
                             info!("won election after {} elections in a row, results: {:?}", 
                                 elections_in_a_row, election_state);
                             self.node.change_state(ServerState::Leader,
                                 ChangeStateReason::WonElection {
-                                    yes: election_state.yes, no: election_state.no
+                                    yes: election_state.yes_votes.len(), no: election_state.no_votes.len()
                                 });
                             return Ok(())
                         }
