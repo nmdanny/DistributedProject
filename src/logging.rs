@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Once};
+use std::{any::Any, str::FromStr, sync::Once};
 
 use tracing_error::ErrorLayer;
 use tracing_futures::WithSubscriber;
@@ -16,6 +16,22 @@ pub type Guards = Vec<Box<dyn Any + Send>>;
 
 #[must_use]
 pub fn setup_logging() -> Result<Guards, anyhow::Error> {
+
+    #[cfg(test)]
+    {
+        if std::env::var("DIST_LIB_TEST_LOGGING").map(|s| s == "on").unwrap_or(false) {
+            println!("Enabling tracing for test");
+        } else {
+            println!("Disabling tracing for test");
+            let subscriber = Registry::default()
+                .with(ErrorLayer::default())
+                .with(tracing_subscriber::EnvFilter::from_env(""));
+
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            return Ok(Vec::new())
+        }
+    }
+
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
     let name = "dist_lib".to_owned();
     let (tracer, uninstall) = opentelemetry_jaeger::new_pipeline()
