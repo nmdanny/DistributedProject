@@ -189,9 +189,10 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> CommandHandler<V> fo
     }
 
     fn handle_request_vote(&mut self, req: RequestVote) -> Result<RequestVoteResponse, RaftError> {
+        let my_term = self.node.current_term;
         let res = self.node.on_receive_request_vote(&req);
         if let Ok(res) = &res {
-            assert!(!res.vote_granted, "A candidate will never grant votes to other candidates");
+            assert!(!(res.vote_granted && req.term == my_term), "A candidate will never grant votes to other candidates from the same term as his");
         }
         return res;
     }
