@@ -344,7 +344,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
         // 1. Our term is more updated
         if self.current_term > req.term {
             debug!(cur_term=self.current_term, vote_term=req.term,
-                   "My term is more up-to-date, ignoring vote request");
+                   "My term is more up-to-date, ignoring vote request from {}", req.candidate_id);
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
 
@@ -354,19 +354,19 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
 
         if self.voted_for.is_some() && self.voted_for != Some(req.candidate_id) {
             debug!(cur_vote=self.voted_for.unwrap(),
-                  "I already voted for someone else, ignoring vote request",
+                  "I already voted for someone else(for {}), ignoring vote request from {}", self.voted_for.unwrap(), req.candidate_id
                  );
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
 
         if self.storage.last_log_index_term() > req.last_log_index_term {
             debug!(my_index_term=?self.storage.last_log_index_term(), candidate_index_term=?req.last_log_index_term,
-                "My log is more up to date than the candidate's log, rejecting vote"
+                "My log is more up to date than the candidate's log, rejecting vote request from {}", req.candidate_id
             );
             return Ok(RequestVoteResponse::vote_no(self.current_term));
         }
 
-        debug!("I voted for {} at term {}", req.candidate_id, req.term);
+        debug!("I decided to vote for {} at term {}", req.candidate_id, req.term);
         self.voted_for = Some(req.candidate_id);
         return Ok(RequestVoteResponse::vote_yes(self.current_term));
     }
