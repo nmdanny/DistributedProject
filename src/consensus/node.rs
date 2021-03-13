@@ -305,17 +305,20 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
                                                          for the current term, and there are no other leaders for said term");
             if self.state == ServerState::Follower {
                 if self.leader_id.is_none() {
-                    self.leader_id = leader;
                     info!("Follower at term {} is now aware of leader for said term: {}", term, leader.unwrap());
                 } else {
                     assert!(self.leader_id == leader, "A follower cannot see an AE whose leader is different from the \
                                                        current leader for said term");
                 }
+
+                self.leader_id = leader;
+                self.voted_for = leader;
                 return false;
             }
 
             if self.state == ServerState::Candidate {
                 self.leader_id = leader;
+                self.voted_for = leader;
                 self.change_state(ServerState::Follower, ChangeStateReason::SomeoneElseWon {
                     term, leader: leader.unwrap()
                 });
@@ -333,6 +336,7 @@ impl <V: Value, T: std::fmt::Debug + Transport<V>, S: StateMachine<V, T>> Node<V
             });
             self.current_term = term;
             self.leader_id = leader;
+            self.voted_for = leader;
             return true;
         }
         return false;

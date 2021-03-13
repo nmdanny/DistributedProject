@@ -478,7 +478,7 @@ impl<'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> LeaderState<'a, V, T,
         let mut node = self.node.borrow_mut();
         let heartbeat_interval = node.settings.heartbeat_interval;
         node.leader_id = Some(node.id);
-        node.voted_for = None;
+        node.voted_for = Some(node.id);
         let leader_id = node.id;
         let leader_term = node.current_term;
 

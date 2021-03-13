@@ -45,7 +45,7 @@ impl <'a, V: Value, T: Transport<V>, S: StateMachine<V, T>> FollowerState<'a, V,
 
     #[instrument]
     pub async fn run_loop(mut self) -> Result<(), anyhow::Error> {
-        self.node.voted_for = None;
+        self.node.voted_for = self.node.leader_id;
 
         info!("Became follower, timeout duration(no heartbeats/vote) is {:?}", self.timeout_duration);
 
