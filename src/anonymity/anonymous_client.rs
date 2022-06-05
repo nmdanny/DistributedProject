@@ -225,7 +225,7 @@ impl <V: Value + Hash> AnonymousClient<V> {
     }
 
 
-    #[instrument]
+    #[instrument(skip(self, value))]
     pub fn send_anonymously(&self, value: V) -> impl Future<Output = Result<CommitResult, anyhow::Error>> {
         let (tx, rx) = oneshot::channel();
         self.send_anonym_queue.send((value, tx)).expect("AnonymousClient send receiver dropped early");
