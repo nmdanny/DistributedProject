@@ -1,14 +1,16 @@
-use clap::Clap;
+use clap::Parser;
 use dist_lib::crypto::{KeyType, Peer, path_for_key};
 use sodiumoxide::crypto::box_::gen_keypair;
 
-#[derive(Clap, Clone)]
+#[derive(Parser, Clone)]
 struct CLI {
-    
-    #[clap(short = 's', long = "num_servers", about = "Number of servers to generate certs for")]
+
+    /// Number of servers to generate certs for
+    #[clap(short = 's', long = "num_servers")]
     pub num_servers: usize,
 
-    #[clap(short = 'c', long = "num_clients", about = "Number of clients to generate certs for")]
+    /// Number of clients to generate certs for
+    #[clap(short = 'c', long = "num_clients")]
     pub num_clients: usize,
 }
 

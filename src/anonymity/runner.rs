@@ -17,15 +17,16 @@ use gui::AppFlags;
 use iced::{Application, Settings};
 use rand::{distributions::{Standard, Uniform}, prelude::Distribution};
 use tracing_futures::Instrument;
-use clap::Clap;
+use clap::Parser;
 use std::sync::Arc;
 
 mod gui;
 
 
-#[derive(Clap, Clone)]
+#[derive(Parser, Clone)]
 struct ServerConfig {
-    #[clap(short = 'i', long = "id", about = "Server ID. IDs begin from 0 and must be consecutive")]
+    /// Server ID. IDs begin from 0 and must be consecutive
+    #[clap(short = 'i', long = "id")]
     node_id: Id,
 
     #[clap(flatten)]
@@ -37,30 +38,34 @@ struct ServerConfig {
 
 }
 
-#[derive(Clap, Clone)]
+#[derive(Parser, Clone)]
 struct ClientConfig {
-    #[clap(short = 'i', long = "id", about = "Client ID. IDs begin from 0 and must be consecutive")]
+    /// Client ID. IDs begin from 0 and must be consecutive
+    #[clap(short = 'i', long = "id")]
     client_id: Id,
 
     #[clap(flatten)]
     pub raft_client_settings: RaftClientSettings,
 }
 
-#[derive(Clap, Clone)]
+#[derive(Parser, Clone)]
 enum Mode {
-    #[clap(about = "Server mode")]
+    /// Server mode
+    #[clap()]
     Server(ServerConfig),
 
-    #[clap(about = "Client mode")]
+    /// Client mode
+    #[clap()]
     Client(ClientConfig)
 }
 
-#[derive(Clap, Clone)]
+#[derive(Parser, Clone)]
 struct CLIConfig {
     #[clap(flatten)]
     config: Config,
 
-    #[clap(subcommand, about = "In which mode to run (server/client)")]
+    /// In which mode to run (server/client)
+    #[clap(subcommand)]
     mode: Mode
 }
 

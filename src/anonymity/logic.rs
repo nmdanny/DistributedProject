@@ -20,33 +20,41 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Interval, Duration};
 use std::collections::HashMap;
 use chrono::Local;
-use clap::Clap;
+use clap::Parser;
 
 
-#[derive(Debug, Clone, Clap)]
+#[derive(Debug, Clone, Parser)]
 /// Configuration used for anonymous message sharing
 pub struct Config {
-    #[clap(short = 's', long = "num_servers", about = "Number of servers", default_value = "5")]
+    /// Number of servers
+    #[clap(short = 's', long = "num_servers", default_value = "5")]
     pub num_nodes: usize,
 
-    #[clap(short = 'c', long = "num_clients", about = "Number of clients", default_value = "100")]
+    /// Number of clients
+    #[clap(short = 'c', long = "num_clients", default_value = "100")]
     pub num_clients: usize,
 
-    #[clap(short = 't', long = "threshold", about = "Minimal number of shares needed to recover a secret", default_value = "51")]
+    /// Minimal number of shares needed to recover a secret
+    #[clap(short = 't', long = "threshold", default_value = "51")]
     pub threshold: usize,
 
-    #[clap(short = 'h', long = "num_channels", about = "Number of channels. Should be a multiple of the number of clients ", default_value = "300")]
+    /// Number of channels. Should be a multiple of the number of clients
+    #[clap(short = 'h', long = "num_channels", default_value = "300")]
     pub num_channels: usize,
 
-    #[clap(short='l', long = "phase_length", about = "Length of a phase(share/recover) in miliseconds", 
+    /// Length of a phase(share/recover) in milliseconds
+    #[clap(short='l', long = "phase_length",
            parse(try_from_str = parse_phase_length), default_value = "1000")]
     pub phase_length: std::time::Duration,
 
-    #[clap(short='r', long = "timeout", about = "Timeout duration of Raft client for comitting a single entry to the state machine. Also timeout of transport(client/server)", 
+    /// Timeout duration of Raft client for committing a single entry to the state machine.
+    /// Also timeout of transport(client/server)
+    #[clap(short='r', long = "timeout",
            parse(try_from_str = parse_phase_length), default_value = "3000")]
     pub timeout: std::time::Duration,
 
-    #[clap(long = "insecure", about = "If enabled, disables TLS")]
+    /// If enabled, disables TLS
+    #[clap(long = "insecure")]
     pub insecure: bool
 }
 
